@@ -1,0 +1,8 @@
+pysc2
+absl-py
+numpy
+protobuf<=3.20
+sc2reader
+torch
+requests
+tqdm

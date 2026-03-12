@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+
+# Project Specific
+replays/
+*.log
+*.zip
+*.pt
+processed/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Rust & Data Dumps
+target/
+**/*.rs.bk
+rustup-init.exe
+replay_dump/
+data/

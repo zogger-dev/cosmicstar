@@ -1,0 +1,22 @@
+{
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.venv": true,
+        "**/build": true,
+        "**/dist": true,
+        "**/*.egg-info": true,
+        "**/.pytest_cache": true,
+        "**/.ipynb_checkpoints": true,
+        "**/.git": true
+    },
+    "python.analysis.exclude": [
+        "**/__pycache__",
+        "**/.venv"
+    ],
+    "search.exclude": {
+        "**/__pycache__": true,
+        "**/.venv": true,
+        "**/build": true,
+        "**/dist": true
+    }
+}

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cosmicstar"
+version = "0.1.0"
+description = "StarCraft II AlphaStar Implementation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pysc2",
+    "absl-py",
+    "numpy",
+    "sc2reader",
+    "torch",
+    "jax",
+    "flax",
+    "requests",
+    "tqdm",
+    "s2protocol",
+    "mpyq"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
