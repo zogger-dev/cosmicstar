@@ -18,5 +18,10 @@
         "**/.venv": true,
         "**/build": true,
         "**/dist": true
+    },
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter"
     }
 }

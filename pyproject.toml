@@ -9,17 +9,18 @@ description = "StarCraft II AlphaStar Implementation"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "pysc2",
     "absl-py",
+    "black",
+    "flax",
+    "jax",
+    "mpyq",
     "numpy",
+    "pysc2",
+    "requests",
+    "s2protocol",
     "sc2reader",
     "torch",
-    "jax",
-    "flax",
-    "requests",
     "tqdm",
-    "s2protocol",
-    "mpyq"
 ]
 
 [tool.setuptools.packages.find]

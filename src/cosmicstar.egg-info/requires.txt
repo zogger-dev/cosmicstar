@@ -1,0 +1,12 @@
+absl-py
+black
+flax
+jax
+mpyq
+numpy
+pysc2
+requests
+s2protocol
+sc2reader
+torch
+tqdm
