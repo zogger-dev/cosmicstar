@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 @dataclass
@@ -15,6 +15,6 @@ class ReplayConfig:
     replay_path: str
     map_data_path: Optional[str] = None  # Path to the local map file if needed
     step_mul: int = 8  # Game loops per step
-    interface: InterfaceConfig = InterfaceConfig()
+    interface: InterfaceConfig = field(default_factory=InterfaceConfig)
     disable_fog: bool = False
     observed_player_id: Optional[int] = None  # If None, will try to detect

@@ -1,0 +1,32 @@
+# 2v2 gasless 15/15/15 roach build with all 4 queens on time (2nd pair as the 1st pair pops).
+# Found with scripts/bo_search.py (stages G-H, 2026-10-14, patch 5.0.17); checked on all 4
+# spawns of Reclamation LE and New Bed of Chaos LE: 6 roaches out 3:56-4:08, 40-47 drones at 4:00.
+# - queens 1+2 started together (wait for 350): costs nothing measurable, and the injects then
+#   pop in sync by themselves for the rest of the game
+# - overlords 27/28 from the main (26/27 is equivalent; a single overlord adds ~7 s supply block)
+# - both gases at 2:38 (main + natural), the next 6 drones rallied to them
+# - warren asked for at 2:48; it starts ~2:50 once the 2nd pair of queens is paid for
+# - roaches one by one as gas/minerals allow (3:30-3:39); larva waits ~9-13 s for resources
+#   between roaches, but no hatchery sits at 3 larva for more than ~3 s
+# - 3rd hatch last, ~3:50-3:58
+14 extractor_trick
+15 hatch natural
+-  default main
+14 extractor_trick
+15 overlord
+15 pool
+@natural_soon transfer 4 main natural
+-  default fill
+& @2:38 extractor main
+& @2:38 extractor natural
+& @2:38 rally gas:main x3
+& @2:38 rally gas:natural x3
+& @2:48 roach_warren
+& @warren roaches 6 asap
+& @roaches hatch third
+@pool queens main natural
+27 overlord main
+28 overlord main
+@queen:main queen main
+@queen:natural queen natural
+-  auto_overlords

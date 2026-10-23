@@ -1,0 +1,37 @@
+# 2v2 gasless 15 hatch / 15 overlord / 15 pool (double extractor trick) into
+# 6 roaches popping before 3:55 (hellion timing), found with scripts/bo_search.py
+# (stages A-E, Reclamation LE + New Bed of Chaos LE). Rules it satisfies: no larva
+# held > 5 s, no hatchery sitting at 3 larva while waiting for the roaches.
+#
+# Median over all 4 spawns of both maps (2026-10-14, patch 5.0.17):
+#   0:10 extractor trick 1, 0:35 hatch, 0:36 extractor trick 2, 0:46 overlord, 1:01 pool,
+#   1:38 send 4 drones to the natural, 1:46 natural done, 1:48 pool done -> queens 1:48 / 1:50,
+#   1:58 overlord (26/28), 2:08 overlord (27/28), 2:23 3rd queen (main), 2:28 both extractors,
+#   2:40 overlord, 2:42 roach warren, 2:42-3:05 six gas drones, 2:52/2:55 injects pop,
+#   3:22 warren done, 3:24-3:31 six roaches started (4 off the 3:24 inject), pop 3:43-3:50,
+#   3:37 4th queen, ~3:48 3rd hatch. 42 drones (incl. eggs) at 4:00.
+# Larva wait for the roaches: 4.0 s average, 6.3 s worst spawn; hatcheries at 3 larva
+# meanwhile: 0.7 s at most. Delaying the 4th queen and the 3rd hatch until after the
+# roaches is what makes the timing possible: either one earlier and they pop after 3:55.
+14 extractor_trick                       # 14/14 -> 15/14
+15 hatch natural                         # drone pulled on a timer: arrives as the bank reaches 275
+-  default main                          # main to 16, then a 3rd drone on the far patches
+14 extractor_trick                       # 14/14 -> 15/14 again
+15 overlord
+15 pool                                  # drone pulled on a timer: arrives as the bank reaches 200
+@natural_soon transfer 4 main natural    # the 4 stacked drones arrive as the natural finishes
+-  default fill                          # then natural, then third (16 mineral drones each)
+& @2:28 extractor main                   # split gas: one in the main, one at the natural
+& @2:28 extractor natural
+& @2:28 rally gas:main x3                # the next 6 drones go to gas as they hatch
+& @2:28 rally gas:natural x3
+& @2:42 roach_warren
+& @warren roaches 6 asap                 # each roach as soon as larva/money/gas allow
+& @roaches hatch third                   # 3rd hatch only after the roaches: earlier breaks the timing
+@pool queen main
+@natural queen natural
+26 overlord main                         # double overlord from the main
+27 overlord main
+@queen:main queen main                   # 3rd queen as the first main queen pops
+& @roaches queen natural                 # 4th queen after the roaches
+-  auto_overlords                        # from here: overlords as late as possible without idle larva

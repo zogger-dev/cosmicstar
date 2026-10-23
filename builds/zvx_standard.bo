@@ -1,0 +1,21 @@
+# Standard ZvT follow-up after the first overlord: 16 hatch, 18 gas, 17 pool,
+# 27 overlord, 28 hatch, 30 queen. Matches Scarlett's hatch-first games vs
+# Clem / Percival (Dec 2025): 3rd hatch at 2:20-2:23 (27-28 supply), 3rd queen
+# at 2:42-2:48 (30 supply). Included by the openers.
+16 hatch natural          # drone pulled off minerals, timed to arrive as the bank reaches 275
+-  rally main             # next drone back-fills the main patch the hatch drone left
+-  rally extractor        # next drone builds the extractor
+-  rally pool             # next drone builds the pool
+-  rally gas x3           # next 3 drones mine gas (rallied, not pulled off minerals)
+-  default fill           # everything else: natural, then third, 16 mineral drones each
+-  pull_gas 100           # stop gas at exactly 100 (in-flight gas counted)
+18 extractor
+17 pool
+& ling_speed              # at exactly 100 gas, as soon as the pool is done
+@pool queen main
+@natural queen natural
+@pool lings 2
+27 overlord               # no overlord before this: the natural's +6 covers queens and lings
+28 hatch third
+30 queen natural          # the 3rd queen waits for the 3rd hatch: it has nothing to inject until then
+-  auto_overlords         # from here: overlords as late as possible without idle larva

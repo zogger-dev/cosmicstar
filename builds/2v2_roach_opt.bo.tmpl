@@ -1,0 +1,26 @@
+# 2v2 gasless 15 hatch / 15 overlord / 15 pool (double extractor trick) into
+# 6 roaches popping before 3:55 (hellion timing), found with scripts/bo_search.py
+# (stages A-E, Reclamation LE + New Bed of Chaos LE). Rules it satisfies: no larva
+# held > 5 s, no hatchery sitting at 3 larva while waiting for the roaches.
+14 extractor_trick                       # 14/14 -> 15/14
+15 hatch natural                         # drone pulled on a timer: arrives as the bank reaches 275
+-  default main                          # main to 16, then a 3rd drone on the far patches
+14 extractor_trick                       # 14/14 -> 15/14 again
+15 overlord
+15 pool                                  # drone pulled on a timer: arrives as the bank reaches 200
+@natural_soon transfer 4 main natural    # the 4 stacked drones arrive as the natural finishes
+-  default fill                          # then natural, then third (16 mineral drones each)
+& {gas} extractor main                   # split gas: one in the main, one at the natural
+& {gas} extractor natural
+& {gas} rally gas:main x3                # the next 6 drones go to gas as they hatch
+& {gas} rally gas:natural x3
+& {warren} roach_warren
+& @warren roaches 6 asap                 # each roach as soon as larva/money/gas allow
+& @roaches hatch third                   # 3rd hatch only after the roaches: earlier breaks the timing
+@pool queen main
+@natural queen natural
+26 overlord main                         # double overlord from the main
+27 overlord main
+@queen:main queen main                   # 3rd queen as the first main queen pops
+& @roaches queen natural                 # 4th queen after the roaches
+-  auto_overlords                        # from here: overlords as late as possible without idle larva

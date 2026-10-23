@@ -1,0 +1,27 @@
+# 2v2 gasless 15/15/15 roach build: gas 2:49 (main + natural, all 6 gas drones off the
+# 2:57 inject), warren 2:58, roaches as larva/money/gas allow, 3rd hatch after the
+# roaches. Bases fill to 16 then both to 20 (3rd drones on far patches); 4 drones from
+# each base move to the third as it finishes.
+14 extractor_trick
+15 hatch natural
+-  default main
+14 extractor_trick
+15 overlord
+15 pool
+@natural_soon transfer 4 main natural
+-  default fill
+& @3:05 extractor main
+& @3:05 extractor natural
+& @3:27 gas_pull 3 main
+& @3:27 gas_pull 3 natural
+& @2:58 roach_warren
+& @warren roaches 6 asap
+& {h3} hatch third
+& @third_soon transfer 4 main third      # move the oversaturation to the third as it finishes
+& @third_soon transfer 4 natural third
+@pool queens main natural
+26 overlord main
+27 overlord main
+@queen:main queen main
+@queen:natural queen natural
+-  auto_overlords

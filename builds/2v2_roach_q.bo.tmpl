@@ -1,0 +1,22 @@
+# 2v2 gasless 15/15/15 roach build with all 4 queens on the user's timing
+# (2nd pair as the 1st pair pops). Template for scripts/bo_search.py.
+14 extractor_trick
+15 hatch natural
+-  default main
+14 extractor_trick
+15 overlord
+15 pool
+@natural_soon transfer 4 main natural
+-  default fill
+& {gas} extractor main
+& {gas} extractor natural
+& {gas} rally gas:main x3
+& {gas} rally gas:natural x3
+& {warren} roach_warren
+& @warren roaches 6 asap
+& @roaches hatch third
+{queens12}
+{overlords}
+@queen:main queen main
+@queen:natural queen natural
+-  auto_overlords

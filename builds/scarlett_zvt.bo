@@ -1,0 +1,6 @@
+# Scarlett's ZvT, read off her games vs Clem / Percival (Dec 2025, build 95841)
+# with scripts/replay_build_order.py: extractor trick -> 15 overlord (~22s),
+# hatch ~44s, gas ~66s, pool ~71s, natural done ~116s at 21/28 with 0 larva,
+# 2 queens + 2 ling pairs (27/28), overlord at 27-28/28 (~130s), 3rd hatch
+# ~141s (28), 3rd queen ~162-168s (30). Same as 15ov.bo.
+include 15ov.bo

@@ -1,0 +1,36 @@
+# 2v2 gasless 15/15/15 roach build, v2 (user's macro plan, 2026-10-14):
+# queens 1+2 and 3+4 each started together the instant 350 is there (larva held ~1 s
+# for them); the 2:57 inject's 6 larva all become drones, then the next 150 -> roach
+# warren and the next 50 -> both extractors (3+3 pulled off the mineral lines as they
+# finish); larva held for the warren so roaches start the moment it's done; 3rd hatch
+# at 3:48; after the roaches: 5th queen (the 3rd base's injector), lair at 100 gas,
+# 2 more gases manned from the 3-drone far patches; the 4+4 oversaturation moves to
+# the third as it finishes.
+14 extractor_trick
+15 hatch natural
+-  default main
+14 extractor_trick
+15 overlord
+15 pool
+@natural_soon transfer 4 main natural
+-  default fill
+@pool_soon queens main natural            # hold ~1 s: queens before drones
+26 overlord main
+27 overlord main
+@queen:main queens main natural           # queens 3+4 together at 350
+-  auto_overlords
+@2:58 roach_warren                        # after the 2:57 inject's larva became drones
+-  extractor main                         # the next 50 minerals
+-  extractor natural
+& @extractors:2 gas_pull 3 main
+& @extractors:2 gas_pull 3 natural
+& @warren_soon roaches 6 asap             # hold larva ~1.5 s so the warren is never idle
+& @3:48 hatch third
+& @roaches queen natural                  # 5th queen: the 3rd base's injector
+& @roaches lair                           # as soon as 100 gas is banked
+& @roaches extractor main                 # gases 3+4 from the oversaturation
+& @roaches extractor natural
+& @extractors:4 gas_pull 3 main
+& @extractors:4 gas_pull 3 natural
+& @third_soon transfer 4 main third
+& @third_soon transfer 4 natural third
