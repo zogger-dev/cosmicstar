@@ -1,9 +1,5 @@
-import sys
 import os
 from absl import flags, app
-
-# Add the src directory to path
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 from cosmicstar.core.config import ReplayConfig, InterfaceConfig
 from cosmicstar.parsing.replay import ReplayParser

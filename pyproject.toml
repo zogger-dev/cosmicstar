@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "absl-py",
-    "black",
     "mpyq",
     "numpy",
     "pysc2",
@@ -20,6 +19,10 @@ dependencies = [
     "torch",
     "tqdm",
 ]
+
+[project.optional-dependencies]
+analysis = ["matplotlib"]
+dev = ["black"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
