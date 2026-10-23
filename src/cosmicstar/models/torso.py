@@ -1,62 +1,58 @@
-import jax
-import jax.numpy as jnp
-from flax import linen as nn
-from typing import Dict, Any
+from typing import Dict
+
+import torch
+from torch import nn
+
 
 class ScalarEncoder(nn.Module):
     """Encodes scalar features (minerals, vespene, food, etc.) into an embedding."""
-    output_dim: int = 64
 
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(features=64)(x)
-        x = nn.relu(x)
-        x = nn.Dense(features=self.output_dim)(x)
-        x = nn.relu(x)
-        return x
+    def __init__(self, output_dim: int = 64):
+        super().__init__()
+        # The scalar feature count is fixed by the dataset, so infer it on first call.
+        self.net = nn.Sequential(
+            nn.LazyLinear(64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
 
 class ModelTorso(nn.Module):
     """
     AlphaStar Torso (Encoder & Fusion).
     Fuses Spatial, Entity, and Scalar streams.
-    
+
     Current Implementation:
     - Scalar Stream: Active
     - Entity Stream: Placeholder
     - Spatial Stream: Placeholder
     """
-    output_dim: int = 256
-    
-    @nn.compact
-    def __call__(self, observations: Dict[str, jnp.ndarray]):
+
+    def __init__(self, output_dim: int = 256, scalar_dim: int = 64):
+        super().__init__()
+        self.scalar_encoder = ScalarEncoder(output_dim=scalar_dim)
+        # TODO: entity stream (Transformer) and spatial stream (ResNet).
+        fusion_in = scalar_dim
+        self.fusion = nn.Sequential(nn.Linear(fusion_in, output_dim), nn.ReLU())
+
+    def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         embeddings = []
-        
+
         # 1. Scalar Stream
-        if 'scalars' in observations:
-            scalar_input = observations['scalars']
-            # Ensure shape is [Batch, D]
-            scalar_emb = ScalarEncoder(output_dim=64)(scalar_input)
-            embeddings.append(scalar_emb)
-            
+        if "scalars" in observations:
+            embeddings.append(self.scalar_encoder(observations["scalars"]))
+
         # 2. Entity Stream (TODO)
-        # if 'entities' in observations:
-        #   entity_emb = Transformer(...)(observations['entities'])
-        #   embeddings.append(entity_emb)
-        
         # 3. Spatial Stream (TODO)
-        # if 'spatial' in observations:
-        #   spatial_emb = ResNet(...)(observations['spatial'])
-        #   embeddings.append(spatial_emb)
-        
+
         if not embeddings:
             raise ValueError("No valid input streams found in observations!")
-            
-        # Fusion: Concatenate all embeddings
-        # shape: [Batch, sum(embedding_dims)]
-        fusion = jnp.concatenate(embeddings, axis=-1)
-        
-        # Project to fixed Torso output size
-        fusion = nn.Dense(features=self.output_dim)(fusion)
-        fusion = nn.relu(fusion)
-        
-        return fusion
+
+        # Fusion: concatenate all embeddings -> [Batch, sum(embedding_dims)]
+        fusion = torch.cat(embeddings, dim=-1)
+        # Project to the fixed torso output size.
+        return self.fusion(fusion)

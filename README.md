@@ -17,7 +17,7 @@ To build a high-performance StarCraft II agent using Deep Reinforcement Learning
 *   **Package**: All core logic consolidated into the `cosmicstar/` package.
 
 ### 🚧 In Progress
-*   **Model Architecture**: Currently designing the **ModelTorso** and **Heads** in `cosmicstar/models/` using JAX/Flax.
+*   **Model Architecture**: Currently designing the **ModelTorso** and **Heads** in `cosmicstar/models/` in PyTorch (the world model in `cosmicstar/worldmodel/` is PyTorch too; JAX/Flax were dropped in October 2026).
 
 ## Key Scripts
 *   `scripts/download_maps.py`: **[Tool]** Sync maps from ladder or Battle.net depots.
@@ -29,7 +29,7 @@ To build a high-performance StarCraft II agent using Deep Reinforcement Learning
 ## Setup Requirements
 *   StarCraft II (v5.0.15+)
 *   Python 3.10+
-*   Dependencies in `requirements.txt` (`pysc2`, `torch`, `jax`, `flax`, etc.)
+*   Dependencies in `requirements.txt` (`pysc2`, `torch`, etc.)
 
 ## Running on Windows
 Anything that launches StarCraft II (`run_loop.py`, `parse_replay.py`, `data_processor.py`, `mining_probe.py`) must run from **native Windows Python**, not WSL.

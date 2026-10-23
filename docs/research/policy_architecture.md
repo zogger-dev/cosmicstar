@@ -68,8 +68,9 @@ For arguments like `target_point (x, y)`:
 *   The head attends to the **Spatial Embeddings** (from the ResNet) or uses a Deconv tower.
 *   AlphaStar typically uses a mechanism to select a location $(x, y)$ from the spatial feature map, often conditioned on the Pointer Network output if a unit was selected first (autoregressive dependencies).
 
-## 5. Implementation Considerations (JAX/XLA)
+## 5. Implementation Considerations (PyTorch)
+*Originally written for JAX/XLA; the codebase settled on PyTorch for both the world model and the policy, and JAX/Flax were removed in October 2026.*
 *   **V-trace**: For off-policy correction during training.
 *   **UPGO**: Upgoing Policy Gradient Optimization for value estimation.
-*   **Batching**: The LSTM state must be managed carefully across batches (likely using `jax.lax.scan` for unroll).
-*   **Scatter/Gather**: Efficient implementation of the Pointer Network requires efficient scatter/gather ops, which should be optimized in XLA.
+*   **Batching**: The LSTM state must be managed carefully across batches (an explicit unroll loop over the time axis, or `torch.compile` over the step function).
+*   **Scatter/Gather**: Efficient implementation of the Pointer Network requires efficient scatter/gather ops (`index_select`, `gather`, `scatter_add`), which should be kept out of Python loops so they fuse under `torch.compile`.

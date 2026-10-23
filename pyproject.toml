@@ -11,8 +11,6 @@ requires-python = ">=3.10"
 dependencies = [
     "absl-py",
     "black",
-    "flax",
-    "jax",
     "mpyq",
     "numpy",
     "pysc2",

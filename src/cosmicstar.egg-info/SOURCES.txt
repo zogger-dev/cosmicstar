@@ -20,3 +20,14 @@ src/cosmicstar/models/torso.py
 src/cosmicstar/parsing/__init__.py
 src/cosmicstar/parsing/port_manager.py
 src/cosmicstar/parsing/replay.py
+src/cosmicstar/worldmodel/__init__.py
+src/cosmicstar/worldmodel/action_encoder.py
+src/cosmicstar/worldmodel/action_tokens.py
+src/cosmicstar/worldmodel/encoder.py
+src/cosmicstar/worldmodel/inverse_model.py
+src/cosmicstar/worldmodel/predictor.py
+src/cosmicstar/worldmodel/probes.py
+src/cosmicstar/worldmodel/replay_actions.py
+src/cosmicstar/worldmodel/tokenize.py
+src/cosmicstar/worldmodel/vocab.py
+src/cosmicstar/worldmodel/window_predictor.py

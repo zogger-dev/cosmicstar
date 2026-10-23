@@ -9,7 +9,7 @@
 The ML Researcher's plan covers the AlphaStar architecture comprehensively.
 *   **Strengths**: Clear separation of Torso, Core, and Head. Good alignment with the Nature 2019 paper (Transformer for units, ResNet for spatial).
 *   **Gaps**:
-    *   **Data Pipeline Integration**: The plan mentions JAX/XLA but the current codebase creates PyTorch `.pt` files. We need to clarify if the training loop will load PyTorch tensors into JAX (via DLPack or numpy) or if we should switch the data processor to save `.npy` / `tfrecord`.
+    *   **Data Pipeline Integration**: The plan mentions JAX/XLA but the current codebase creates PyTorch `.pt` files. *Resolved 2026-10: the whole stack is PyTorch; the Flax policy stubs were ported and JAX/Flax removed from the dependencies.*
     *   **Observation Space details**: "Screen 64x64 or 24x24" - needs standardization. The current code uses 84x84.
 
 ## 3. Codebase Audit

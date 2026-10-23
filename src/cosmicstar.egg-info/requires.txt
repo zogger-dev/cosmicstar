@@ -1,7 +1,5 @@
 absl-py
 black
-flax
-jax
 mpyq
 numpy
 pysc2
