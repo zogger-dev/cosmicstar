@@ -6,6 +6,8 @@ from pysc2 import run_configs
 from pysc2.lib import remote_controller
 from s2clientprotocol import sc2api_pb2 as sc_pb
 
+import cosmicstar.envs.wine_run_config  # noqa: F401  registers the Wine/Proton run config on Linux
+
 from cosmicstar.core.config import ReplayConfig
 from cosmicstar.core.feature_builder import FeatureBuilder
 

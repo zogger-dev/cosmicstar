@@ -92,16 +92,20 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 import numpy as np
 
 LPS = 22.4
 EXCLUDED_BUILDS = {97364, 97425, 97563}  # patch 5.0.16, reverted
-SC2_DIR = r"C:\Program Files (x86)\StarCraft II"
+# Importing the Wine run config registers it with pysc2: on Linux the Windows client runs under
+# Wine/Proton from a Lutris prefix (cosmicstar/envs/wine_run_config.py; SC2PATH overrides).
+from cosmicstar.envs.wine_run_config import battlenet_cache_dirs, sc2_install_dir  # noqa: E402
+
+SC2_DIR = sc2_install_dir() or r"C:\Program Files (x86)\StarCraft II"
 BALANCE_DIR = "data/worldmodel/balance"  # Editor exports per ruleset (export_balance.py)
-CACHE_DIRS = [r"C:\ProgramData\Blizzard Entertainment\Battle.net\Cache",
-              os.path.join(SC2_DIR, "Battle.net", "Cache")]
+CACHE_DIRS = battlenet_cache_dirs(SC2_DIR)
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 U_DTYPES = dict(  # one row per (frame, unit)
@@ -243,7 +247,7 @@ STRUCTURE = 8  # Attribute.Structure
 # (orbital, lair, hive, baneling, overseer, warp gate...). Excludes structures' other
 # orders: lift/land, root/uproot, depot lower, tumor spread, attack, move, recharge.
 PRODUCTION = re.compile(r"Train|Research|AddOns|UpgradeTo|MorphTo|MorphBuilding", re.I)
-LAUNCH_LOCK = os.path.join(os.environ.get("TEMP", "."), "cosmicstar_sc2_launch.lock")
+LAUNCH_LOCK = os.path.join(tempfile.gettempdir(), "cosmicstar_sc2_launch.lock")
 
 
 class launch_lock:
@@ -252,19 +256,27 @@ class launch_lock:
     shows up as InvalidReplayData or a desync."""
 
     def __enter__(self):
-        import msvcrt
         self.f = open(LAUNCH_LOCK, "a+")
-        while True:
-            try:
-                msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
-                return self
-            except OSError:
-                time.sleep(0.2)
+        if sys.platform == "win32":
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                    return self
+                except OSError:
+                    time.sleep(0.2)
+        import fcntl
+        fcntl.flock(self.f.fileno(), fcntl.LOCK_EX)
+        return self
 
     def __exit__(self, *exc):
-        import msvcrt
-        self.f.seek(0)
-        msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+        if sys.platform == "win32":
+            import msvcrt
+            self.f.seek(0)
+            msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
         self.f.close()
 
 

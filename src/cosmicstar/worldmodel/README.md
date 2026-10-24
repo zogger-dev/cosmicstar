@@ -490,6 +490,39 @@ WSL2 is the fallback for training only: Triton runs there as far as community re
 (the usual snag is `LD_LIBRARY_PATH=/usr/lib/wsl/lib` for libcuda.so), but reports of CUDA
 init failures on new GPUs exist and nothing official confirms support; a native box avoids it.
 
+### Linux results (2026-10-23, RTX 5090 box, Ubuntu, Lutris + GE-Proton 11-11)
+
+Steps 1 and 2 of the plan pass; 3 and 4 wait on files from the Windows machine.
+
+- Install: Battle.net under Proton via Lutris (prefix `~/Games/battlenet`, launched through
+  `umu-run`); the game plays rendered. The prefix has one build, `Versions/Base98310` (5.0.17).
+- Headless API run: `cosmicstar/envs/wine_run_config.py` is a pysc2 run config that starts
+  `umu-run .../Base<build>/SC2_x64.exe -listen 127.0.0.1 -port N -displayMode 0 ...` from
+  `Support64`, with `-dataDir`/`-tempDir` rewritten to `C:\...`/`Z:\...`. Importing it
+  registers it (priority 2 on Linux); `extract_states.py` and `ReplayParser` import it.
+  API port open 6 s after launch; a 5.0.17 replay as observer with fog off steps at
+  ~1500 loops/s raw (step(16)+observe, 215 units: 11 ms per frame).
+- Full extraction (`extract_states.py --worker` on a 6.3-min 5.0.17 game, 530 frames,
+  124k unit rows): 18 s, 11 s of it waiting on the engine (13 ms per 16-loop frame, on par
+  with Windows). The very first launch took 96 s (Proton/umu and DXVK shader-cache warm-up);
+  every launch after that was fast. Two runs of the same game are identical in all 67 arrays.
+  No Windows extraction of a cached-map game exists yet, so the Windows-vs-Linux equality
+  check (step 2) is still open.
+- Maps: the API client does not fetch a missing map (`ResponseReplayInfo ParsingError:
+  Failed to open the map archive ...Cache\xx\yy\<hash>.s2ma`); only the game UI does, and
+  Blizzard's depot hosts (`us.depot.battle.net:1119`, which `download_maps.py` uses) no
+  longer resolve. So the Linux prefix needs the Windows machine's
+  `C:\ProgramData\Blizzard Entertainment\Battle.net\Cache` copied into
+  `<prefix>/drive_c/ProgramData/Blizzard Entertainment/Battle.net/Cache` (maps and mods by
+  hash), and older builds need `Versions/Base<build>` copied too (plan step 3). Of the 13
+  build-98310 games in `my-recent-games`, 12 were skipped as "map not cached" and the one
+  with a cached map runs on a ruleset the Editor export never covered.
+- Python 3.12: `s2protocol.versions` imports the removed `imp` module; `regen_s2proto.py`
+  now patches it (importlib) alongside the protobuf bindings. s2protocol is at
+  5.0.17.98310.0 so `versions.build(98310)` exists.
+- Open: `minimize_client_window` is a no-op on Linux (the 20% win from minimizing is not
+  taken; needs xdotool or an Xvfb display per client), and plan steps 3-6.
+
 ### Request costs and the headless question (2026-10-23)
 
 The Windows client has no headless mode: `-displayMode 0` (what pysc2 passes) means windowed,
