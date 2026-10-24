@@ -17,8 +17,10 @@ MELEE_PACK = "Melee.zip"
 PASSWORD = b"iagreetotheeula"
 
 # Depot Configuration
-# This endpoint serves individual assets by hash
-DEPOT_URL_TEMPLATE = "http://us.depot.battle.net:1119/{hash}.{ext}"
+# Serves maps and mods by content hash. The old http://us.depot.battle.net:1119/ hosts stopped
+# resolving in 2026; this is the template the 5.0.17 client carries (cosmicstar/envs/depot.py).
+from cosmicstar.envs.depot import DEPOT_URL
+DEPOT_URL_TEMPLATE = DEPOT_URL.format(region="us", hash="{hash}", ext="{ext}")
 
 # Standard paths
 DEFAULT_SC2_DIR = r"C:\Program Files (x86)\StarCraft II"

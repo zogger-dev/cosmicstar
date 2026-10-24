@@ -102,10 +102,12 @@ EXCLUDED_BUILDS = {97364, 97425, 97563}  # patch 5.0.16, reverted
 # Importing the Wine run config registers it with pysc2: on Linux the Windows client runs under
 # Wine/Proton from a Lutris prefix (cosmicstar/envs/wine_run_config.py; SC2PATH overrides).
 from cosmicstar.envs.wine_run_config import battlenet_cache_dirs, sc2_install_dir  # noqa: E402
+from cosmicstar.envs import depot  # noqa: E402  maps and mods by hash (the client won't fetch them)
 
 SC2_DIR = sc2_install_dir() or r"C:\Program Files (x86)\StarCraft II"
 BALANCE_DIR = "data/worldmodel/balance"  # Editor exports per ruleset (export_balance.py)
 CACHE_DIRS = battlenet_cache_dirs(SC2_DIR)
+FETCH_MISSING = True  # fetch a replay's missing map/mods from the depot into CACHE_DIRS[0] (--no_fetch off)
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 U_DTYPES = dict(  # one row per (frame, unit)
@@ -179,6 +181,7 @@ def replay_info(path):
     base_build, data_version = int(meta["BaseBuild"][4:]), meta.get("DataVersion")
     return dict(build=build, base_build=base_build, game_version=".".join(meta["GameVersion"].split(".")[:-1]),
                 data_version=data_version, map=_s(det["m_title"]), map_hash=h[8:].hex(), mods=mods,
+                handles=[depot.parse_handle(x) for x in handles],
                 ruleset=ruleset_key(base_build, data_version, mods),
                 # The header's exact loop count (metadata "Duration" is in normal-speed seconds
                 # of 16 loops, not real seconds)
@@ -205,12 +208,14 @@ def run_config_for(info):
                                                 "SC2_x64.exe")), False
 
 
-def map_path(map_hash):
-    for d in CACHE_DIRS:
-        p = os.path.join(d, map_hash[:2], map_hash[2:4], map_hash + ".s2ma")
-        if os.path.exists(p):
-            return p
-    return None
+def map_path(map_hash, handles=None):
+    """The cached map archive; with the replay's handles and FETCH_MISSING, fetches the map and
+    any missing mod from the depot first."""
+    p = depot.find_cached(CACHE_DIRS, map_hash, "s2ma")
+    if p is None and handles and FETCH_MISSING:
+        depot.ensure_cached(handles, CACHE_DIRS, log=lambda m: print(m, flush=True))
+        p = depot.find_cached(CACHE_DIRS, map_hash, "s2ma")
+    return p
 
 
 def tracker_tables(path, until):
@@ -325,7 +330,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0):
     from s2clientprotocol import sc2api_pb2 as sc_pb
 
     info = replay_info(path)
-    mp = map_path(info["map_hash"])
+    mp = map_path(info["map_hash"], info["handles"])
     if mp is None:
         raise FileNotFoundError("map not in the Battle.net cache: " + info["map"])
     until = info["duration_loops"] if until <= 0 else min(until, info["duration_loops"] or until)
@@ -551,8 +556,8 @@ def build_manifest(replay_dir, player, out_dir, require_player=False):
             why = f"base build {info['base_build']} not installed"
         elif info["duration_loops"] < 90 * LPS:
             why = "under 90 s (remake/leave)"
-        elif map_path(info["map_hash"]) is None:
-            why = "map not cached"
+        elif map_path(info["map_hash"], info["handles"]) is None:
+            why = "map not cached (depot fetch failed)" if FETCH_MISSING else "map not cached"
         elif exported is not None and not exported.get(info["ruleset"], {}).get("ok"):
             why = "ruleset not exported" if info["ruleset"] not in exported else "ruleset not exportable"
         if why is None and require_player and not any(player and player.lower() in p["name"].lower()
@@ -659,8 +664,10 @@ def run_worker(jobs, step, until, substep=0):
                 break
             except Exception as ex:
                 # replay starts fail in bursts while another instance fetches data for a map it
-                # hasn't seen (InvalidReplayData); they pass once it's cached, so wait and retry
-                if "InvalidReplayData" in repr(ex) and attempt < 2:
+                # hasn't seen (InvalidReplayData); they pass once it's cached, so wait and retry.
+                # The client also stalls past pysc2's 120 s websocket timeout now and then
+                # (seen once in 12 games under Wine; the game passed alone), so retry those too.
+                if ("InvalidReplayData" in repr(ex) or "timed out" in repr(ex)) and attempt < 2:
                     time.sleep(45 * (attempt + 1))
                     continue
                 print(json.dumps(dict(fail=os.path.basename(j["path"]), error=repr(ex)[:200], tries=attempt + 1)), flush=True)
@@ -683,9 +690,12 @@ def main():
     ap.add_argument("--views", default="observer", help="observer, players, or observer,players")
     ap.add_argument("--pov_out", default="data/worldmodel/pov", help="player views go here")
     ap.add_argument("--games", help="json list of output names (<hash>.npz): only these games")
+    ap.add_argument("--no_fetch", action="store_true", help="don't fetch missing maps/mods from the depot")
     ap.add_argument("--worker", help=argparse.SUPPRESS)  # internal: job list for one worker process
     args = ap.parse_args()
 
+    global FETCH_MISSING
+    FETCH_MISSING = not args.no_fetch
     os.makedirs(args.out, exist_ok=True)
     manifest = os.path.join(args.out, "manifest.json")
     if args.worker:
@@ -735,7 +745,8 @@ def main():
         path = os.path.join(args.out, "jobs_now.json")
         json.dump(job_list, open(path, "w"))
         procs = [subprocess.Popen([sys.executable, os.path.abspath(__file__), "--out", args.out, "--step",
-                                   str(args.step), "--until", str(args.until), "--substep", str(args.substep), "--worker", path],
+                                   str(args.step), "--until", str(args.until), "--substep", str(args.substep), "--worker", path]
+                                  + (["--no_fetch"] if args.no_fetch else []),
                                   env=env, stderr=subprocess.DEVNULL) for _ in range(n)]
         for p in procs:
             p.wait()

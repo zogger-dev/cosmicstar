@@ -47,10 +47,13 @@ uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requi
 ```
 
 then run `scripts/regen_s2proto.py` once (see Protobuf below). Replays need their map and mods
-in the prefix's Battle.net cache (`drive_c/ProgramData/Blizzard Entertainment/Battle.net/Cache`):
-the API client does not download them and Blizzard's depot hosts are gone, so copy the cache
-from a Windows install that has played those games, and copy `Versions/Base<build>` folders
-for older patches. Results and open items: `src/cosmicstar/worldmodel/README.md`, "Linux results".
+in the prefix's Battle.net cache (`drive_c/ProgramData/Blizzard Entertainment/Battle.net/Cache`);
+the API client does not download them, so `extract_states.py` fetches missing ones from
+Blizzard's depot (`cosmicstar/envs/depot.py`; the client's current host
+`https://<region>-s2-depot.classic.blizzard.com/<hash>.<type>`, the old `depot.battle.net:1119`
+hosts no longer resolve). Older patches still need their `Versions/Base<build>` folder copied
+from a Windows install. Results and open items: `src/cosmicstar/worldmodel/README.md`,
+"Linux results".
 
 ## Running on Windows
 Anything that launches StarCraft II (`run_loop.py`, `parse_replay.py`, `data_processor.py`, `mining_probe.py`) must run from **native Windows Python**, not WSL (or on Linux as above).

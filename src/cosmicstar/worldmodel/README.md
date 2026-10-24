@@ -506,17 +506,33 @@ Steps 1 and 2 of the plan pass; 3 and 4 wait on files from the Windows machine.
   124k unit rows): 18 s, 11 s of it waiting on the engine (13 ms per 16-loop frame, on par
   with Windows). The very first launch took 96 s (Proton/umu and DXVK shader-cache warm-up);
   every launch after that was fast. Two runs of the same game are identical in all 67 arrays.
-  No Windows extraction of a cached-map game exists yet, so the Windows-vs-Linux equality
-  check (step 2) is still open.
+- The 12 build-98310 games of `my-recent-games` with 2 workers (`extract_states.py`, observer
+  view): 11 passed first try, 15,920 frames / 10.4M unit rows / 155 MB in 1276 worker-seconds
+  (12.5 frames/s = 200 loops/s per worker, games of 18-212 s). One game failed with
+  "Websocket timed out" during an observation and passed alone (96 s); the worker now retries
+  timeouts like it retries InvalidReplayData.
 - Maps: the API client does not fetch a missing map (`ResponseReplayInfo ParsingError:
-  Failed to open the map archive ...Cache\xx\yy\<hash>.s2ma`); only the game UI does, and
-  Blizzard's depot hosts (`us.depot.battle.net:1119`, which `download_maps.py` uses) no
-  longer resolve. So the Linux prefix needs the Windows machine's
-  `C:\ProgramData\Blizzard Entertainment\Battle.net\Cache` copied into
-  `<prefix>/drive_c/ProgramData/Blizzard Entertainment/Battle.net/Cache` (maps and mods by
-  hash), and older builds need `Versions/Base<build>` copied too (plan step 3). Of the 13
-  build-98310 games in `my-recent-games`, 12 were skipped as "map not cached" and the one
-  with a cached map runs on a ruleset the Editor export never covered.
+  Failed to open the map archive ...Cache\\xx\\yy\\<hash>.s2ma`); only the game UI does. Blizzard's
+  depot hosts that every tool uses (`http://<region>.depot.battle.net:1119/<hash>.<type>`, in
+  `download_maps.py` too) no longer resolve, but `SC2_x64.exe` 5.0.17 carries the current one:
+  `https://<region>-s2-depot.classic.blizzard.com/<hash>.<type>` (strings: "-s2-depot.classic").
+  It serves cache handles by SHA-256 (the handle = 4 bytes type + 4 bytes region + 32 bytes
+  hash). `cosmicstar/envs/depot.py` fetches into the prefix's cache; the six maps of the 13
+  build-98310 games took 3 s. `extract_states.py` now fetches a replay's missing map and mods
+  while building the manifest (`--no_fetch` turns it off): on `pig-viewer-replays/
+  replay-analysis` it pulled 4 maps, after which its 13 build-98310 games were skipped by the
+  next gate, "ruleset not exported" (their mod set has no Editor balance export, which needs
+  Windows). Older builds still need `Versions/Base<build>` from a Windows install (plan step 3); the Battle.net product `s2` has one build on TACT (5.0.17) and the
+  `Versions` folders are not on the CDN as such.
+- Windows vs Linux (plan step 2, partial): the only Windows extractions of cached-map games
+  predate the current extractor (45 arrays, observed as slot 1, `--until 600`). Re-extracted
+  on Linux with `--until 600`: `frame_loop`, `frame_start` (all but the final total) and every
+  `p_*` tracker array identical; over the first 393 frames (137,626 unit rows) `u_type`,
+  `u_owner`, `u_x`, `u_y`, `u_hp`, `u_hp_max`, `u_shield`, `u_shield_max`, `u_energy`,
+  `u_build`, `u_contents` identical. Differences are extractor-version changes (`u_id`
+  numbering, `u_flags` bits, `u_harvesters` int8 vs int16, the upgrade filter) plus two extra
+  rows in the final frame (observer vs slot-1 view) and 11 `u_z` rows off by <= 0.09 (zergling,
+  roach; cosmetic). A same-version Windows extraction is still needed for a bit-exact check.
 - Python 3.12: `s2protocol.versions` imports the removed `imp` module; `regen_s2proto.py`
   now patches it (importlib) alongside the protobuf bindings. s2protocol is at
   5.0.17.98310.0 so `versions.build(98310)` exists.
