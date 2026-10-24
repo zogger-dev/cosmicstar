@@ -34,7 +34,7 @@ def dump(path, info):
         req = sc_pb.RequestStartReplay(replay_data=open(path, "rb").read(), observed_player_id=1,
                                        options=sc_pb.InterfaceOptions(raw=True))
         if not current:
-            req.map_data = open(ex.map_path(info["map_hash"]), "rb").read()
+            req.map_data = open(ex.map_path(info["map_hash"], info["handles"]), "rb").read()
         c.start_replay(req)
         data = c.data_raw()
     return json_format.MessageToDict(data, preserving_proto_field_name=True)
@@ -57,7 +57,7 @@ def main():
             info = ex.replay_info(path)
         except Exception:
             continue
-        if info["build"] in ex.EXCLUDED_BUILDS or info["base_build"] not in have or not ex.map_path(info["map_hash"]):
+        if info["build"] in ex.EXCLUDED_BUILDS or info["base_build"] not in have or not ex.map_path(info["map_hash"], info["handles"]):
             continue
         groups.setdefault(info["ruleset"], []).append((path, info))
     index_path = os.path.join(args.out, "index.json")

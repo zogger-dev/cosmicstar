@@ -533,6 +533,16 @@ Steps 1 and 2 of the plan pass; 3 and 4 wait on files from the Windows machine.
   numbering, `u_flags` bits, `u_harvesters` int8 vs int16, the upgrade filter) plus two extra
   rows in the final frame (observer vs slot-1 view) and 11 `u_z` rows off by <= 0.09 (zergling,
   roach; cosmetic). A same-version Windows extraction is still needed for a bit-exact check.
+- Editor balance export (`export_balance.py`) under Proton: `SC2Editor_x64.exe -exportreplay
+  <Z:\\...replay> -exportreplaydir <Z:\\...out>` through `umu-run` from `Support64` works; the
+  Editor's logs land in `<prefix>/drive_c/users/<user>/Documents/StarCraft II/EditorLogs`.
+  End to end on `my-recent-games`: `dump_rules.py` (engine, 2 rulesets) then `export_balance.py`
+  (Editor, 8 s and 20 s per ruleset after the first warm-up run of ~90 s). The Linux export of
+  98310_52f09e46 against the Windows export of the same ruleset: same 1597 files, 1577
+  byte-identical, the other 20 differ only in the `source="<map>..."` attribute (a different
+  replay was exported). The locale `S2Strings.xml` files come from the map/mod data, not the
+  install's locale: a ruleset exported from a 1-locale game had 11 fewer. So the export gate
+  in `build_manifest` can be cleared on Linux.
 - Python 3.12: `s2protocol.versions` imports the removed `imp` module; `regen_s2proto.py`
   now patches it (importlib) alongside the protobuf bindings. s2protocol is at
   5.0.17.98310.0 so `versions.build(98310)` exists.

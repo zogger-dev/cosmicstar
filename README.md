@@ -35,7 +35,9 @@ To build a high-performance StarCraft II agent using Deep Reinforcement Learning
 Blizzard's Linux builds stop at 4.10, so a 5.0.x client runs under Proton from a Lutris
 Battle.net install (tested: Lutris + GE-Proton 11-11, prefix `~/Games/battlenet`).
 `cosmicstar/envs/wine_run_config.py` is a pysc2 run config that launches that client through
-`umu-run`; `extract_states.py` and `ReplayParser` import it, so they work unchanged. It finds
+`umu-run`; `extract_states.py`, `dump_rules.py` and `ReplayParser` import it, so they work
+unchanged, and `export_balance.py` runs the Editor's balance export the same way
+(`wine_command()`), with output identical to a Windows export. It finds
 the install at `~/Games/battlenet/drive_c/Program Files (x86)/StarCraft II`; set `SC2PATH`,
 `WINEPREFIX`, `SC2_WINE` or `PROTONPATH` to override (details in the module doc). The client
 needs a display (`DISPLAY`, default `:0`).

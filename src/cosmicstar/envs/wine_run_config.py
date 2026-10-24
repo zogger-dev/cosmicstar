@@ -116,6 +116,40 @@ def proton_path(prefix):
     return None
 
 
+def documents_dir(prefix=None):
+    """The Windows user's Documents folder in the prefix (where the game and Editor write
+    "StarCraft II/..." logs and replays); the real ~/Documents on Windows."""
+    if platform.system() == "Windows":
+        return os.path.expanduser("~/Documents")
+    prefix = prefix or wine_prefix()
+    return os.path.join(prefix, "drive_c/users", os.environ.get("USER", "steamuser"), "Documents")
+
+
+def wine_env(prefix, launcher_path=None):
+    """Environment for running a Windows exe in the prefix with launcher(): WINEPREFIX, a
+    display, and for umu-run its game id, store and Proton build (never a runtime update)."""
+    launcher_path = launcher_path or launcher()
+    env = dict(os.environ, WINEPREFIX=prefix)
+    env.setdefault("DISPLAY", ":0")
+    if os.path.basename(launcher_path).startswith("umu"):
+        env.setdefault("GAMEID", "umu-default")
+        env.setdefault("STORE", "none")
+        env.setdefault("UMU_RUNTIME_UPDATE", "0")  # never block a launch on a runtime download
+        pp = proton_path(prefix)
+        if pp:
+            env.setdefault("PROTONPATH", pp)
+    return env
+
+
+def wine_command(exe, args=(), prefix=None):
+    """(argv, env) to run a Windows exe from the install under Wine/Proton, e.g. the Editor:
+    wine_command(f"{install}/Support64/SC2Editor_x64.exe", ["-exportreplay", windows_path(...)]).
+    Path arguments must already be Windows paths (windows_path())."""
+    prefix = prefix or wine_prefix()
+    lp = launcher()
+    return [lp, exe, *args], wine_env(prefix, lp)
+
+
 class WineProcess(sc_process.StarcraftProcess):
     """pysc2's process wrapper with the launch step done through the Wine launcher."""
 
@@ -147,16 +181,8 @@ class WineLinux(platforms.LocalBase):
         if not self.prefix:
             raise sc_process.SC2LaunchError(f"{install} is not inside a Wine prefix (no drive_c); set WINEPREFIX.")
         self.launcher = launcher()
-        env = dict(os.environ, WINEPREFIX=self.prefix)
-        env.setdefault("DISPLAY", ":0")
-        if os.path.basename(self.launcher).startswith("umu"):
-            env.setdefault("GAMEID", "umu-default")
-            env.setdefault("STORE", "none")
-            env.setdefault("UMU_RUNTIME_UPDATE", "0")  # never block a launch on a runtime download
-            pp = proton_path(self.prefix)
-            if pp:
-                env.setdefault("PROTONPATH", pp)
-        super().__init__(install, "SC2_x64.exe", version=version, cwd="Support64", env=env)
+        super().__init__(install, "SC2_x64.exe", version=version, cwd="Support64",
+                         env=wine_env(self.prefix, self.launcher))
 
     @classmethod
     def priority(cls):

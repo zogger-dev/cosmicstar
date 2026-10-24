@@ -5,7 +5,9 @@ replays, since a replay can fail on its own map) with
 
     SC2Editor_x64.exe -exportreplay <replay> -exportreplaydir <out>/<ruleset>
 
-one at a time (the Editor fetches the replay's dependencies itself). The outcome, including
+one at a time (the Editor fetches the replay's dependencies itself). On Linux the Editor runs
+under Wine/Proton like the game (cosmicstar/envs/wine_run_config.py; the output matched a
+Windows export file for file, apart from the locales the install lacks). The outcome, including
 the Editor's error when it can't export, goes to <out>/status.json; replays of rulesets that
 failed are left out of the dataset (extract_states.build_manifest).
 
@@ -24,9 +26,23 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import extract_states as ex  # noqa: E402  (replay_info: a replay's ruleset)
 
-EDITOR = r"C:\Program Files (x86)\StarCraft II\Support64\SC2Editor_x64.exe"
-LOGS = os.path.expanduser(r"~\Documents\StarCraft II\EditorLogs")
-REPLAYS = r"C:\Users\prade\Documents\StarCraft II\Accounts\52583725\1-S2-1-1544307\Replays\Multiplayer"
+from cosmicstar.envs import wine_run_config as wrc  # noqa: E402
+
+WINDOWS = sys.platform == "win32"
+SC2_DIR = wrc.sc2_install_dir() or r"C:\Program Files (x86)\StarCraft II"
+EDITOR = os.path.join(SC2_DIR, "Support64", "SC2Editor_x64.exe")
+LOGS = os.path.join(wrc.documents_dir(), "StarCraft II", "EditorLogs")
+REPLAYS = (r"C:\Users\prade\Documents\StarCraft II\Accounts\52583725\1-S2-1-1544307\Replays\Multiplayer"
+           if WINDOWS else "data/replays/my-recent-games")
+
+
+def editor_command(replay, out):
+    """argv and env for one export; under Wine the Editor gets Windows paths."""
+    if WINDOWS:
+        return [EDITOR, "-exportreplay", replay, "-exportreplaydir", out], None
+    prefix = wrc.wine_prefix(SC2_DIR)
+    return wrc.wine_command(EDITOR, ["-exportreplay", wrc.windows_path(replay, prefix),
+                                     "-exportreplaydir", wrc.windows_path(out, prefix)], prefix)
 
 
 def export(replay, out, timeout=1200):
@@ -34,8 +50,10 @@ def export(replay, out, timeout=1200):
     replay, out = os.path.abspath(replay), os.path.abspath(out)  # the Editor runs from its own directory
     os.makedirs(out, exist_ok=True)
     started = time.time()
+    cmd, env = editor_command(replay, out)
     try:
-        subprocess.run([EDITOR, "-exportreplay", replay, "-exportreplaydir", out], timeout=timeout)
+        subprocess.run(cmd, env=env, cwd=os.path.dirname(EDITOR), timeout=timeout,
+                       stdout=subprocess.DEVNULL if not WINDOWS else None, stderr=subprocess.STDOUT if not WINDOWS else None)
     except subprocess.TimeoutExpired:
         return False, f"timed out after {timeout}s"
     if glob.glob(os.path.join(out, "*.xml")):
