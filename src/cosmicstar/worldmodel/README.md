@@ -216,6 +216,49 @@ Next on this piece: re-extract the observer frames with unit orders and use them
 instead of the context frames (orders are the already-decided change; the latent action is
 then only the new commands).
 
+
+### Stochastic latent actions (`worldmodel/latent.py`, 2026-10-23)
+
+Why: a predictor given only the present and trained with a regression loss predicts the
+average of the futures that present allows (a building that is half spire, half hydralisk
+den), and the JEPA encoder then learns to stop representing whatever was unpredictable, so
+the averaging is baked into the representation, not just the prediction. In the observer view
+with both players' commands the game is deterministic and this never shows; it shows the
+moment commands are withheld (the opponent's, under fog; everyone's, in the test below).
+
+What: the latent action z per (pair, player) becomes a random variable with three estimates
+that differ only in what they see: the posterior q(z | present, future) (the inverse model,
+now a Gaussian), the command distribution q(z | present, commands) (the command encoder, now a
+Gaussian; nearly a delta for the observer) and the prior p(z | present) (new head on the CLS
+and the player's slot: a mixture of `--prior_k` diagonal Gaussians, so it can hold several
+branches of the future from one state). The predictor is driven by a *sample* (`--z_source`:
+posterior, commands, or a coin per pass). Losses: the prediction loss as before;
+`--beta` x KL(posterior || prior) per nat above `--free_nats` (one-sample Monte Carlo, the
+sample that drove the predictor; the floor keeps the decision itself free of charge; beta
+ramps over `--beta_warmup` steps); `--align_weight` x KL(posterior || commands) in closed form;
+`--usage_weight` x (log K - entropy of the batch-mean component responsibilities), the
+mixture-of-experts load-balancing idea, so components do not die; `--div_weight` x mean
+|cosine| between a state's component means, a repulsion, off by default. Capacity is set by
+beta and the floor, not by `--d_z`: unused dimensions collapse onto the prior for free, too
+few dimensions bring the averaging back; 128-256 is the planned size once 10 s chunks carry
+positions (drops, nydus) rather than just discrete choices.
+
+Diagnostics, printed per evaluation set and horizon: the loss with the prior's mean vs one
+prior sample vs the best of `--eval_samples` samples vs the posterior (oracle) and vs copying
+the present; KL in nats; active units (posterior means that vary across data); effective
+components used (exp of the entropy of the mean responsibility). A gap between the prior's
+mean and best-of-K says the future was multimodal and the prior spans it; active units
+climbing to d_z with KL at the floor says the latent is saturated; components used falling
+to 1-2 says the mixture collapsed (raise `--usage_weight`, or `--div_weight`).
+
+The experiment this is for: `--no_cmd` withholds everyone's commands, so the predictor sees
+the present and z only, the posterior drives training and the prior drives evaluation. The
+observer view is the clean testbed: all ambiguity is decisions, none is hidden state. The
+calibration check on top: a frozen probe that reads "spire present" from a representation, run
+on each sampled prediction 60 s before the tech choice, should agree with the empirical
+frequency in the replays for that state. Old checkpoints load as `--prior none` (point
+latents, the previous model).
+
 ### Two things that broke the action channel, and the first result (2026-10-20)
 
 1. **Owner codes as a signature.** With random owner codes drawn per sample, the in-batch

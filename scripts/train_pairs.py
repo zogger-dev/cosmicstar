@@ -36,6 +36,16 @@ Evaluation at fixed horizons (--eval_s), per held-out set: the model's loss vs c
 present, agreement top-1, and whether the predictor uses the actions (real commands vs other
 pairs' commands: recall@1 vs chance, MRR; and no actions), plus the oracle.
 
+Stochastic latent (--prior gauss|mix, the default; worldmodel/latent.py): the inverse model
+and the command encoder output a Gaussian over z instead of a point, a prior head gives a
+mixture over z from the present alone, and the predictor is driven by a *sample* (--z_source:
+of the posterior, of the command distribution, or a coin per pass). KL(posterior || prior)
+above --free_nats is charged with --beta (warmed up), KL(posterior || commands) with
+--align_weight. Evaluation adds: the loss with the prior's mean vs one prior sample vs the
+best of --eval_samples samples vs the posterior, KL in nats, active units, components used.
+--no_cmd withholds everyone's commands (the predictor sees the present and z only): the test
+of whether the prior learns the distribution of decisions rather than their average.
+
     python scripts/train_pairs.py --min_s 1 --max_s 15 --batch 32
     python scripts/train_pairs.py --resume data/worldmodel/runs/<run>
 """
@@ -67,6 +77,7 @@ from cosmicstar.worldmodel.action_encoder import ActionEncoder  # noqa: E402
 from cosmicstar.worldmodel.action_tokens import ActionVocab, GameActions, collate_actions  # noqa: E402
 from cosmicstar.worldmodel.encoder import StateEncoder  # noqa: E402
 from cosmicstar.worldmodel.inverse_model import InverseModel  # noqa: E402
+from cosmicstar.worldmodel import latent as lat  # noqa: E402
 from cosmicstar.worldmodel.predictor import slots_of  # noqa: E402
 from cosmicstar.worldmodel.probes import temporal_share  # noqa: E402
 from cosmicstar.worldmodel.tokenize import GameFrames, collate, probe_targets  # noqa: E402
@@ -141,7 +152,17 @@ def main():
     ap.add_argument("--nce_weight", type=float, default=0.1)
     ap.add_argument("--nce_temp", type=float, default=0.1)
     ap.add_argument("--cnt_weight", type=float, default=1.0, help="per-cell count target on the grid outputs (0 = off)")
-    ap.add_argument("--z_source", default="cmd", help="what drives the predictor in training: cmd, inv, or mix")
+    ap.add_argument("--z_source", default="mix", help="what drives the predictor in training: cmd, inv, or mix (coin per pass)")
+    ap.add_argument("--prior", default="mix", help="latent action: none (point estimates, the old model), gauss, or mix of --prior_k Gaussians")
+    ap.add_argument("--prior_k", type=int, default=8, help="mixture components of the prior")
+    ap.add_argument("--beta", type=float, default=0.02, help="weight per nat of KL(posterior || prior) above --free_nats")
+    ap.add_argument("--beta_warmup", type=int, default=500, help="steps to ramp --beta from 0")
+    ap.add_argument("--free_nats", type=float, default=4.0, help="KL per (pair, player) below this is not charged")
+    ap.add_argument("--align_weight", type=float, default=1.0, help="KL(posterior || command encoder's Gaussian)")
+    ap.add_argument("--usage_weight", type=float, default=0.1, help="entropy bonus on the prior's batch-mean component usage")
+    ap.add_argument("--div_weight", type=float, default=0.0, help="repulsion between the prior's component means")
+    ap.add_argument("--eval_samples", type=int, default=8, help="prior samples per pair for best-of-K in evaluation")
+    ap.add_argument("--no_cmd", action="store_true", help="withhold all commands: the predictor is driven by z alone (posterior in training, prior at test)")
     ap.add_argument("--no_ckpt", action="store_true")
     ap.add_argument("--eval_every", type=int, default=250)
     ap.add_argument("--save_every", type=int, default=1000)
@@ -159,6 +180,11 @@ def main():
             args.resume = os.path.join(args.resume, "model_latest.pt")
         ck = torch.load(args.resume, map_location="cpu", weights_only=False)
         args = argparse.Namespace(**{**vars(ap.parse_args([])), **ck["args"], "resume": args.resume, "eval_only": args.eval_only})
+        if "prior" not in ck["args"]:  # a checkpoint from before the stochastic latent
+            args.prior, args.no_cmd = "none", False
+    stoch = args.prior != "none"
+    if args.no_cmd:  # nothing to align or borrow: the command encoder is out of the loop
+        args.z_source, args.align_weight, args.nce_weight, args.cf_weight = "inv", 0.0, 0.0, 0.0
     torch.manual_seed(args.seed)
     rng = np.random.RandomState(args.seed)
     dev = "cuda"
@@ -207,25 +233,30 @@ def main():
           + ", ".join(f"{k} {len(v_)} games" for k, v_ in eval_games.items())
           + f" | orders {'off' if args.no_orders else 'in the input only' if args.target_no_orders else 'on'}"
           + f" | horizons {args.min_s}-{args.max_s}s (eval {args.eval_s}) | context {args.context} frames "
-          f"{args.context_stride * frame_s:.2f}s apart | batch {args.batch} x {args.accum} | predictor driven by {args.z_source} | {run}",
-          flush=True)
+          f"{args.context_stride * frame_s:.2f}s apart | batch {args.batch} x {args.accum} | predictor driven by {args.z_source}"
+          + (f" | latent: {args.prior} prior" + (f" x{args.prior_k}" if args.prior == "mix" else "")
+             + f", d_z {args.d_z}, beta {args.beta} (warmup {args.beta_warmup}), free {args.free_nats} nats"
+             + (", commands withheld" if args.no_cmd else "") if stoch else " | point latents (no prior)")
+          + f" | {run}", flush=True)
 
     enc = StateEncoder(v).to(dev)
     enc.grad_ckpt = not args.no_ckpt
     tenc = copy.deepcopy(enc).requires_grad_(False)
     pred = WindowPredictor(depth=args.depth, horizons=("var",), grad_ckpt=not args.no_ckpt, residual=True, horizon_cond=True).to(dev)
     aenc = ActionEncoder(enc, av).to(dev)
-    inv = InverseModel(enc.d, args.d_z).to(dev)
-    zproj = nn.Linear(enc.d, args.d_z).to(dev)
+    inv = InverseModel(enc.d, 2 * args.d_z if stoch else args.d_z).to(dev)
+    zproj = nn.Linear(enc.d, 2 * args.d_z if stoch else args.d_z).to(dev)
+    prior = (lat.MixturePrior(enc.d, args.d_z, args.prior_k if args.prior == "mix" else 1) if stoch else nn.Identity()).to(dev)
     zup = nn.Linear(args.d_z, enc.d).to(dev)
     if args.no_orders:
         enc.use_orders = False
     tenc.use_orders = enc.use_orders and not args.target_no_orders
     chead = nn.Sequential(nn.LayerNorm(enc.d), nn.Linear(enc.d, enc.d), nn.GELU(), nn.Linear(enc.d, 3)).to(dev)  # counts per cell
-    modules = dict(encoder=enc, predictor=pred, actions=aenc, inverse=inv, zproj=zproj, zup=zup, chead=chead)
+    modules = dict(encoder=enc, predictor=pred, actions=aenc, inverse=inv, zproj=zproj, zup=zup, chead=chead, prior=prior)
     params = [p for m in modules.values() for p in m.parameters()]
     n = lambda m: sum(p.numel() for p in m.parameters()) / 1e6
-    print(f"encoder {n(enc):.2f}M, predictor {n(pred):.2f}M, action encoder {n(aenc):.2f}M, inverse {n(inv):.2f}M", flush=True)
+    print(f"encoder {n(enc):.2f}M, predictor {n(pred):.2f}M, action encoder {n(aenc):.2f}M, inverse {n(inv):.2f}M"
+          + (f", prior {n(prior):.2f}M" if stoch else ""), flush=True)
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
     warm = 200
     lr_at = lambda s: min(1, (s + 1) / warm) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps)))
@@ -280,8 +311,24 @@ def main():
             summaries, s_mask, _ = aenc(ab, horizon_s=hor)
             z_cmd, s_mask = zproj(summaries[:, 0]), s_mask[:, 0]
             z_inv = inv(slots[:, -1], after, mask[:, -1], amask, z_cmd.shape[1], horizon_s=hor)
-        st.update(slots=slots, mask=mask, present=present, target=target, valid=tmask & mask[:, -1], P=out["players"].shape[1],
-                  cls=out["cls"].view(B, C, -1)[:, -1], z_cmd=z_cmd, z_inv=z_inv, s_mask=s_mask)
+        P = out["players"].shape[1]
+        cls = out["cls"].view(B, C, -1)[:, -1]
+        st.update(slots=slots, mask=mask, present=present, target=target, valid=tmask & mask[:, -1], P=P,
+                  cls=cls, z_cmd=z_cmd, z_inv=z_inv, s_mask=s_mask)
+        if stoch:
+            # the three estimates of z: posterior (inverse model), commands, prior (present only)
+            Pz = z_cmd.shape[1]
+            cmd_mu, cmd_lv = lat.split_gauss(z_cmd)
+            post_mu, post_lv = lat.split_gauss(z_inv)
+            ply = slots[:, -1, 1:1 + min(P, Pz)].float()
+            if ply.shape[1] < Pz:
+                ply = F.pad(ply, (0, 0, 0, Pz - ply.shape[1]))
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                pri = prior(cls.float(), ply)
+            train_mode = enc.training
+            st.update(z_cmd=cmd_mu, z_inv=post_mu, cmd=(cmd_mu, cmd_lv), post=(post_mu, post_lv), prior=pri,
+                      z_post=lat.rsample(post_mu, post_lv) if train_mode else post_mu,
+                      z_cmd_s=lat.rsample(cmd_mu, cmd_lv) if train_mode else cmd_mu)
         return st
 
     def run_pred(st, use_inv=False, borrow=0, none=False, z=None):
@@ -290,7 +337,10 @@ def main():
         the batch, or z given explicitly) or nothing (none)."""
         B, C = st["B"], args.context
         if z is None:
-            z = st["z_inv"] if use_inv else st["z_cmd"]
+            if stoch:
+                z = st["z_post"] if (use_inv or args.no_cmd) else st["z_cmd_s"]
+            else:
+                z = st["z_inv"] if use_inv else st["z_cmd"]
         if borrow:
             z = torch.roll(z, borrow, 0)
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -331,6 +381,22 @@ def main():
         sim = sim.masked_fill(near, float("-inf"))
         tgt = torch.arange(len(sim), device=dev)
         return (F.cross_entropy(sim, tgt) + F.cross_entropy(sim.t(), tgt)) / 2, (sim.argmax(1) == tgt).float().mean()
+
+    def latent_terms(st):
+        """KL(posterior || prior) per (pair, player) by one-sample Monte Carlo (the sample that
+        drives the predictor), KL(posterior || commands) in closed form, the prior's component
+        usage over the batch and the repulsion between its components. Masked to real players."""
+        post_mu, post_lv = st["post"]
+        cmd_mu, cmd_lv = st["cmd"]
+        m = st["s_mask"].float()
+        kl_p = lat.kl_mc(st["z_post"], post_mu, post_lv, st["prior"])                  # [B, P]
+        kl_c = lat.kl_gauss(post_mu, post_lv, cmd_mu, cmd_lv)                           # [B, P]
+        resp = lat.mix_resp(st["z_post"].detach(), st["prior"])
+        use_loss, eff = lat.usage(resp, st["s_mask"])
+        div = lat.diversity(st["prior"], st["s_mask"])
+        avg = lambda x: (x * m).sum() / m.sum().clamp(min=1)
+        return dict(kl=avg(kl_p), kl_charged=avg(kl_p.clamp(min=args.free_nats)), align=avg(kl_c),
+                    usage=use_loss, eff=eff, div=div, kl_pairs=(kl_p * m).sum(1) / m.sum(1).clamp(min=1))
 
     def borrow_index(st, K):
         """For each pair, K other pairs whose latent actions to try: the same game's other
@@ -406,7 +472,8 @@ def main():
                         nb = to(collate_actions([ps[i]["near"][off] for i in idx]), dev)
                         summ, _, _ = aenc(nb, horizon_s=st["hor"][idx])
                         z_full = st["z_cmd"].clone()
-                        z_full[idx] = zproj(summ[:, 0]).to(z_full.dtype)
+                        zn = zproj(summ[:, 0])
+                        z_full[idx] = (lat.split_gauss(zn)[0] if stoch else zn).to(z_full.dtype)
                     pr_off = run_pred(st, z=z_full)
                     near_loss[off] = (idx, pair_loss(pr_off, st)[idx])
                     if abs(off) == 1:
@@ -443,6 +510,16 @@ def main():
                         if k != "real" and len(per_pair[k]):
                             ok_ = ~torch.isnan(per_pair[k])
                             acc[(f"cnt_{qn}", k, "win")] += (per_pair["real"][ok_] < per_pair[k][ok_]).float().tolist()
+                if stoch:
+                    lt = latent_terms(st)
+                    pri = st["prior"]
+                    acc["kl"] += lt["kl_pairs"].tolist()
+                    acc["prior_mean"] += pair_loss(run_pred(st, z=lat.mix_mean(pri)), st).tolist()
+                    samp = torch.stack([pair_loss(run_pred(st, z=lat.mix_sample(pri)), st) for _ in range(args.eval_samples)])
+                    acc["prior_sample"] += samp.mean(0).tolist()
+                    acc["best_of_k"] += samp.min(0).values.tolist()
+                    acc["post_mu"].append(st["post"][0][st["s_mask"]].cpu())
+                    acc["resp"].append(lat.mix_resp(st["z_post"], pri)[st["s_mask"]].cpu())
                 _, agree = agreement(st)
                 acc["real"] += real.tolist()
                 acc["copy"] += pair_loss(st["present"][:, -1], st).tolist()
@@ -453,7 +530,15 @@ def main():
                 acc["mrr"] += (1 / rank).tolist()
                 acc["agree"].append(agree.item())
                 acc["chance"].append(1 / (K + 1))
+            lat_row = dict(prior_mean=float("nan"), prior_sample=float("nan"), best_of_k=float("nan"), kl=float("nan"),
+                           active_units=float("nan"), eff_k=float("nan"))
+            if stoch:
+                post_all = torch.cat(acc.pop("post_mu"))
+                r = torch.cat(acc.pop("resp")).mean(0)
+                lat_row.update(active_units=lat.active_units(post_all), eff_k=float((-(r * (r + 1e-8).log()).sum()).exp()))
             m_ = {k: float(np.nanmean(x)) if len(x) else float("nan") for k, x in acc.items()}
+            if stoch:
+                lat_row.update(prior_mean=m_["prior_mean"], prior_sample=m_["prior_sample"], best_of_k=m_["best_of_k"], kl=m_["kl"])
             cnt_rows = {}
             for qn in ("units", "army"):
                 r_ = lambda k, w: float(np.sqrt(np.nanmean(acc[(f"cnt_{qn}", k, w)]))) if acc.get((f"cnt_{qn}", k, w)) else float("nan")
@@ -465,7 +550,12 @@ def main():
             rows.append(dict(set=name, step=step, horizon_s=d_s, loss=m_["real"], copy=m_["copy"], ratio=ratio,
                              agree=m_["agree"], recall=m_["recall"], chance=m_["chance"], mrr=m_["mrr"],
                              borrowed=m_["borrowed"], none=m_["none"], oracle=m_["oracle"],
-                             share_cls=share["cls"], share_grid=share["grid"]))
+                             share_cls=share["cls"], share_grid=share["grid"], **lat_row))
+            if stoch:
+                print(f"[{name} {step}] D={d_s:g}s latent: prior mean {m_['prior_mean']:.4f} one sample {m_['prior_sample']:.4f} "
+                      f"best of {args.eval_samples} {m_['best_of_k']:.4f} posterior {m_['oracle']:.4f} (copy {m_['copy']:.4f}) | "
+                      f"KL {m_['kl']:.1f} nats | active units {lat_row['active_units']}/{args.d_z} | components used "
+                      f"{lat_row['eff_k']:.1f}/{prior.K}", flush=True)
             for qn, c in cnt_rows.items():
                 print(f"[{name} {step}] D={d_s:g}s counts/cell ({qn}, game units) changing cells RMSE: real {c['real']:.2f} "
                       f"adj-1 {c['adj_m']:.2f} adj+1 {c['adj_p']:.2f} none {c['none']:.2f} copy {c['copy']:.2f} | all cells real "
@@ -550,9 +640,17 @@ def main():
             spread = torch.cat([cls, cls_memory])
             var = F.relu(1.0 - spread.std(0)).mean() if len(spread) > 1 else cls.sum() * 0
             cls_memory = torch.cat([cls.detach(), cls_memory])[:args.var_memory]
-            ((rel + args.var_weight * var + args.nce_weight * nce + args.cf_weight * cf + args.cnt_weight * cnt) / args.accum).backward()
+            total = rel + args.var_weight * var + args.nce_weight * nce + args.cf_weight * cf + args.cnt_weight * cnt
+            extra = ()
+            if stoch:
+                lt = latent_terms(st)
+                beta_t = args.beta * min(1.0, step / max(1, args.beta_warmup))
+                total = total + beta_t * lt["kl_charged"] + args.align_weight * lt["align"] \
+                    + args.usage_weight * lt["usage"] + args.div_weight * lt["div"]
+                extra = (("kl", lt["kl"]), ("align", lt["align"]), ("eff", lt["eff"]), ("div", lt["div"]))
+            (total / args.accum).backward()
             for k, x in (("loss", loss), ("copy", nochange.mean()), ("rel", rel), ("nce", nce), ("agree", agree), ("var", var),
-                         ("cf", cf), ("cf_win", cf_win), ("cnt", cnt), ("cnt_copy", cnt_copy)):
+                         ("cf", cf), ("cf_win", cf_win), ("cnt", cnt), ("cnt_copy", cnt_copy)) + extra:
                 tot[k] += x.item() / args.accum
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
@@ -567,8 +665,9 @@ def main():
             sps = (time.time() - t0) / (step - start)
             print(f"step {step:5d} D={d_s:4.1f}s loss {tot['loss']:.4f} vs copy {tot['copy']:.4f} ({tot['rel']:.0%}) "
                   f"agree {tot['nce']:.3f}/{tot['agree']:.0%} cf {tot['cf']:.3f}/{tot['cf_win']:.0%} "
-                  f"cnt {tot['cnt']:.4f} (copy {tot['cnt_copy']:.4f}) var {tot['var']:.3f} lr {opt.param_groups[0]['lr']:.2e} "
-                  f"{sps:.2f}s/step mem {torch.cuda.max_memory_allocated() / 2**30:.1f}GB", flush=True)
+                  f"cnt {tot['cnt']:.4f} (copy {tot['cnt_copy']:.4f}) var {tot['var']:.3f} "
+                  + (f"kl {tot['kl']:.1f} align {tot['align']:.2f} used {tot['eff']:.1f}/{prior.K} " if stoch else "")
+                  + f"lr {opt.param_groups[0]['lr']:.2e} {sps:.2f}s/step mem {torch.cuda.max_memory_allocated() / 2**30:.1f}GB", flush=True)
         if step % args.eval_every == 0 or step == args.steps:
             for name in eval_pairs:
                 rows, share = evaluate(step, name)
