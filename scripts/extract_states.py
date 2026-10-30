@@ -20,12 +20,20 @@ compressed .npz per replay in --out:
                              rest are queued (progress 0). Some morphs (orbital, lair, hive)
                              report progress 0 throughout.
     b_id / pass_*            buffs, passengers
+    grp_*                    every player's control groups 0-9 and active selection (10) per
+                             frame, from the replay's selection events (worldmodel/
+                             selection_tracker.py): grp_player[P] the slots; group g of player
+                             k at frame f is grp_id[grp_start[(f*P+k)*11+g]:grp_start[(f*P+k)*11+g+1]],
+                             state unit ids in the game's order (ascending tag), dead members
+                             left out. Player-view files have the same with P = 1 (their player)
     ord_*                    the unit's orders in queue order: ability, target point (NaN if
                              none), target unit id (-1 if none), progress
                              all ragged per unit row: row i owns [u_<x>_start[i], u_<x>_start[i+1])
     e_*, e_frame_start[F+1]  effects (storms, biles, scans, ...), one row per position
     dead_id, dead_frame_start[F+1]
-                             units (already seen) that died since the previous frame
+                             units (already seen) that died since the previous frame (player
+                             views before 2026-10-30 miss the deaths reported in the per-loop
+                             observations --substep discards, about 3 in 4)
     map_pathing_grid, map_placement_grid, map_terrain_height
                              the map's static grids (formats in meta)
     p_*                      per-player stats from the tracker (all players, every 160 loops)
@@ -51,6 +59,21 @@ slot, fog on), exactly as the engine shows it to that player, written to --pov_o
     creep[F, H, W]           creep as that player knows it
     u_display, u_cloak       the engine's display_type (1 visible, 2 snapshot, 3 hidden) and
                              cloak state per unit, as reported (also in observer files)
+    cmd_*                    every command the engine executed for this player, with its
+                             recipients (worldmodel/README.md, "Command recipients"):
+                             cmd_loop (the loop it was issued, exact), cmd_frame (the frame
+                             whose observation window reported it), cmd_abil (API ability),
+                             cmd_target (0 none, 1 point, 2 unit), cmd_tx/cmd_ty, cmd_target_id,
+                             cmd_queued; recipients of command c are the state unit ids
+                             cmd_unit[cmd_start[c]:cmd_start[c+1]], in the engine's order
+    sel_loop[S], sel_start[S+1], sel_id
+                             the engine's is_selected set (state unit ids) at every loop it
+                             changed: the player's selection as of loop L is the last snapshot
+                             with sel_loop <= L (the per-loop observations are read for this)
+    ui_grp_count, ui_grp_leader [F, 10], ui_sel_panel[F], ui_sel_type / ui_sel_start[F+1]
+                             with --ui: the engine's own summary of the same (ui_data: count and
+                             leader type per group, the selection panel's unit types), for
+                             validating grp_* (needs the feature layer on)
 
 Nothing is derived or masked here: other players' private details, snapshots of structures in
 fog and undetected cloaked units are whatever the engine reports for that player.
@@ -121,9 +144,12 @@ R_DTYPES = dict(  # ragged: unit row i owns [<x>_start[i], <x>_start[i+1]) (the 
     prod_abil=np.int16, prod_progress=np.float16, b_id=np.int16, pass_id=np.int32, pass_type=np.int16, pass_hp=np.float32,
     ord_abil=np.int16, ord_tx=np.float32, ord_ty=np.float32, ord_target=np.int32, ord_progress=np.float16)
 E_DTYPES = dict(type=np.int16, owner=np.int8, x=np.float32, y=np.float32, radius=np.float16)
+CMD_DTYPES = dict(  # player views: the engine's executed commands (recipients: cmd_unit, ragged by cmd_start)
+    loop=np.int32, frame=np.int32, abil=np.int32, target=np.int8, tx=np.float32, ty=np.float32,
+    target_id=np.int32, queued=np.bool_, start=np.int64)
 
-# Unit flags packed into u_flags.
-F_FLYING, F_BURROWED, F_CLOAKED, F_HALLUC, F_SNAPSHOT, F_POWERED = 1, 2, 4, 8, 16, 32
+# Unit flags packed into u_flags (F_SELECTED: the observed player's selection, player views only).
+F_FLYING, F_BURROWED, F_CLOAKED, F_HALLUC, F_SNAPSHOT, F_POWERED, F_SELECTED = 1, 2, 4, 8, 16, 32, 64
 
 PLAYER_STATS = {  # tracker PlayerStats field -> output name (food is fixed point /4096)
     "m_scoreValueMineralsCurrent": "minerals",
@@ -324,9 +350,11 @@ class DesyncCheck:
                 raise RuntimeError(f"desync at {loop / LPS:.0f}s: unit {t} isn't in the replay's unit log")
 
 
-def extract(path, out_path, step, until, perspective=0, substep=0):
+def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
     """Plays one replay and saves every frame (see the module doc). perspective 0: observer,
-    fog off; a player slot: as that player sees it (fog on)."""
+    fog off; a player slot: as that player sees it (fog on); ui: also the engine's control group
+    and selection panel summaries (ui_*), which need the feature layer on."""
+    from pysc2.lib import protocol
     from s2clientprotocol import sc2api_pb2 as sc_pb
 
     info = replay_info(path)
@@ -347,6 +375,40 @@ def extract(path, out_path, step, until, perspective=0, substep=0):
             ids[tag] = len(ids)
         return ids[tag]
 
+    # Player views: the engine's executed commands with their recipients (every observation,
+    # the per-loop ones included) and its per-frame control group / selection panel summary.
+    cmd = {k: [] for k in CMD_DTYPES}
+    cmd_tags = []  # recipients' engine tags, flat; mapped to ids at the end
+    cmd["start"].append(0)
+    ui_count, ui_leader, ui_panel, ui_sel, ui_sel_start = [], [], [], [], [0]
+    sel_loop, sel_start, sel_ids, last_sel = [], [0], [], None  # is_selected snapshots, at every loop the set changed
+
+    def take_selection(units, loop):
+        nonlocal last_sel
+        cur = [u.tag for u in units if u.is_selected]
+        if cur != last_sel:
+            last_sel = cur
+            sel_loop.append(loop)
+            sel_ids.extend(uid(t) for t in cur)
+            sel_start.append(len(sel_ids))
+
+    def take_actions(actions, frame):
+        for a in actions:
+            if not a.HasField("action_raw") or not a.action_raw.HasField("unit_command"):
+                continue
+            uc = a.action_raw.unit_command
+            cmd["loop"].append(a.game_loop)
+            cmd["frame"].append(frame)
+            cmd["abil"].append(uc.ability_id)
+            has_pos = uc.HasField("target_world_space_pos")
+            cmd["target"].append(1 if has_pos else 2 if uc.HasField("target_unit_tag") else 0)
+            cmd["tx"].append(uc.target_world_space_pos.x if has_pos else np.nan)
+            cmd["ty"].append(uc.target_world_space_pos.y if has_pos else np.nan)
+            cmd["target_id"].append(uid(uc.target_unit_tag) if uc.HasField("target_unit_tag") else -1)
+            cmd["queued"].append(uc.queue_command)
+            cmd_tags.extend(uc.unit_tags)
+            cmd["start"].append(len(cmd_tags))
+
     cols = {k: [] for k in U_DTYPES}      # the current frame's unit rows
     chunks = {k: [] for k in U_DTYPES}    # ... packed into typed arrays per frame (Python lists for a whole game ran to GBs)
     n_rows = 0
@@ -360,11 +422,17 @@ def extract(path, out_path, step, until, perspective=0, substep=0):
         substep = 0  # no fog in the observer view: the per-loop observation requests are pointless there
     proc = run_config.start(want_rgb=False)
     with proc as c:
+        opts = sc_pb.InterfaceOptions(raw=True, score=False, show_cloaked=True, show_burrowed_shadows=True,
+                                      show_placeholders=False, raw_affects_selection=False)
+        if perspective and ui:
+            # ui_data (control groups, selection panel) is only filled with the feature layer
+            # on; the smallest one costs nothing measurable (3000 loops: 4.4 s vs 4.1 s raw-only)
+            opts.feature_layer.width = 24
+            opts.feature_layer.resolution.x = opts.feature_layer.resolution.y = 16
+            opts.feature_layer.minimap_resolution.x = opts.feature_layer.minimap_resolution.y = 16
         req = sc_pb.RequestStartReplay(
             # observer: fog off, everything; a player: that player's view, fog on (module doc)
-            replay_data=data, observed_player_id=perspective, disable_fog=perspective == 0,
-            options=sc_pb.InterfaceOptions(raw=True, score=False, show_cloaked=True, show_burrowed_shadows=True,
-                                           show_placeholders=False, raw_affects_selection=False))
+            replay_data=data, observed_player_id=perspective, disable_fog=perspective == 0, options=opts)
         if current:
             c.start_replay(req)
         else:
@@ -392,20 +460,30 @@ def extract(path, out_path, step, until, perspective=0, substep=0):
         loop, stalled = 0, 0
         ping = sc_pb.Request(observation=sc_pb.RequestObservation())
         while loop < until:
-            if substep and substep < step:
-                # The client keeps a unit that left the player's vision in the observation for 47
-                # observation *requests* (measured: 2.1 s at 1 loop per request, 8.4 s at 4, longer
-                # at 8), so stepping several loops per observation leaks enemy movement through the
-                # fog. An observation is requested every substep loops and discarded unparsed; only
-                # every --step loops is one parsed and kept.
-                for _ in range(step // substep - 1):
+            try:
+                if substep and substep < step:
+                    # The client keeps a unit that left the player's vision in the observation for 47
+                    # observation *requests* (measured: 2.1 s at 1 loop per request, 8.4 s at 4, longer
+                    # at 8), so stepping several loops per observation leaks enemy movement through the
+                    # fog. An observation is requested every substep loops and, except for the commands
+                    # and deaths it reports, discarded; only every --step loops is one parsed in full and kept.
+                    for _ in range(step // substep - 1):
+                        c.step(substep)
+                        c._client.write(ping)
+                        r = c._client._sock.recv()
+                        if perspective:  # ~0.1 ms to parse with upb: the commands and deaths this observation
+                            ob = sc_pb.Response.FromString(r).observation  # reports (both are "since the last one"),
+                            take_actions(ob.actions, len(frame_loop))      # and the player's selection
+                            dead.extend(ids[t] for t in ob.observation.raw_data.event.dead_units if t in ids)
+                            take_selection(ob.observation.raw_data.units, ob.observation.game_loop)
                     c.step(substep)
-                    c._client.write(ping)
-                    c._client._sock.recv()
-                c.step(substep)
-            else:
-                c.step(step)
-            o = c.observe()
+                else:
+                    c.step(step)
+                o = c.observe()
+            except protocol.ProtocolError as ex:  # a player's view ends when that player leaves the game
+                if "already ended" in str(ex) and perspective:
+                    break
+                raise
             prev, loop = loop, o.observation.game_loop
             stalled = stalled + 1 if loop <= prev else 0
             if stalled >= 5:
@@ -430,7 +508,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0):
                 cols["build"].append(u.build_progress)
                 cols["flags"].append(F_FLYING * u.is_flying | F_BURROWED * u.is_burrowed | F_CLOAKED * (u.cloak in (1, 2, 4))
                                      | F_HALLUC * u.is_hallucination | F_SNAPSHOT * (u.display_type == 2)
-                                     | F_POWERED * u.is_powered)
+                                     | F_POWERED * u.is_powered | F_SELECTED * u.is_selected)
                 cols["contents"].append(u.mineral_contents or u.vespene_contents)
                 cols["harvesters"].append(u.assigned_harvesters)
                 cols["add_on"].append(uid(u.add_on_tag) if u.add_on_tag else -1)
@@ -484,6 +562,29 @@ def extract(path, out_path, step, until, perspective=0, substep=0):
             if perspective:
                 vis.append(np.frombuffer(raw.map_state.visibility.data, np.uint8).copy())
                 creep.append(np.frombuffer(raw.map_state.creep.data, np.uint8).copy())
+                take_actions(o.actions, len(frame_loop) - 1)
+                take_selection(raw.units, loop)
+            if perspective and ui:
+                ud = o.observation.ui_data
+                cnt, lead = np.zeros(10, np.int16), np.zeros(10, np.int32)
+                for g in ud.groups:
+                    cnt[g.control_group_index], lead[g.control_group_index] = g.count, g.leader_unit_type
+                ui_count.append(cnt)
+                ui_leader.append(lead)
+                # the selection panel: whichever panel the game shows for the selection
+                if ud.HasField("single"):
+                    panel, types = 1, [ud.single.unit.unit_type]
+                elif ud.HasField("multi"):
+                    panel, types = 2, [u.unit_type for u in ud.multi.units]
+                elif ud.HasField("cargo"):
+                    panel, types = 3, [ud.cargo.unit.unit_type]
+                elif ud.HasField("production"):
+                    panel, types = 4, [ud.production.unit.unit_type]
+                else:
+                    panel, types = 0, []
+                ui_panel.append(panel)
+                ui_sel.extend(types)
+                ui_sel_start.append(len(ui_sel))
             # a player still sees snapshots of enemy structures that died in the fog, so in a
             # player view only the player's own units are checked against the replay's log
             desync.check(loop, [u.tag for u in raw.units if not perspective or u.owner == perspective])
@@ -510,24 +611,46 @@ def extract(path, out_path, step, until, perspective=0, substep=0):
         arrays["creep"] = np.stack(creep).reshape(len(creep), h, -1)
         info["vis_format"] = dict(bits=ms.visibility.bits_per_pixel, size=[w, h])
         info["creep_format"] = dict(bits=ms.creep.bits_per_pixel, size=[ms.creep.size.x, ms.creep.size.y])
+    stats = dict(frames=len(frame_loop), rows=n_rows)
+    if perspective:
+        cmd_ids = np.asarray([uid(t) for t in cmd_tags], np.int32)
+        arrays.update({f"cmd_{k}": np.asarray(v, dtype=CMD_DTYPES[k]) for k, v in cmd.items()}, cmd_unit=cmd_ids,
+                      sel_loop=np.asarray(sel_loop, np.int32), sel_start=np.asarray(sel_start, np.int64),
+                      sel_id=np.asarray(sel_ids, np.int32))
+        if ui:
+            arrays.update(ui_grp_count=np.asarray(ui_count, np.int16).reshape(-1, 10),
+                          ui_grp_leader=np.asarray(ui_leader, np.int32).reshape(-1, 10),
+                          ui_sel_panel=np.asarray(ui_panel, np.int8), ui_sel_type=np.asarray(ui_sel, np.int32),
+                          ui_sel_start=np.asarray(ui_sel_start, np.int64))
     tags = np.zeros(len(ids), np.uint64)
     for tag, i in ids.items():
         tags[i] = tag
     arrays.update(unit_tag=tags, meta=np.asarray(json.dumps(info)))
+    # Control groups and selection per frame from the replay's own events (every player in the
+    # observer view, the observed one in a player view), the latter checked against the engine's
+    # summaries, selection and recipients (worldmodel/selection_tracker.py)
+    from cosmicstar.worldmodel import replay_actions, selection_tracker
+    acts = replay_actions.parse(path)
+    died = selection_tracker.deaths_by_replay_tag(desync.died)  # exact death loops, from the replay
+    slots = [perspective] if perspective else [p["slot"] for p in info["players"]]
+    arrays.update(selection_tracker.frame_groups(acts, slots, arrays["frame_loop"], tags, died))
+    if perspective:
+        checks = selection_tracker.validate(arrays, acts, perspective, died)
+        stats["groups"] = {k: int(v) for k, v in checks.items() if k != "mismatches"}
+    stats["units"] = len(ids)
     tmp = out_path + ".tmp.npz"
     np.savez_compressed(tmp, **arrays)
     os.replace(tmp, out_path)
-    return len(frame_loop), n_rows, len(ids)
+    return stats
 
 
 # ---------------------------------------------------------------- job list and workers
 
 def installed_builds():
-    out = set()
-    for d in glob.glob(os.path.join(SC2_DIR, "Versions", "Base*")):
-        if os.path.isfile(os.path.join(d, "SC2_x64.exe")):
-            out.add(int(os.path.basename(d)[4:]))
-    return out
+    """Base builds we have an engine for, in the install or the side install with the older
+    builds (wine_run_config.installed_builds; the run config picks the install per build)."""
+    from cosmicstar.envs import wine_run_config
+    return wine_run_config.installed_builds()
 
 
 def out_name(path):
@@ -535,15 +658,16 @@ def out_name(path):
     return hashlib.sha1(os.path.basename(path).encode()).hexdigest()[:12] + ".npz"
 
 
-def build_manifest(replay_dir, player, out_dir, require_player=False):
+def build_manifest(replay_dir, player, out_dir, require_player=False, any_ruleset=False):
     """Every replay we can extract: right patch, binary installed, map cached (and the
-    player present, if required)."""
+    player present, if required). any_ruleset: also rulesets without an Editor balance export
+    (their abilities can't be named, which only matters for the action vocabulary)."""
     have = installed_builds()
     # rulesets the Editor could export (export_balance.py): without that we can't name actions
     exported = os.path.join(BALANCE_DIR, "status.json")
-    exported = json.load(open(exported)) if os.path.exists(exported) else None
+    exported = json.load(open(exported)) if os.path.exists(exported) and not any_ruleset else None
     jobs, skipped = [], {}
-    for path in sorted(glob.glob(os.path.join(replay_dir, "*.SC2Replay")), key=os.path.getmtime):
+    for path in sorted(glob.glob(os.path.join(replay_dir, "**", "*.SC2Replay"), recursive=True), key=os.path.getmtime):
         try:
             info = replay_info(path)
         except Exception:
@@ -649,7 +773,7 @@ def protobuf_impl():
     return "upb" if "AddSerializedFile" in open(bindings, encoding="utf-8").read() else "python"
 
 
-def run_worker(jobs, step, until, substep=0):
+def run_worker(jobs, step, until, substep=0, ui=False):
     from absl import flags
     flags.FLAGS(sys.argv[:1])
     for j in jobs:
@@ -658,16 +782,19 @@ def run_worker(jobs, step, until, substep=0):
         t0 = time.time()
         for attempt in range(3):
             try:
-                f, n, u = extract(j["path"], j["out"], step, until, j.get("perspective", 0), substep)
-                print(json.dumps(dict(ok=os.path.basename(j["path"]), view=j.get("perspective", 0), frames=f, rows=n, units=u,
+                st = extract(j["path"], j["out"], step, until, j.get("perspective", 0), substep, ui)
+                print(json.dumps(dict(ok=os.path.basename(j["path"]), view=j.get("perspective", 0), **st,
                                       mb=round(os.path.getsize(j["out"]) / 1e6, 1), s=round(time.time() - t0), tries=attempt + 1)), flush=True)
                 break
             except Exception as ex:
                 # replay starts fail in bursts while another instance fetches data for a map it
                 # hasn't seen (InvalidReplayData); they pass once it's cached, so wait and retry.
                 # The client also stalls past pysc2's 120 s websocket timeout now and then
-                # (seen once in 12 games under Wine; the game passed alone), so retry those too.
-                if ("InvalidReplayData" in repr(ex) or "timed out" in repr(ex)) and attempt < 2:
+                # (seen once in 12 games under Wine; the game passed alone), so retry those too,
+                # and under Proton with several instances launching, the websocket of one is lost
+                # or never comes up (ConnectError / ConnectionError / WebSocketConnectionClosed:
+                # 6 of 12 player views with 4 workers, 2026-10-30); those passed alone as well.
+                if ("InvalidReplayData" in repr(ex) or "timed out" in repr(ex) or "Connect" in repr(ex)) and attempt < 2:
                     time.sleep(45 * (attempt + 1))
                     continue
                 print(json.dumps(dict(fail=os.path.basename(j["path"]), error=repr(ex)[:200], tries=attempt + 1)), flush=True)
@@ -691,6 +818,10 @@ def main():
     ap.add_argument("--pov_out", default="data/worldmodel/pov", help="player views go here")
     ap.add_argument("--games", help="json list of output names (<hash>.npz): only these games")
     ap.add_argument("--no_fetch", action="store_true", help="don't fetch missing maps/mods from the depot")
+    ap.add_argument("--ui", action="store_true", help="player views: also keep the engine's control group / selection "
+                    "panel summaries (ui_*, for validating the tracked groups); turns the feature layer on")
+    ap.add_argument("--any_ruleset", action="store_true", help="also replays whose ruleset has no Editor balance export "
+                    "(their abilities can't be named)")
     ap.add_argument("--worker", help=argparse.SUPPRESS)  # internal: job list for one worker process
     args = ap.parse_args()
 
@@ -699,7 +830,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     manifest = os.path.join(args.out, "manifest.json")
     if args.worker:
-        run_worker(json.load(open(args.worker)), args.step, int(args.until * LPS), args.substep)
+        run_worker(json.load(open(args.worker)), args.step, int(args.until * LPS), args.substep, args.ui)
         return
     os.makedirs(args.pov_out, exist_ok=True)
     # resuming: claims left by an interrupted run (no output, no partial file) are free again
@@ -710,7 +841,7 @@ def main():
                 os.remove(out_path + ".tmp.npz")
             os.remove(c)
 
-    jobs, skipped = build_manifest(args.replays, args.player, args.out, args.require_player)
+    jobs, skipped = build_manifest(args.replays, args.player, args.out, args.require_player, args.any_ruleset)
     if args.games:
         keep = set(json.load(open(args.games)))
         jobs = [j for j in jobs if os.path.basename(j["out"]) in keep]
@@ -746,7 +877,7 @@ def main():
         json.dump(job_list, open(path, "w"))
         procs = [subprocess.Popen([sys.executable, os.path.abspath(__file__), "--out", args.out, "--step",
                                    str(args.step), "--until", str(args.until), "--substep", str(args.substep), "--worker", path]
-                                  + (["--no_fetch"] if args.no_fetch else []),
+                                  + (["--no_fetch"] if args.no_fetch else []) + (["--ui"] if args.ui else []),
                                   env=env, stderr=subprocess.DEVNULL) for _ in range(n)]
         for p in procs:
             p.wait()

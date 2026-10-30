@@ -637,6 +637,234 @@ How it would enter the models:
 Open: whether to count raw or effective actions for the limiter, how to window it (per minute
 vs per fight), and how the inverse model's latent action (per interval, all players) relates
 to a per-player budget.
+### Command recipients and control groups (2026-10-30)
+
+The API does not expose control-group contents: `ui_data.groups` is index + leader unit type
++ count per group, and the selection panel (`ui_data.multi`) lists type / hp / energy per
+selected unit without tags. What it does expose, in a player-view playback, is every command
+the engine executed with its resolved recipients:
+`observation.actions[].action_raw.unit_command.unit_tags` (plus ability, target point / tag).
+`scripts/build_ability_table.py` already reads these for the ability table and drops the tags.
+
+Plan: (1) in the player-view extraction, store per command loop, ability, target and recipient
+unit ids (via `unit_tag`), one playback per player as now; join to the observer's command
+stream on loop / ability / target for observer-view training. (2) Control-group contents as
+part of the player's state: a selection tracker over the replay's selection-delta and
+control-group events (`worldmodel/replay_actions.py` already parses the deltas; sc2reader's
+tracker is the reference for the index/mask semantics), validated per frame against
+`ui_data.groups` (count, leader type) and at every command against the engine's recipients
+(a command issued to group 1 reveals group 1 exactly). Stored per frame as ragged group
+membership; in the player view each entity token gets an 11-bit "in groups / selected"
+feature, so "select group 1, snipe" needs no long-term memory in the model.
+
+Built 2026-10-30. Validated on the 13 build-98310 1v1 games of `data/replays/pig-viewer-replays`
+(26 player views + 13 observer views, `data/worldmodel/pov_1v1` / `obs_1v1`, extracted with
+`--any_ruleset` since their ruleset has no Editor export) and, first, on four 2v2 games of
+`my-recent-games` (`pov_cmd` / `obs_cmd_test`). Three pieces:
+
+**1. Command recipients** (`extract_states.py --views players`, per-view file). With the
+smallest feature layer on (16x16; the engine fills `ui_data` only then; cost unmeasurable, 4.4 vs
+4.1 s per 3000 loops) the player view keeps every command the engine executed, with the
+exact loop it was issued at (`Action.game_loop`) and its recipients:
+
+    cmd_loop[C], cmd_frame[C]      issue loop (exact); the frame whose observation window reported it
+    cmd_abil[C]                    API ability id
+    cmd_target[C], cmd_tx, cmd_ty, cmd_target_id
+                                   0 none / 1 point / 2 unit; the point (NaN if none), the target's
+                                   state unit id (-1 if none)
+    cmd_queued[C]                  the shift-queue flag
+    cmd_start[C+1], cmd_unit[M]    recipients of command c: cmd_unit[cmd_start[c]:cmd_start[c+1]],
+                                   state unit ids (unit_tag maps them to engine tags), in the
+                                   engine's order (ascending tag)
+
+The per-loop observations that `--substep 1` requests are no longer thrown away unparsed: their
+commands, deaths and the player's selection are read (0.1 ms to parse with upb, plus a Python
+pass over the units for `is_selected`). Before this, player views missed the commands and
+`dead_units` of 3 of every 4 loops; the 33-game `pov` sample's `dead_id` lists are incomplete
+for that reason (the observer view, stepped without substep, is unaffected). Two more things
+the player view now keeps from the engine, both the observed player's only (the API fills
+`is_selected` and `ui_data` for the observed player alone, so the observer view has neither):
+
+    u_flags bit 64 (F_SELECTED)    the unit is in the player's selection, in the kept frames
+    sel_loop[S], sel_start[S+1], sel_id
+                                   the selection as a set of state unit ids at every loop it
+                                   changed (sel_loop[k] <= L < sel_loop[k+1]: the selection as
+                                   of loop L), read from every per-loop observation
+
+**2. The join to the replay's command stream** (`worldmodel/command_join.py`): each engine
+command pairs with the action-table row (`data/worldmodel/actions/<name>.npz`, the same rows for
+every view) that caused it, by exact loop and target, REPEAT rows by the last paired API ability,
+each engine command used once (the `build_ability_table.match` rules, with the exact loop
+instead of an 8-loop window). Observer-view training can take the recipients from the player
+views through this: 5698 of 5703 engine commands (99.9%) matched a row, and 1299 of 1304 CMD
+rows (99.6%) matched an engine command (a CMD row with no engine command is a rejected
+command: no larva, minerals, supply; the 5 unmatched engine commands are in the two long games).
+
+**3. Control groups and selection as state** (`worldmodel/selection_tracker.py`), per frame, in
+the observer files for every player and in each player view for its player:
+
+    grp_player[P], grp_start[F*P*11+1], grp_id[...]
+                                     group g (0-9; 10 = the active selection) of player k (slot
+                                     grp_player[k]) at frame f: grp_id[grp_start[(f*P+k)*11+g]:
+                                     grp_start[(f*P+k)*11+g+1]], state unit ids in the game's
+                                     order; dead members left out
+    ui_grp_count, ui_grp_leader[F, 10], ui_sel_panel[F], ui_sel_type / ui_sel_start[F+1]
+                                     with --ui: the engine's own summary (ui_data; needs the
+                                     feature layer on), kept for validation
+
+The replay's selection events are the only source that covers every player in the observer
+view (`is_selected`, `ui_data` and the recipients exist only in a player's own playback), so the
+tracker is primary and the engine's data validates it: per frame against `ui_data.groups`, at
+every selection / group event against the `is_selected` set one loop later, and at every
+command against the recipients. Slot 4's composed view (`compose_view.py`) carries none of the
+per-player arrays (its groups are in the observer file).
+
+The tracker replays the replay's SELECT / GROUP rows (sc2reader's SelectionTracker is the
+reference for the event structure; it sorts by tag as an approximation and ignores deaths). What
+had to be found out, each checked against the engine's recipients and group counts:
+
+- **Order.** A list (group or selection) is in ascending unit-tag order; the removal masks index
+  that order, the engine's recipients come in it, and the selection panel lists units in it
+  (every multi-unit recipient list in the sample is in tag order). The subgroup priorities in the
+  deltas describe the units; they do not order the list (sorting by them, in either direction,
+  broke the masks).
+- **Mask bits.** s2protocol reads a removal mask as one big-endian integer, and the game writes it
+  byte by byte, so for masks over more than 8 units the bytes come out swapped (position 0 of a
+  16-unit mask is bit 8). `replay_actions._mask_positions` now decodes position p as bit
+  (w-1-p%8) of the (p//8)-th 8-bit group from the top; a 23-unit cleanup mask decoded this way
+  removed exactly the 12 members that had died the loop before. **Action tables written before
+  this (`data/worldmodel/actions`, all 573) have wrong `rem_pos` for masks over 8 units and lack
+  the group masks and subgroup priorities; re-run `extract_actions.py` before using them for
+  groups** (`check_player_commands.py` refuses the old layout).
+- **Deaths.** The game does not remove a unit from a group or the selection when it dies: it stays
+  as a stale entry that the masks of later recalls and deltas account for (a baneling that
+  exploded at loop 5076 was still position 1 of its group's recall mask at loop 5233), and the
+  engine's counts, panel and recipients just skip it. Pruning at the death loop (the first
+  version) shifted every later mask. So the tracker never prunes; the per-frame output drops
+  members whose death loop (the replay's tracker events) is <= the frame loop. An egg hatching
+  is a death of the egg plus, two loops later, a delta replacing it by the hatched unit.
+- **Steal.** Set/add with steal (ops 4, 5) need no side effect: the game logs the removal from
+  every other group itself (a burst of recall / mask / set rows per affected group, then the
+  selection's restoration, all in one loop). Doing it in the tracker double-removed.
+- **Group masks.** `SControlGroupUpdateEvent` carries a mask too (dropped before): on a recall
+  it is the members not selectable right now (dead, in a transport, ...), on add the positions of
+  the group's current list. Now in the GROUP rows' `select_remove` / `rem_pos`.
+
+**1v1 results** (`scripts/check_player_commands.py data/worldmodel/pov_1v1/*.npz --replays
+data/replays/pig-viewer-replays`). Columns: (frame, group 0-9) cells whose tracked alive count
+equals `ui_grp_count`; frames whose tracked selection has the selection panel's unit types;
+selection / group events after which the tracked selection equals the engine's `is_selected` set
+one loop later; engine commands whose recipients are exactly the tracked selection at the
+command's row / a proper subset of it (the game's own filtering, below) / neither ("off": part of
+the recipients outside the tracked selection, i.e. the tracker is wrong there).
+
+| game (p1 v p2), loops | view | group cells | selection frames | events | recipients exact / subset / off |
+|---|---|---|---|---|---|
+| ZvP cannon rush (Rainfall), 8992 | p1 Z | 99.99% | 99.6% | 100% | 72 / 28 / 0 |
+| | p2 P | 100.00% | 99.7% | 100% | 98 / 2 / 0 |
+| CryHavoc v PrinceXizor, TvZ, 16963 | p1 T | 95.19% | 99.7% | 98.9% | 49 / 51 / 0 |
+| | p2 Z | 100.00% | 96.5% | 95.6% | 46 / 53 / 1 |
+| Netslayer v PrinceXizor, TvZ, 17844 | p1 T | 99.00% | 96.8% | 96.2% | 72 / 25 / 3 |
+| | p2 Z | 100.00% | 95.6% | 97.1% | 45 / 52 / 3 |
+| keyz v PrinceXizor, TvZ, 27608 | p1 T | 100.00% | 98.8% | 99.2% | 59 / 40 / 1 |
+| | p2 Z | 99.99% | 95.8% | 96.0% | 35 / 62 / 3 |
+| PrinceXizor v GatoRyup, ZvT, 30856 | p1 Z | 99.83% | 94.2% | 93.3% | 38 / 59 / 3 |
+| | p2 T | 93.39% | 99.2% | 99.9% | 37 / 63 / 0 |
+| PrinceXizor v Matallamas, ZvT, 19038 | p1 Z | 100.00% | 98.5% | 99.0% | 51 / 48 / 1 |
+| | p2 T | 99.89% | 95.4% | 98.2% | 70 / 25 / 5 |
+| At Eternity's Edge (105), TvP, 40076 | p1 T | 96.76% | 96.6% | 94.2% | 47 / 51 / 2 |
+| | p2 P | 100.00% | 98.4% | 99.7% | 50 / 50 / 0 |
+| Blackrock (72), TvP, 17930 | p1 T | 99.26% | 99.3% | 99.4% | 61 / 39 / 0 |
+| | p2 P | 100.00% | 99.1% | 99.7% | 83 / 17 / 0 |
+| Blackrock (77), PvZ, 10669 | p1 P | 100.00% | 98.3% | 99.3% | 95 / 5 / 0 |
+| | p2 Z | 100.00% | 99.2% | 99.8% | 72 / 28 / 0 |
+| Getting Reaper Cheesed, TvT, 8789 | p1 T | 100.00% | 99.8% | 100% | 90 / 10 / 0 |
+| | p2 T | 100.00% | 99.8% | 99.2% | 82 / 18 / 0 |
+| Rainfall (84), PvT, 24356 | p1 P | 100.00% | 99.6% | 99.9% | 62 / 38 / 0 |
+| | p2 T | 99.92% | 98.9% | 98.4% | 57 / 43 / 0 |
+| nydus worms forever, ZvT, 16587 | p1 Z | 100.00% | 95.4% | 95.3% | 45 / 54 / 1 |
+| | p2 T | 100.00% | 97.2% | 92.7% | 39 / 61 / 0 |
+| out macro'd, TvT, 26187 | p1 T | 100.00% | 98.5% | 98.0% | 70 / 30 / 0 |
+| | p2 T | 99.67% | 96.6% | 96.7% | 30 / 68 / 2 |
+| all 26 views | | 99.13% | 97.7% | 97.6% | 54 / 44 / 1.3 |
+
+Join: 22,666 of 22,740 engine commands (99.7%) matched a replay row, 6167 of 6257 CMD rows
+(98.6%). Group ops (set / add / recall / steal) agree with the engine's selection one loop later
+in 99.6% of 5529 cases; the remaining event mismatches are mostly single-unit SELECT rows where
+`is_selected` lags or the unit is gone a loop later. The engine's own selection agrees with its
+recipients at the same rate as the tracker's (recipients = `is_selected` set exactly for 55% of
+commands, a subset for 44%), so the subset column is the game filtering the selection, not
+tracking error. Over the non-empty group cells alone the count agreement is 97.4%; the leader
+check (first unit's type = `ui_grp_leader`) is 88.5%, see the note under the 2v2 table. All 39
+views went through on the first try with 8 workers and `PROTON_VERB=run` (a 2248-frame player
+view in 51 s, the 10,019-frame one in 368-409 s: 100-180 loops/s per worker; observer views
+28-223 s).
+
+**2v2 results**, the first test set, kept for the record (the 2v2 games have bigger armies and
+the two long Zerg views carry the open drift described below). Measured per view (`scripts/check_player_commands.py data/worldmodel/pov_cmd/*.npz --replays
+data/replays/my-recent-games`; the extraction prints the same counts per view in its `ok` line),
+all 12 views, 8 workers (the run that also wrote the observer files); same columns.
+
+| view | group cells | selection frames | events | recipients exact / subset / off | loops |
+|---|---|---|---|---|---|
+| New Bed of Chaos (50) p1, ZZvZZ | 99.98% | 99.4% | 99.7% | 63 / 37 / 0 | 6292 |
+| New Bed of Chaos (50) p2 | 99.98% | 98.9% | 100% | 78 / 22 / 0 | |
+| New Bed of Chaos (50) p3 | 99.99% | 99.4% | 100% | 81 / 19 / 0 | |
+| Fields of Death (53) p1, Zerg | 99.25% | 94.8% | 95.3% | 55 / 41 / 4 | 17166 |
+| Fields of Death (53) p2, Zerg | 97.94% | 92.0% | 91.4% | 61 / 32 / 7 | |
+| Fields of Death (53) p3, Terran | 100.00% | 99.6% | 99.9% | 78 / 22 / 0 | |
+| Rhoskallian (88) p1, Terran | 95.73% | 87.3% | 91.9% | 56 / 29 / 15 | 24642 |
+| Rhoskallian (88) p2, Protoss | 100.00% | 99.8% | 100% | 68 / 32 / 0 | |
+| Rhoskallian (88) p3, Zerg | 99.16% | 94.5% | 96.7% | 60 / 36 / 4 | |
+| Yellowjacket (100) p1, Zerg | 96.46% | 83.3% | 85.7% | 52 / 32 / 16 | 24068 |
+| Yellowjacket (100) p2, Zerg | 98.28% | 87.6% | 92.3% | 60 / 30 / 10 | |
+| Yellowjacket (100) p3, Terran | 100.00% | 96.3% | 98.5% | 54 / 43 / 3 | |
+| all twelve | 98.61% | 93.1% | 94.4% | 60 / 32 / 7 | |
+
+Join: 13,426 of 13,440 engine commands (99.9%) matched a replay row, 3281 of 3300 CMD rows
+(99.4%). The engine's own selection agrees with its recipients at the same rate as the tracker's
+(recipients = `is_selected` set exactly for 65.5% of commands, a subset for 32%): the subset
+cases are the game filtering the selection, not tracking error. Empty cells count as agreeing in
+the group column; over the non-empty cells alone the count agreement is 96.6%. The leader check
+(first tracked unit's type = `ui_grp_leader`) only works for single-type groups (98% in the ZvZ
+game, 87% overall): the panel shows the highest-priority subgroup first, and ordering the list by
+the deltas' priorities made the masks worse, so the list order and the panel's order are
+different things. The observer file's groups for a player are identical to that player's view's
+(17,303 of 17,303 lists in New Bed p2). Speed with 8 workers: a 6292-loop player view in 58 s,
+a 24,642-loop one in 361-392 s (65-110 loops/s per worker; the per-loop parse and the Python
+pass over the units for `is_selected` are part of it), observer views 24 s and 233 s.
+
+The subset cases are the game's own filtering: a train from larvae takes one larva per press
+(abilities 1342-1345, 1351), a morph one unit per press (4124 baneling), and attack / smart-click
+on a mixed selection skips the units that cannot do it (eggs, cocoons). In the short game the
+remaining mismatches are single frames at a morph (the delta lands 1-3 loops after the engine
+shows the new type) and the selection panel's own quirk of keeping a unit that died while
+selected until the next change.
+
+**Open: drift in the long Zerg views.** From the first big fight on, the tracked groups of
+Yellowjacket p1 run 1-3 units short of the engine's count for long stretches, and 16% of its
+commands have a recipient outside the tracked selection (Terran and Protoss views, and the Zerg
+views of the short game, are at 0-4%). The masks are the symptom: of the 149 group recall / add
+masks in the first six views, 122 drop exactly the tracker's dead entries, 10 a subset of them,
+and 17 (all in the long games, after fights) drop one entry the replay's death log calls alive
+and leave one it calls dead, at positions 4-9 apart in a list the tracker keeps in tag order.
+`check_player_commands.py --verbose` prints the events after which the tracker and the engine's
+`is_selected` set differ (loop, rows with masks, the units each side has alone), for this. The same list recalled a few loops apart shows the same shifted position, so
+the game's list differs from the tracker's by one entry's place, after many units of the list
+died at once. Not understood yet; candidates are a death the tracker log reports late or not at
+all (a unit killed by a baneling the same loop it was added?), or dead entries changing place in
+the game's list. Until then, per-frame groups are right to ~99% of cells in games without big
+fights and ~96% in ones with them; the per-command recipients (part 1) are exact regardless.
+
+**Launch failures, not crashes.** Two runs with four workers lost 6 of 12 views each: the SC2
+websocket closed or never came up (`WebSocketConnectionClosed`, `ConnectError`,
+`ConnectionError`), never the same views twice, and a probe launching two clients at once had
+both fail while the same client launched alone passed. So it is concurrent launching under
+Proton, not the feature layer (which is optional anyway: `--ui`, needed only for the `ui_*`
+validation arrays; the recipients come from `action_raw`). The sibling session's
+`PROTON_VERB=run` in `wine_run_config.wine_env` is meant to fix it, and the worker now retries
+these errors like `InvalidReplayData` (45 s, 90 s). The 8-worker rerun below is the test.
+
 ### Older builds from the CDN (2026-10-30)
 
 The replay header's `m_ngdpRootKey` is the TACT **root** content key of the game-data build

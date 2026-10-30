@@ -11,6 +11,11 @@ and a player's own units are identical to the observer's rows for them. So a pla
 their teammate's view, with this player's own units replaced by the observer's rows and the
 teammate's units shown as an ally sees them.
 
+Not composed: the teammate's commands with recipients (cmd_*), selection snapshots (sel_*),
+tracked groups (grp_*) and ui summaries (ui_*) are theirs, so they are left out, and the
+selected bit of u_flags is cleared (an ally does not see the selection). This player's groups
+are in the observer file (grp_* there covers every player).
+
 scripts/validate_compose.py checks this against real engine views (a full teammate view, and
 slot 4 up to the crash).
 
@@ -136,8 +141,9 @@ def compose(mate, obs, slot, mate_slot, hidden=ALLY_HIDDEN):
     arrays["frame_start"] = np.asarray(frame_start, np.int64)
     arrays["unit_tag"] = uniq
     for k, v in mate.items():  # everything else is the team's: frames, effects, maps, visibility, stats
-        if k not in arrays and not k.startswith("u_") and k not in ("meta",):
+        if k not in arrays and not k.startswith(("u_", "cmd_", "sel_", "grp_", "ui_")) and k not in ("meta",):
             arrays[k] = v
+    arrays["u_flags"] = (arrays["u_flags"] & ~np.uint8(64)).astype(mate["u_flags"].dtype)  # F_SELECTED is the mate's
     meta = json.loads(str(mate["meta"]))
     meta.update(perspective=slot, composed_from=dict(mate=mate_slot, rule=sorted(hidden)))
     arrays["meta"] = np.asarray(json.dumps(meta))

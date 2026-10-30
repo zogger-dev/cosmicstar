@@ -30,19 +30,30 @@ Fields (not every field applies to every kind; -1 / NaN / 0 = not applicable):
     snap_link, snap_player    for snapshots: the replay's unit-type link and its owner
     group                     control group (0-9); 10 = the active selection (SELECT rows)
     group_op                  GROUP rows: 0 set, 1 add, 2 recall, 3 clear, 4 set+steal, 5 add+steal
+                              ("steal": the units leave their other groups). The row's
+                              select_remove / rem_pos mask is the game's: for a recall, the
+                              group members left out of the selection (not selectable just
+                              now: in a transport, burrowed, ...); for set/add, positions of
+                              the group's current list
+    subgroup                  SELECT rows: the active subgroup index (tab) after the change
     mgr_state, sequence       REPEAT rows; command sequence numbers
     cam_x, cam_y              CAMERA rows: where the camera moved
-    select_remove             SELECT rows: REMOVE_NONE / MASK / ONE (positions to remove) /
-                              ZERO (positions to keep, remove the rest)
+    select_remove             SELECT and GROUP rows: REMOVE_NONE / MASK / ONE (positions to
+                              remove) / ZERO (positions to keep, remove the rest), positions
+                              in the list before the change
     recipient                 TRADE rows: receiving player slot
     minerals, gas             TRADE / REQUEST rows: amounts
     request_id                REQUEST_FULFILL / REQUEST_CANCEL rows
     rem_*, add_*, addsub_*    ragged lists per row: removal positions, added unit tags, added
-                              per-type counts (unit link, count); row i owns
+                              subgroups (unit link, subgroup priority, intra-subgroup
+                              priority, count), in the game's own order: subgroups by
+                              descending priority, tags ascending within a subgroup (the
+                              added tags are grouped by subgroup in this order); row i owns
                               [<x>_start[i], <x>_start[i+1])
 
 Unit references are raw replay tags; the tokenizer maps them to state ids through the
-state file's unit_tag table.
+state file's unit_tag table. worldmodel/selection_tracker.py replays the SELECT / GROUP
+rows into the player's control groups and active selection.
 """
 
 import json
@@ -61,10 +72,11 @@ POINT_SCALE, CAMERA_SCALE = 4096.0, 256.0
 COLUMNS = dict(loop=np.int32, player=np.int8, kind=np.int8, abil_link=np.int16, abil_cmd=np.int16,
                flags=np.int64, target=np.int8, tx=np.float32, ty=np.float32, target_tag=np.int64,
                snap_link=np.int32, snap_player=np.int8, group=np.int8, group_op=np.int8, mgr_state=np.int8,
-               sequence=np.int32, cam_x=np.float32, cam_y=np.float32, select_remove=np.int8,
+               sequence=np.int32, cam_x=np.float32, cam_y=np.float32, select_remove=np.int8, subgroup=np.int16,
                recipient=np.int8, minerals=np.int32, gas=np.int32, request_id=np.int32,
                rem_start=np.int64, add_start=np.int64, addsub_start=np.int64)
-RAGGED = dict(rem_pos=np.int32, add_tag=np.int64, addsub_link=np.int32, addsub_count=np.int16)
+RAGGED = dict(rem_pos=np.int32, add_tag=np.int64, addsub_link=np.int32, addsub_prio=np.int16,
+              addsub_intra=np.int16, addsub_count=np.int16)
 
 
 def _protocol(archive):
@@ -97,9 +109,22 @@ def user_slots(proto, archive):
 
 
 def _mask_positions(bits):
-    """s2protocol bitmask (length, value) -> positions of the set bits."""
+    """s2protocol bitmask (length n, value v) -> positions of the set bits.
+
+    The game writes the mask byte by byte (byte j holds positions 8j..8j+7, the last one only
+    n % 8 of them) and s2protocol reads all n bits as one big-endian integer, so byte 0 is the
+    top of v: position p is bit (w - 1 - p % 8) of the (p // 8)-th 8-bit group from the most
+    significant end, w the group's width. For n <= 8 this is just bit p of v; for longer masks
+    it is not (a 16-unit mask read as bit p was byte-swapped). Checked against the engine's
+    recipients (worldmodel/README.md, "Command recipients and control groups")."""
     n, v = bits
-    return [i for i in range(n) if (v >> i) & 1]
+    out = []
+    for b in range(n):  # b-th bit from the most significant end
+        if (v >> (n - 1 - b)) & 1:
+            q, r = divmod(b, 8)
+            w = 8 if (q + 1) * 8 <= n else n - q * 8
+            out.append(q * 8 + (w - 1 - r))
+    return sorted(out)
 
 
 def parse(path):
@@ -122,6 +147,16 @@ def parse(path):
         rows["rem_start"].append(len(rag["rem_pos"]))
         rows["add_start"].append(len(rag["add_tag"]))
         rows["addsub_start"].append(len(rag["addsub_link"]))
+
+    def remove_mask(mask):
+        """A removal mask (SELECT / GROUP rows) -> select_remove code, positions into rem_pos."""
+        kind, val = next(iter(mask.items()))
+        code = {"None": REMOVE_NONE, "Mask": REMOVE_MASK, "OneIndices": REMOVE_ONE, "ZeroIndices": REMOVE_ZERO}[kind]
+        if code == REMOVE_MASK:
+            rag["rem_pos"].extend(_mask_positions(val))
+        elif code in (REMOVE_ONE, REMOVE_ZERO):
+            rag["rem_pos"].extend(val)
+        return code
 
     def unit_target(tu):
         tag = tu.get("m_tag") or 0
@@ -161,19 +196,17 @@ def parse(path):
             row(loop, player, REPEAT, mgr_state=ev.get("m_state", -1), sequence=ev.get("m_sequence") or -1)
         elif t == "SSelectionDeltaEvent":
             d = ev["m_delta"]
-            rm_kind, rm_val = next(iter(d["m_removeMask"].items()))
-            remove = {"None": REMOVE_NONE, "Mask": REMOVE_MASK, "OneIndices": REMOVE_ONE, "ZeroIndices": REMOVE_ZERO}[rm_kind]
-            row(loop, player, SELECT, group=ev["m_controlGroupId"], select_remove=remove)
-            if remove == REMOVE_MASK:
-                rag["rem_pos"].extend(_mask_positions(rm_val))
-            elif remove in (REMOVE_ONE, REMOVE_ZERO):
-                rag["rem_pos"].extend(rm_val)
+            row(loop, player, SELECT, group=ev["m_controlGroupId"], subgroup=d["m_subgroupIndex"])
+            rows["select_remove"][-1] = remove_mask(d["m_removeMask"])
             rag["add_tag"].extend(d["m_addUnitTags"])
             for sg in d["m_addSubgroups"]:
                 rag["addsub_link"].append(sg["m_unitLink"])
+                rag["addsub_prio"].append(sg["m_subgroupPriority"])
+                rag["addsub_intra"].append(sg["m_intraSubgroupPriority"])
                 rag["addsub_count"].append(sg["m_count"])
         elif t == "SControlGroupUpdateEvent":
             row(loop, player, GROUP, group=ev["m_controlGroupIndex"], group_op=ev["m_controlGroupUpdate"])
+            rows["select_remove"][-1] = remove_mask(ev["m_mask"])
         elif t == "SCameraUpdateEvent":
             tg = ev.get("m_target")
             if tg:
