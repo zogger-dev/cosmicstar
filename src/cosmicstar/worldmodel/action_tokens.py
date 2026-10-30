@@ -292,6 +292,8 @@ class GameActions:
             seg_t=((np.asarray(bounds) - t_loop) / 22.4).astype(np.float32),
             sum_team=np.array([owners[s][0] for s in summarized], np.int64),
             sum_pcode=np.array([owners[s][1] for s in summarized], np.int64),
+            # state unit ids the window's commands touched (selected or targeted), for diagnostics
+            touched_uid=np.unique(np.concatenate([s_uid, tk["uid"][idx].astype(np.int64)])) if n else np.zeros(0, np.int64),
         )
         out.update(tgt)
         out.update(sel)

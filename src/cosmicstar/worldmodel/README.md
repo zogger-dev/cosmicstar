@@ -637,6 +637,93 @@ How it would enter the models:
 Open: whether to count raw or effective actions for the limiter, how to window it (per minute
 vs per fight), and how the inverse model's latent action (per interval, all players) relates
 to a per-player budget.
+
+## Direct state-space pilot (`scripts/train_direct.py`, `worldmodel/direct.py`, 2026-10-30)
+
+Design decision: the lowest level of the world model predicts *state*, not embeddings. SC2
+state is already an abstraction (entities with exact attributes), so regressing it wastes no
+capacity on unpredictable detail, needs no target encoder, no EMA and no collapse guard, and
+the targets come free from the extraction. Given everyone's commands the engine is
+deterministic; the only uncertainty in the observer view is the commands themselves. JEPA
+(learned targets) is kept for the levels above this one, where unit motion is effectively
+random at the horizon in question.
+
+The pilot runs on the existing observer extraction (`data/worldmodel/obs`, 4 loops per frame,
+commands per loop in `data/worldmodel/actions`): horizons k = 1..14 frames (0.18-2.5 s).
+
+Model (`worldmodel/direct.py`):
+- `RoPEEncoder`: the state encoder's token embedding (unit / owner / position / numbers /
+  production / order tables, reused) under self-attention with **2D rotary positions in map
+  units** (half of each head's pairs rotate with x, half with y, wavelengths 2-256 units), so
+  a score depends on the signed offset between two things. CLS and player tokens sit at the
+  origin. No grid or window readouts.
+- `ActionEncoder` (reused): the window's commands [t, t+k) in loop order through a causal
+  transformer; the predictor cross-attends to these tokens, and one summary per player feeds
+  the prior.
+- `DirectPredictor`: the encoded present + a horizon embedding + z, through blocks of RoPE
+  self-attention and cross-attention to the action tokens (a learned "no commands" memory
+  token is always present).
+- `Probes`, per entity at t+k: exit (present / died / gone), position offset per axis (two-hot,
+  81 bins over +-20 map units), change in hp / shield / energy / build fraction (two-hot, 65
+  bins over +-1), the current order's ability (softmax over the vocabulary). Continuous
+  targets are changes from t, so "nothing happens" is the same target for every unit and
+  persistence is the zero bin. Two-hot (MuZero) keeps a left-or-right choice bimodal.
+- z per (sample, player), `--d_z` 32: posterior = `InverseModel` over the present's and the
+  future's tokens (the oracle), prior = `PriorHead` over the present's CLS, the player slot
+  and the player's command summary or a learned "withheld" embedding. KL(posterior || prior)
+  above `--free_nats` is charged with `--beta` (warm-up). The predictor is driven by a
+  posterior sample in training; evaluation runs it with the posterior mean, a prior sample
+  and the prior's mean.
+- Action dropout (`--act_drop` 0.5): half the samples get an empty command window and the
+  prior is told so. **The test of the design**: with commands given the future is determined
+  and KL should fall to ~0; with them withheld z must carry what the players did. Both KLs
+  are printed per horizon.
+
+Batches: `--frames` present frames x `--hor` horizons each; the present is encoded once per
+frame and shared by its horizons. Births (units at t+k that did not exist at t) are not
+predicted yet; their count per window is printed so the ignored mass is visible. 32 x 2 at
+d=256 runs at ~0.25 s/step and 7.4 GB.
+
+### First result (2026-10-30, two 4000-step runs, 32 frames x 2 horizons, pool 48 games)
+
+Run 1: `--beta 0.05 --free_nats 0.5 --beta_warmup 300` (`data/worldmodel/direct_pilot.log`).
+Run 2: `--beta 0.02 --free_nats 4 --beta_warmup 1500` (`direct_pilot2.log`, checkpoint
+`runs/direct_20261030_123137`). Both ~0.25 s/step, 7.7 GB. Unseen games, run 2, with the
+same states evaluated with their commands and with commands withheld:
+
+| horizon | pos err (persist) | moving units (persist) | commanded units (persist) | order acc (persist) | exit acc (persist) | died recall |
+|---|---|---|---|---|---|---|
+| 0.18 s | 0.041 (0.108) | 0.31 (0.83) | 0.04 (0.10) | .990 (.985) | .999 (.998) | - |
+| 0.71 s | 0.179 (0.428) | 0.85 (2.15) | 0.54 (0.84) | .969 (.930) | .998 (.990) | .08 |
+| 1.43 s | 0.354 (0.729) | 1.54 (3.40) | 1.60 (1.90) | .958 (.880) | .997 (.981) | .28 |
+| 2.50 s | 0.581 (1.094) | 2.31 (4.59) | - | .948 (.851) | .993 (.979) | .17 |
+
+(map units; "commanded units" = selected or targeted by a command in the window, 1-3% of the
+units present; unseen maps and seen games are within a few percent of these.)
+
+What this says:
+- Predicting state directly works: movement error halves against persistence at every
+  horizon, orders and exits improve, deaths start to be called (recall 0.2-0.3 at 1.4 s).
+  Most of this comes from the orders already in the state (a unit with a move order moves
+  along it); the model has learned the engine's kinematics from a single frame.
+- **The commands are not used.** With and without them the errors are identical to three
+  digits, including on the units the commands touched. The window's SELECT / CMD tokens bind
+  to units only softly (pointer embeddings of type, owner, position); in 4000 steps the
+  predictor did not learn to match an entity against them. Same story as the pair model's
+  first version (above). The fix is hard binding: add each command's embedding to the tokens
+  of the units it was issued to, which needs the recipients per command (see next).
+- **z is not used.** Posterior-driven and prior-driven predictions are identical; KL fell to
+  0.02 nats in run 1 and sits at 0.5-0.75 (under the 4-nat floor) in run 2. With the commands
+  unread there is nothing for z to add either (it would have to carry the same thing). So the
+  with/without KL test is not yet informative; it becomes so once commands bind.
+- Births are 1 per window at 0.18 s and ~10-20 at 2.5 s (2v2 games included); not predicted.
+- hp / shield / energy / build changes are tiny on average (MAE 0.001-0.005 either way); a
+  fight-only subset is the metric to add.
+
+Next (in order): record command recipients and control-group contents in the extraction,
+bind commands to recipients in the predictor, evaluate on commanded units and in fights,
+then the KL test; then births (child slots); then one-loop extraction.
+
 ### Command recipients and control groups (2026-10-30)
 
 The API does not expose control-group contents: `ui_data.groups` is index + leader unit type
@@ -970,3 +1057,19 @@ replay named `QM - ShoWTimE vs SHIN - G1 - Ley Lines.SC2Replay` fails with "Unab
 replay file [Core: file not found]", so `export_balance.py` exports from a copy with a plain
 name; it also needs every dependency in the Battle.net cache (`depot.ensure_cached`), since it
 cannot download them while the Battle.net app runs.
+### Oracle = the players' views concatenated (design decision, 2026-10-30)
+
+Focus is 1v1 (pro tournament packs; no slot-4 crash). The oracle state for a 1v1 game is the
+two player views **concatenated, not unioned**: every entity appears once per viewer who
+perceives it, each row tagged with the viewer and showing what that viewer sees (full detail
+for the owner, a shadow for a cloaked unit without detection, a snapshot for a remembered
+structure, nothing in fog). The duplicates sit at the same position, so attention binds them;
+the state then holds what each player *knows*, not only what is true. Targets per row are that
+viewer's observation of the unit at t+k, including whether they still see it; masking one
+viewer's rows out of the input turns the same network into the belief (player-view) model, so
+stage two is a training-time mask (like the action dropout), not a second architecture. The
+concatenation is done in the loader; extraction is unchanged (views are already stepped on the
+same loops). Token count ~1.3-1.6x a single view. Snapshot rows have client-assigned tags and
+link to their counterpart only by type and position. The observer playback becomes optional for
+1v1 once a few games confirm the owners' rows reproduce the observer's (compose_view.py's
+measurement says they do).
