@@ -637,3 +637,108 @@ How it would enter the models:
 Open: whether to count raw or effective actions for the limiter, how to window it (per minute
 vs per fight), and how the inverse model's latent action (per interval, all players) relates
 to a per-player budget.
+### Older builds from the CDN (2026-10-30)
+
+The replay header's `m_ngdpRootKey` is the TACT **root** content key of the game-data build
+the replay was played on, and it equals the `root =` line of that build's BuildConfig (checked
+for 93333, 94137, 95841, 97364, 97563 and the current 98310). The BuildConfig hash itself is
+not in the replay and Blizzard's version endpoint (`us.patch.battle.net:1119/s2/versions`)
+lists only the current build per region (CN is still on 5.0.14.93333, same CDNConfig). BlizzTrack
+archives every version manifest: `https://blizztrack.com/api/manifest/s2/seqn?file=versions`
+lists the snapshots, `https://blizztrack.com/api/manifest/s2/versions?seqn=<seqn>` gives each
+build's BuildConfig / CDNConfig. The US CDN (`http://level3.blizzard.com/tpr/sc2/config/xx/yy/<hash>`)
+still served all of these on 2026-10-30:
+
+| build | version | BuildConfig | CDNConfig (one of) | replays here |
+|---|---|---|---|---|
+| 93333 | 5.0.14 | 8453c2f1c98b955334c7284215429c36 | e4f2e2da310c08495f2701d401d14659 | DH Dallas 2025 (64) |
+| 94137 | 5.0.14 | 05cce99544c8b80c07f6eb3250b957a9 | 7df6dfb5f6256b47c5ab86bff1b1b1eb | HSC XXVII, EWC, FEL 2025 (~366) |
+| 95841 | 5.0.15 | f48701eb2ef86e687658d3deb0fc1bc8 | 77abccbe50b29b03be4d4cfca8b217ad | HSC XXVIII (176) |
+| 97364 | 5.0.16 | 2e257e413468e65da51630c5080a6168 | 14cac7d294ebc69e790d53ea7688effa | viewer tournaments (61) |
+| 97563 | 5.0.16 | 5bc8dcc1fade3a320c12936586b7c0ed | d8aae9fce802373d9da50a2bec7b6040 | viewer tournaments (84) |
+
+Also on BlizzTrack: 95248, 95299, 96592, 96826, 96883, 97425.
+
+**What a build needs.** `Versions/Base<build>/SC2_x64.exe` and `SC2.exe` (the build's install
+manifest; the "code"-tagged files are loose on the CDN and the Agent never keeps them in the
+storage), the build's data in the install's CASC storage (`SC2Data/data`), the BuildConfig under
+`SC2Data/config/xx/yy/`, and a row in `.build.info` (Active 0, otherwise a copy of the current
+row with the build's key and version). The engine reads every row, loads its BuildConfig and
+takes the one whose root equals `-dataVersion` (pysc2 passes the replay's). For this install's
+tags ("Windows ... enUS speech" / "enUS text") a build's download manifest selects 188 573 of its
+608 4xx files, 26.3 GB, and a 5.0.17 install already has all but 145-190 of them (63-66 MB);
+with the build's own encoding (46 MB), root, install, download and size files the delta is
+83-134 MB per build. Nothing else changes: the 98310 row stays active, old `.idx` versions and
+archives are untouched, the new files go into the free tail of the last archive (new `data.NNN`
+when full, with the Agent's 16 marker records at its start) and every bucket gets a new `.idx`
+version, `shmem` is rewritten (bucket versions, free-space list). Formats and the checksum /
+hash algorithms (lookup3 record checksums, chained hashlittle2 entry hash, bucket = xor of the
+EKey's first 9 bytes folded to a nibble) were verified against the existing storage first.
+
+**Implementation: `cosmicstar/envs/tact.py`** (requests only). `plan()` fetches BuildConfig,
+encoding, install and download manifests and lists what the storage lacks; `install_build()`
+fetches the missing BLTE files from the CDN archives (`CDNConfig` -> 149 `.index` files, range
+requests; loose otherwise) into `data/tact/blobs/` (verified against their EKey), backs up
+`.build.info`, `shmem` and the live `.idx` files to `SC2Data/backup-<time>/` (with a manifest of
+the archive sizes), appends the files to the storage, writes the `.idx` files and `shmem`, the
+binaries, the BuildConfig copy and the `.build.info` row. The engine rewrites `shmem` when it
+starts, so `--force` (needed while any engine or the Agent runs) waits for a gap between engine
+launches and re-checks `shmem` afterwards. `--revert <backup dir>` undoes an install exactly
+(restores the files, deletes the newer `.idx`, truncates/deletes the archives). Measured here:
+
+| build | files added | written to the storage | wall time |
+|---|---|---|---|
+| 93333 | 190 | 134.0 MB (46 MB of it the encoding file) | 29 s |
+| 94137 | 8 + metadata | 106.1 MB | 30 s |
+| 95841 | 27 + metadata | 106.8 MB | 30 s |
+| 97364 | 23 + metadata | 83.4 MB | 30 s |
+| 97563 | 15 + metadata | 83.0 MB | 29 s |
+
+(25 s of each is the post-write `shmem` check; the fetch itself was 1-2 s per build, the
+binaries 115 MB per build on disk.) Usage, from the repo root:
+
+```bash
+.venv/bin/python -m cosmicstar.envs.tact 93333 --dry-run        # what is missing
+.venv/bin/python -m cosmicstar.envs.tact 93333 --force          # install (also while engines run)
+.venv/bin/python -m cosmicstar.envs.tact 93333 --install "<dir>" --force   # into another install
+.venv/bin/python -m cosmicstar.envs.tact 93333 --revert "<dir>/SC2Data/backup-..."
+```
+
+**Two places to install to.** (A) The real install (`~/Games/battlenet/.../StarCraft II`): done
+once for 93333 at 14:27 on 2026-10-30 (backup `SC2Data/backup-20261030-142746`), after which
+the 93333 engine played a DreamHack Dallas replay; the user asked for the real install to stay
+unmodified, so whether that write is kept or reverted (one command) is theirs to decide. (B) A
+side install, `.../Program Files (x86)/StarCraft II old`, which needs no write to the real one:
+`data.001-023` are hardlinks to the real archives (the engine only rewrites `shmem` and `data.000`
+at start, with identical content), `data.000`, `data.024`, the `.idx` files, `shmem`, `indices`,
+`config`, `Support`, `Support64`, `Interfaces` and `Versions/Base98310` are copies (2.1 GB extra
+plus the builds), and the five builds were installed into it (30 s each). Scripts use it through
+`SC2PATH="$HOME/Games/battlenet/drive_c/Program Files (x86)/StarCraft II old"`.
+
+**End to end** (side install, `SC2PATH` set, 2026-10-30): `dump_rules.py` dumped the 93333
+ruleset (12 s), `export_balance.py` exported it (10 s), `extract_states.py` processed 3 of the 4
+DreamHack Dallas 2025 replays in `data/replays/older-builds-test` (38-50 s each; G4 Ultralove
+fails the exact desync check at 558 s: a unit the replay logs as dead at 555 s is alive - open,
+not seen in the other 6 games), and in `data/replays/older-builds-test2` one 94137 and two 95841
+replays (16-63 s each; the other 94137 game is skipped as "ruleset not exported"). 97364 and 97563
+are installed but `extract_states.EXCLUDED_BUILDS` still skips 5.0.16 replays.
+
+**The client's own route (SC2Switcher) does not install builds here.** With the Battle.net app
+open and logged in in the same prefix, `Support64/SC2Switcher_x64.exe <replay>` only starts
+`Versions/Base98310/SC2_x64.exe <replay>`: no Agent operation, no download. A client started
+outside the Battle.net app never gets its session ("CONNECTING TO BLIZZARD SERVICES", Play
+Offline / Cancel, for minutes) and offline mode cannot download (replay_fix says the same). The
+remaining in-game path (Battle.net Play -> Replays -> old replay -> download prompt) needs mouse
+clicks that cannot be injected on this box (no xdotool; XTest pointer input is ignored under
+Xwayland; `XGetImage` screenshots of the Wine windows do work).
+
+**Gotchas found on the way.** Proton's default verb `waitforexitandrun` first waits for every
+Wine process in the prefix to exit, so with the Battle.net app open no engine launch ever
+started (`wine_run_config.wine_env` now sets `PROTON_VERB=run`; launches also no longer
+serialize behind each other). The Windows-side launcher (`umu.exe`) can outlive its child while
+another Wine process keeps the wineserver up, so `export_balance.py` now waits for the Editor
+process itself. The Editor's command line parser takes " -" inside a path for an option: a
+replay named `QM - ShoWTimE vs SHIN - G1 - Ley Lines.SC2Replay` fails with "Unable to load
+replay file [Core: file not found]", so `export_balance.py` exports from a copy with a plain
+name; it also needs every dependency in the Battle.net cache (`depot.ensure_cached`), since it
+cannot download them while the Battle.net app runs.

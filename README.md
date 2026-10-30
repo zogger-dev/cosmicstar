@@ -53,8 +53,8 @@ in the prefix's Battle.net cache (`drive_c/ProgramData/Blizzard Entertainment/Ba
 the API client does not download them, so `extract_states.py` fetches missing ones from
 Blizzard's depot (`cosmicstar/envs/depot.py`; the client's current host
 `https://<region>-s2-depot.classic.blizzard.com/<hash>.<type>`, the old `depot.battle.net:1119`
-hosts no longer resolve). Older patches still need their `Versions/Base<build>` folder copied
-from a Windows install. Results and open items: `src/cosmicstar/worldmodel/README.md`,
+hosts no longer resolve). Older patches (their `Versions/Base<build>` binaries and game data) are fetched from
+Blizzard's CDN by `cosmicstar/envs/tact.py` (worldmodel/README.md, "Older builds from the CDN"). Results and open items: `src/cosmicstar/worldmodel/README.md`,
 "Linux results".
 
 ## Running on Windows

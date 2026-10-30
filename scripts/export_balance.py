@@ -45,17 +45,50 @@ def editor_command(replay, out):
                                      "-exportreplaydir", wrc.windows_path(out, prefix)], prefix)
 
 
+def editor_running():
+    """Whether an SC2Editor process is alive in the prefix (Linux: a Windows command line,
+    `C:\\...\\SC2Editor_x64.exe ...`, in ps; the launcher wrapper itself can outlive the Editor
+    when another Wine process keeps the prefix's wineserver up)."""
+    import re
+    out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+    return any(re.match(r"[A-Za-z]:\\.*sc2editor", line, re.I) and "umu.exe" not in line.lower()
+               for line in out.splitlines())
+
+
 def export(replay, out, timeout=1200):
-    """Runs one export; returns (ok, error message)."""
+    """Runs one export; returns (ok, error message). The Editor gets a copy of the replay with
+    a plain file name: its command line parser takes " -" inside the path for an option
+    ("Unable to load replay file [Core: file not found]" for "QM - ShoWTimE vs SHIN.SC2Replay")."""
+    import hashlib
+    import shutil
+    import tempfile
     replay, out = os.path.abspath(replay), os.path.abspath(out)  # the Editor runs from its own directory
     os.makedirs(out, exist_ok=True)
+    tmpdir = tempfile.mkdtemp(prefix="export-", dir=os.path.dirname(out))
+    safe = os.path.join(tmpdir, hashlib.sha1(os.path.basename(replay).encode()).hexdigest()[:12] + ".SC2Replay")
+    shutil.copy(replay, safe)
     started = time.time()
-    cmd, env = editor_command(replay, out)
+    cmd, env = editor_command(safe, out)
     try:
-        subprocess.run(cmd, env=env, cwd=os.path.dirname(EDITOR), timeout=timeout,
-                       stdout=subprocess.DEVNULL if not WINDOWS else None, stderr=subprocess.STDOUT if not WINDOWS else None)
+        if WINDOWS:
+            subprocess.run(cmd, env=env, cwd=os.path.dirname(EDITOR), timeout=timeout)
+        else:
+            # Under Wine the launcher wrapper does not exit while any other Wine process (the
+            # Battle.net app, another engine) keeps the wineserver alive: wait for the Editor
+            # process itself instead, then drop the wrapper.
+            proc = subprocess.Popen(cmd, env=env, cwd=os.path.dirname(EDITOR), stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.STDOUT)
+            time.sleep(10)
+            while editor_running() and time.time() - started < timeout:
+                time.sleep(2)
+            timed_out = editor_running()
+            proc.kill()
+            if timed_out:
+                raise subprocess.TimeoutExpired(cmd, timeout)
     except subprocess.TimeoutExpired:
         return False, f"timed out after {timeout}s"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
     if glob.glob(os.path.join(out, "*.xml")):
         return True, ""
     logs = [p for p in glob.glob(os.path.join(LOGS, "*ExportReplayErrors.txt")) if os.path.getmtime(p) >= started - 1]

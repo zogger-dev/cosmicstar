@@ -37,6 +37,10 @@ DEFAULT_INSTALLS = [
     "~/Games/starcraft-ii/drive_c/Program Files (x86)/StarCraft II",
     "~/.wine/drive_c/Program Files (x86)/StarCraft II",
 ]
+# Older builds live in a side copy of the install (cosmicstar/envs/tact.py; worldmodel/README.md
+# "Older builds from the CDN"): the engine for a base build comes from the first install that
+# has its Versions/Base<build>, the real install first. SC2PATH overrides everything.
+SIDE_INSTALLS = ["~/Games/battlenet/drive_c/Program Files (x86)/StarCraft II old"]
 UMU_RUN = "~/.local/share/lutris/runtime/umu/umu-run"
 PROTON_ROOTS = ["~/.local/share/Steam/compatibilitytools.d", "~/.steam/root/compatibilitytools.d"]
 
@@ -54,6 +58,38 @@ def sc2_install_dir():
         if os.path.isdir(os.path.join(cand, "Versions")):
             return cand
     return None
+
+
+def installs():
+    """Every install to look in, the real one first: just $SC2PATH when it is set, else the
+    default install and the SIDE_INSTALLS that exist."""
+    if os.environ.get("SC2PATH"):
+        return [os.path.expanduser(os.environ["SC2PATH"])]
+    out = [d for d in [sc2_install_dir()] if d]
+    for cand in SIDE_INSTALLS:
+        cand = os.path.expanduser(cand)
+        if os.path.isdir(os.path.join(cand, "Versions")) and cand not in out:
+            out.append(cand)
+    return out
+
+
+def install_for_build(build):
+    """The install whose Versions/Base<build>/SC2_x64.exe exists (the real one first), else the
+    default install."""
+    for inst in installs():
+        if os.path.exists(os.path.join(inst, "Versions", "Base%05d" % build, "SC2_x64.exe")):
+            return inst
+    return sc2_install_dir()
+
+
+def installed_builds():
+    """Base builds with an SC2_x64.exe in any install."""
+    out = set()
+    for inst in installs():
+        for d in glob.glob(os.path.join(inst, "Versions", "Base*")):
+            if os.path.isfile(os.path.join(d, "SC2_x64.exe")):
+                out.add(int(os.path.basename(d)[4:]))
+    return out
 
 
 def wine_prefix(install=None):
@@ -135,6 +171,10 @@ def wine_env(prefix, launcher_path=None):
         env.setdefault("GAMEID", "umu-default")
         env.setdefault("STORE", "none")
         env.setdefault("UMU_RUNTIME_UPDATE", "0")  # never block a launch on a runtime download
+        # Proton's default verb, waitforexitandrun, first waits for every Wine process in the
+        # prefix to exit (Steam's "one instance" rule): a second engine, or the Battle.net app,
+        # would block the launch forever. "run" just runs.
+        env.setdefault("PROTON_VERB", "run")
         pp = proton_path(prefix)
         if pp:
             env.setdefault("PROTONPATH", pp)
@@ -173,7 +213,8 @@ class WineLinux(platforms.LocalBase):
     """The Windows client under Wine/Proton on Linux (module doc)."""
 
     def __init__(self, version=None):
-        install = sc2_install_dir()
+        build = getattr(version, "build_version", None)
+        install = install_for_build(build) if build else sc2_install_dir()
         if not install:
             raise sc_process.SC2LaunchError(
                 "No StarCraft II install found; set SC2PATH to the 'StarCraft II' folder inside the Wine prefix.")
