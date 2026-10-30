@@ -435,25 +435,36 @@ class LocalStorage:
         return ekey[:9] in self.entries
 
     def read_shmem(self):
+        """shmem: a header block (type 4 as the Agent writes it, 5 as the engine rewrites it)
+        with the data path, one (size, offset) record pointing at the free-space block and the
+        16 bucket versions at 0x110, then the free-space block (type 1): count, 1090 five-byte
+        sizes and 1090 five-byte (archive << 30 | offset) entries."""
         with open(os.path.join(self.dir, "shmem"), "rb") as f:
             s = f.read()
         btype, nxt = struct.unpack_from("<II", s, 0)
-        if btype != 4:
+        if btype not in (4, 5):
             raise ValueError(f"shmem: unexpected block type {btype}")
-        self.shmem_head = s[:nxt]
-        nrec = (nxt - 0x108 - 64) // 8
-        vers = struct.unpack_from("<16I", s, 0x108 + 8 * nrec)
+        fsize, foff = struct.unpack_from("<II", s, 0x108)
+        vers = struct.unpack_from("<16I", s, 0x110)
         if any(vers[b] != self.versions.get(b) for b in range(16)):
             raise ValueError(f"shmem idx versions {vers} differ from the .idx files {self.versions}")
-        ftype, count = struct.unpack_from("<II", s, nxt)
-        if ftype != 1:
-            raise ValueError(f"shmem: unexpected free-space block type {ftype}")
-        base = nxt + 0x20
         self.free = []
-        for i in range(count):
-            size = int.from_bytes(s[base + 5 * i:base + 5 * i + 5], "big")
-            raw = int.from_bytes(s[base + 5 * FREE_ENTRIES + 5 * i:base + 5 * FREE_ENTRIES + 5 * i + 5], "big")
-            self.free.append([raw >> 30, raw & 0x3FFFFFFF, size])  # archive, offset, free bytes
+        ftype, count = struct.unpack_from("<II", s, foff)
+        if ftype == 1 and count:
+            base = foff + 0x20
+            for i in range(count):
+                size = int.from_bytes(s[base + 5 * i:base + 5 * i + 5], "big")
+                raw = int.from_bytes(s[base + 5 * FREE_ENTRIES + 5 * i:base + 5 * FREE_ENTRIES + 5 * i + 5], "big")
+                self.free.append([raw >> 30, raw & 0x3FFFFFFF, size])  # archive, offset, free bytes
+        else:  # no usable list (an engine-written template): the archives' tails, then new archives
+            log("shmem has no free-space list; rebuilding it from the archive sizes")
+            archives = self.archives()
+            for a in archives:
+                size = os.path.getsize(os.path.join(self.dir, f"data.{a:03d}"))
+                if size < ARCHIVE_MAX:
+                    self.free.append([a, size, ARCHIVE_MAX - size])
+            for a in range(max(archives) + 1, max(archives) + 1 + FREE_ENTRIES - len(self.free)):
+                self.free.append([a, 0, ARCHIVE_MAX])
         self.shmem_len = len(s)
 
     def archives(self):
@@ -538,21 +549,27 @@ class LocalStorage:
         os.replace(tmp, path)
 
     def write_shmem(self):
-        head = bytearray(self.shmem_head)
-        nxt = struct.unpack_from("<I", head, 4)[0]
-        nrec = (nxt - 0x108 - 64) // 8
-        struct.pack_into("<16I", head, 0x108 + 8 * nrec, *[self.versions[b] for b in range(16)])
+        """Writes shmem in the Agent's layout: type-4 header, data path, one record for the
+        free-space block at 0x150, the bucket versions, the free-space block."""
+        win = "Global\\C:/Program Files (x86)/StarCraft II/SC2Data/data"
+        with open(os.path.join(self.dir, "shmem"), "rb") as f:
+            old = f.read()
+        path = old[8:8 + 0x100]  # keep the recorded data path (the engine writes it with a lower-case drive)
+        if not path.startswith(b"Global\\"):
+            path = win.encode().ljust(0x100, b"\0")
         free = [e for e in self.free if e[2] > 0]
         blk = struct.pack("<II", 1, len(free)) + b"\0" * 0x18
         sizes = b"".join(e[2].to_bytes(5, "big") for e in free)
         offs = b"".join(((e[0] << 30) | e[1]).to_bytes(5, "big") for e in free)
         blk += sizes + b"\0" * (5 * FREE_ENTRIES - len(sizes)) + offs + b"\0" * (5 * FREE_ENTRIES - len(offs))
-        data = bytes(head) + blk
-        data += b"\0" * max(0, self.shmem_len - len(data))
-        path = os.path.join(self.dir, "shmem")
-        with open(path + ".part", "wb") as f:
+        head = struct.pack("<II", 4, 0x150) + path + struct.pack("<II", len(blk) + 4, 0x150)
+        head += struct.pack("<16I", *[self.versions[b] for b in range(16)])
+        data = head + blk
+        data += b"\0" * max(0, max(self.shmem_len, 11280) - len(data))
+        path_out = os.path.join(self.dir, "shmem")
+        with open(path_out + ".part", "wb") as f:
             f.write(data)
-        os.replace(path + ".part", path)
+        os.replace(path_out + ".part", path_out)
         self.free = free
 
 
@@ -785,6 +802,9 @@ def revert(install, bak, build=None):
     and deletes archives created since; with build, also removes Versions/Base<build> and the
     build's BuildConfig copy. Nothing older than the backup is touched."""
     import json
+    install, bak = os.path.abspath(install), os.path.abspath(bak)
+    if not bak.startswith(os.path.join(install, "SC2Data", "backup-")):
+        raise ValueError(f"{bak} is not a backup of {install}: refusing to apply another install's sizes")
     m = json.load(open(os.path.join(bak, "manifest.json")))
     data = os.path.join(install, "SC2Data", "data")
     sizes = {int(k): v for k, v in m["archive_sizes"].items()}

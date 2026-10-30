@@ -1019,24 +1019,37 @@ binaries 115 MB per build on disk.) Usage, from the repo root:
 .venv/bin/python -m cosmicstar.envs.tact 93333 --revert "<dir>/SC2Data/backup-..."
 ```
 
-**Two places to install to.** (A) The real install (`~/Games/battlenet/.../StarCraft II`): done
-once for 93333 at 14:27 on 2026-10-30 (backup `SC2Data/backup-20261030-142746`), after which
-the 93333 engine played a DreamHack Dallas replay; the user asked for the real install to stay
-unmodified, so whether that write is kept or reverted (one command) is theirs to decide. (B) A
-side install, `.../Program Files (x86)/StarCraft II old`, which needs no write to the real one:
-`data.001-023` are hardlinks to the real archives (the engine only rewrites `shmem` and `data.000`
-at start, with identical content), `data.000`, `data.024`, the `.idx` files, `shmem`, `indices`,
-`config`, `Support`, `Support64`, `Interfaces` and `Versions/Base98310` are copies (2.1 GB extra
-plus the builds), and the five builds were installed into it (30 s each). Scripts use it through
-`SC2PATH="$HOME/Games/battlenet/drive_c/Program Files (x86)/StarCraft II old"`.
+**Where the builds live.** The real install (`~/Games/battlenet/.../StarCraft II`) stays as
+Battle.net left it, so its updates never meet our archive and index additions: 93333 was
+written into it once (14:27 on 2026-10-30, the engine then played a DreamHack replay) and
+reverted the same afternoon with `--revert` (backups `SC2Data/backup-20261030-14*`; a 98310
+replay plays as before). The older builds are in a side install,
+`.../Program Files (x86)/StarCraft II old`: `SC2Data/data/data.001-023` are hardlinks to the real
+archives (the engine never writes those; it rewrites only `shmem` and `data.000` when it starts),
+`data.000`, `data.024`, the `.idx` files, `shmem`, `indices`, `config`, `Support`, `Support64`,
+`Interfaces` and `Versions/Base98310` are copies (2.1 GB extra), and the five builds were
+installed into it with `--install` (table above; `data.024` filled up and `data.025` holds the
+rest, 391 MB). `wine_run_config` knows it: `installs()` lists the real install and the
+`SIDE_INSTALLS` that exist (just `$SC2PATH` when that is set), `install_for_build()` picks the
+first one with `Versions/Base<build>/SC2_x64.exe`, `installed_builds()` is the union, and the
+run config takes the install from the requested version, so `extract_states.py`, `dump_rules.py`
+and `export_balance.py` need no environment juggling (the Editor runs from the real install).
 
-**End to end** (side install, `SC2PATH` set, 2026-10-30): `dump_rules.py` dumped the 93333
-ruleset (12 s), `export_balance.py` exported it (10 s), `extract_states.py` processed 3 of the 4
-DreamHack Dallas 2025 replays in `data/replays/older-builds-test` (38-50 s each; G4 Ultralove
-fails the exact desync check at 558 s: a unit the replay logs as dead at 555 s is alive - open,
-not seen in the other 6 games), and in `data/replays/older-builds-test2` one 94137 and two 95841
-replays (16-63 s each; the other 94137 game is skipped as "ruleset not exported"). 97364 and 97563
-are installed but `extract_states.EXCLUDED_BUILDS` still skips 5.0.16 replays.
+**End to end** (2026-10-30, run config picking the install): `dump_rules.py` dumped the 93333
+ruleset (12 s), `export_balance.py` exported it (10 s), `extract_states.py` processed one replay
+each of 93333 (50 s), 94137 (64 s) and 95841 (85 s) from `data/replays/older-builds-test3`, and
+earlier 3 of the 4 DreamHack Dallas 2025 replays in `data/replays/older-builds-test` (G4
+Ultralove fails the exact desync check at 558 s: a unit the replay logs as dead at 555 s is
+alive - open, not seen in the other 9 games) and the 94137 / 95841 replays in
+`older-builds-test2`. 97364 and 97563 are installed (the engine starts) but
+`extract_states.EXCLUDED_BUILDS` skips 5.0.16 replays by design.
+
+**Revert and shmem.** `--revert` refuses a backup folder from another install (the shell keeps
+an exported `SC2PATH`, which once pointed a revert of the real install's backup at the side
+install; the side install was simply reinstalled, 30 s per build). The engine rewrites `shmem`
+at every start, sometimes in its own layout (header block type 5, the free-space block moved);
+the reader takes both and the writer always produces the Agent's layout (byte-identical to the
+Agent's file when nothing changed).
 
 **The client's own route (SC2Switcher) does not install builds here.** With the Battle.net app
 open and logged in in the same prefix, `Support64/SC2Switcher_x64.exe <replay>` only starts
