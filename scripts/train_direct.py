@@ -37,7 +37,7 @@ from torch import nn
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from train_window import LPS, GamePool, to  # noqa: E402
+from cosmicstar.worldmodel.data import LPS, GamePool, to  # noqa: E402
 from cosmicstar.worldmodel import vocab as vocab_mod  # noqa: E402
 from cosmicstar.worldmodel import latent as lat  # noqa: E402
 from cosmicstar.worldmodel import direct as dm  # noqa: E402

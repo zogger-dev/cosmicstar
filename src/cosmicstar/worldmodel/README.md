@@ -1,5 +1,14 @@
 # World model data notes
 
+> Cleanup, 2026-10-30: the earlier JEPA trainers and their checks (`train_stage1.py`,
+> `train_window.py`, `train_pairs.py`, `action_check.py`, `eval_units.py`, `probe_frozen.py`,
+> `spatial_check.py`, `worldmodel/predictor.py`, `window_predictor.py`, `probes.py`), the 2v2
+> slot-4 composition (`compose_view.py`, `validate_compose.py`), the engine re-matching ability
+> table (`build_ability_table.py`), the scripted build-order bench (`zerg_bench*.py`,
+> `bo_search.py`, `replay_build_order.py`, `builds/`), the mining probes and the original
+> March scaffold were removed from the tree. The notes below still name them; they are in git
+> history before commit "Clean up the tree".
+
 ## Replay ability ids → ability names
 
 A replay command names its ability as `(abilLink, cmdIndex)`:

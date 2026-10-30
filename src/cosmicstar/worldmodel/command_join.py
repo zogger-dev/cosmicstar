@@ -9,7 +9,7 @@ same loop and target (points within 0.5, unit tags exact, no target: no target);
 row with the engine command of the same API ability as the last paired one; a CMD_POINT /
 CMD_UNIT row with the engine command at its new target (the REPEAT that follows it then
 finds its command used). Within a loop both sides are in issue order and each engine
-command is used once, the way scripts/build_ability_table.py matches for the ability table.
+command is used once.
 """
 
 import collections

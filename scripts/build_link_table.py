@@ -12,7 +12,7 @@ API's AbilityData then expands every link to all its buttons: link_index == the 
 
 Output (--out): {ruleset: {"base_build", "links": {link: link_name}, "units": {unit link: name},
                          "commands": {"link:cmd": {"name", "index", "api", "button"}}}}
-The replay-vote table (build_ability_table.py), where present, is checked against it.
+A replay-vote table from the engine (data/worldmodel/ability_votes.json), where present, is checked against it.
 
     python scripts/build_link_table.py
 """

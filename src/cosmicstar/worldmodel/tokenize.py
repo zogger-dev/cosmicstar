@@ -27,7 +27,7 @@ import json
 
 import numpy as np
 
-from .vocab import CAT_ARMY, CAT_STRUCTURE, CAT_WORKER, PAD
+from .vocab import PAD
 
 N_CODES = 8                      # team / player codes per game (max 8 players)
 CODE_NEUTRAL = N_CODES           # team and player code for neutral things
@@ -39,7 +39,6 @@ NEUTRAL_PLAYER = 16              # engine owner id of neutral units
 C_ENTITY, C_PLAYER, C_FORMAT, C_VIS = 17, 9, 4, 2
 C_ORDER = 6  # the entity's current order: has one, target offset (x, y), targets a unit, progress, queue length
 GRID = 16                        # the encoder's grid (G x G over the playable area)
-CAMERA = (28.0, 18.0)  # rough on-screen size in cells; TODO measure from replay camera events
 STAT_KEYS = ("minerals", "vespene", "mineral_rate", "vespene_rate", "workers", "food_used", "food_made",
              "army_minerals", "army_vespene")
 
@@ -292,75 +291,6 @@ class GameFrames:
             format=self.format,
             cells=self.half,  # map cells per normalized unit (x, y)
         )
-
-
-PROBE_PLY = ("workers", "army_units", "structures", "army_hp", "mineral_income", "gas_income", "supply",
-             "army_value")
-PROBE_GRID = ("units", "army_units", "structures", "contested")
-PROBE_CLS = ("workers", "army_units", "structures", "army_hp")
-
-
-def probe_targets(g, f, grid=16):
-    """Ground truth for the probes at frame f (evaluation only, never a training signal for the
-    model). Identity-free, since team/player codes are random per sample. Only quantities that
-    move with the game's dynamics, not with single clicks (the bank jumps with every purchase):
-        ply  [P, 8]   per player (slot order, like the player tokens): workers, army units,
-                      structures, army hp+shields, mineral income, gas income (per minute),
-                      supply used, army value (minerals + gas in army)
-        grid [G*G, 4] per cell: units, army units, structures, more than one team present
-        cls  [4]      whole map: total workers, army units, structures, army hp+shields
-    Counts, hp, income and army value are log1p (hp / 100; income and value as in the player
-    stats, log1p / 10), supply / 200."""
-    u, a, b = g.u, g.start[f], g.start[f + 1]
-    owner, cat = u["owner"][a:b], u["cat"][a:b]
-    hp = (u["hp"][a:b] + u["shield"][a:b]).astype(np.float32)
-    army, work, struct = cat == CAT_ARMY, cat == CAT_WORKER, cat == CAT_STRUCTURE
-    P = len(g.slots)
-    ply = np.zeros((P, len(PROBE_PLY)), np.float32)
-    for i, s in enumerate(g.slots):
-        m = owner == s
-        ply[i, :4] = np.log1p([(m & work).sum(), (m & army).sum(), (m & struct).sum(), hp[m & army].sum() / 100.0])
-        st = g.stats[f, i]                              # STAT_KEYS order, scaled as in _stats
-        ply[i, 4:6] = st[2:4]                           # mineral / gas collection rate (log1p / 10)
-        ply[i, 6] = st[5]                               # supply used / 200
-        ply[i, 7] = _log(np.expm1(st[7] * 10) + np.expm1(st[8] * 10))  # army value, minerals + gas
-    xy = g.normalize_xy(np.stack([u["x"][a:b], u["y"][a:b]], 1))
-    cell = np.clip(((xy + 1) / 2 * grid).astype(np.int64), 0, grid - 1)
-    ci = cell[:, 1] * grid + cell[:, 0]                 # row-major, like the encoder's grid
-    owned = owner != NEUTRAL_PLAYER
-    gr = np.zeros((grid * grid, len(PROBE_GRID)), np.float32)
-    gr[:, 0] = np.log1p(np.bincount(ci[owned], minlength=grid * grid))
-    gr[:, 1] = np.log1p(np.bincount(ci[owned & army], minlength=grid * grid))
-    gr[:, 2] = np.log1p(np.bincount(ci[owned & struct], minlength=grid * grid))
-    team = {p["slot"]: p["team"] for p in g.players}
-    for c in np.unique(ci[owned]):
-        gr[c, 3] = len({team.get(int(o)) for o in owner[owned][ci[owned] == c]}) > 1
-    cls = np.log1p([work[owned].sum(), army[owned].sum(), struct[owned].sum(), hp[owned & army].sum() / 100.0]).astype(np.float32)
-    return dict(ply=ply, grid=gr, cls=cls)
-
-
-def sample_windows(fr, n, rng, mix=(0.4, 0.2, 0.4), scale=(0.5, 2.0), jitter=4.0):
-    """Readout windows for one frame: (centers, sizes) in normalized map coords, [n, 2] each.
-
-    mix = shares centered on (a random army unit, a random worker/structure/resource,
-    uniform). Picking a random unit weights windows by unit density, so armies and
-    economies get most of the queries; the uniform share keeps empty ground in the
-    training set and keeps "being asked about a spot" from implying something is there.
-    Weights must only use what the context sees (here: the frame itself).
-    """
-    half = fr["cells"]
-    xy, cat = fr["ent_xy"], fr["ent_cat"]
-    owned = fr["ent_team"] != CODE_NEUTRAL
-    pools = (np.where(owned & (cat == CAT_ARMY))[0],
-             np.where((owned & ((cat == CAT_WORKER) | (cat == CAT_STRUCTURE))) | fr["ent_resource"])[0])
-    kind = rng.choice(3, size=n, p=mix)
-    centers = rng.uniform(-1, 1, size=(n, 2))
-    for i, k in enumerate(kind):
-        if k < 2 and len(pools[k]):
-            centers[i] = xy[rng.choice(pools[k])] + rng.normal(0, jitter, 2) / half
-    s = np.exp(rng.uniform(np.log(scale[0]), np.log(scale[1]), size=(n, 1)))
-    sizes = s * np.asarray(CAMERA) / half
-    return np.clip(centers, -1, 1).astype(np.float32), sizes.astype(np.float32)
 
 
 GROUPS = (("ent", ("type", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num")),

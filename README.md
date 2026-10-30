@@ -1,80 +1,53 @@
-# CosmicStar: StarCraft II AlphaStar Implementation
+# CosmicStar
 
-## Ultimate Goal
-To build a high-performance StarCraft II agent using Deep Reinforcement Learning and Imitation Learning, replicating the architecture of DeepMind's AlphaStar (Transformer + LSTM). The agent aims to play the full game (1v1) by learning from human replays and self-play.
+A learned simulator of StarCraft II, trained on replays, as the first stage of an
+AlphaStar-like agent. The engine plays replays back and the full game state is extracted
+loop by loop; a model learns to predict every entity's next state from the present and the
+players' commands. Design notes, measurements and the record of what did and did not work:
+[`src/cosmicstar/worldmodel/README.md`](src/cosmicstar/worldmodel/README.md).
 
-## Current State (December 2025)
-**Status:** Infrastructure & Data Pipeline Complete. Model Implementation In-Progress.
+## Layout
 
-### ✅ Infrastructure Solved
-*   **Modern Replay Support**: Patched `pysc2` to support StarCraft II v5.0.15+ (Builds 95841 & 95299).
-*   **Integrated Downloader**: `scripts/download_maps.py` handles standard packs and extracts missing maps directly from Battle.net depots.
-*   **Environment**: Validated `pysc2` launch and action execution.
+| | |
+|---|---|
+| `scripts/extract_states.py` | plays replays back in the engine (observer view, and each player's view with fog) and dumps the state every N loops: units, orders, production, buffs, deaths, visibility, the player's selection and command recipients |
+| `scripts/extract_actions.py` | every player's interface actions from the replay file (no engine): commands, selections, control groups, camera |
+| `scripts/dump_rules.py`, `scripts/export_balance.py`, `scripts/build_link_table.py` | the game's static data per ruleset (unit and ability catalogs, from the engine and the Editor's balance export), and the replay's ability numbering mapped to names |
+| `scripts/dump_unit_data.py`, `scripts/make_splits.py`, `scripts/download_maps.py`, `scripts/check_player_commands.py` | unit metadata, the train / held-out split, maps from Blizzard's depot, validation of the tracked selections against the engine |
+| `scripts/train_direct.py` | the direct state-space simulator: state at t plus the commands in [t, t+k) to every entity's state at t+k |
+| `scripts/regen_s2proto.py` | rebuilds the protobuf bindings for the fast parser and patches s2protocol for Python 3.12+ |
+| `src/cosmicstar/worldmodel/` | tokenizers for states and actions, the selection tracker and command join, the encoders, the latent, the direct model |
+| `src/cosmicstar/envs/` | running the Windows client under Wine/Proton (`wine_run_config.py`), maps and mods from the depot (`depot.py`), older game builds from Blizzard's CDN (`tact.py`) |
 
-### ✅ Data Pipeline
-*   **Parser**: `cosmicstar.parsing.replay.ReplayParser` extracts rich observations and actions.
-*   **Processor**: `data_processor.py` converts replays into PyTorch tensors.
-*   **Package**: All core logic consolidated into the `cosmicstar/` package.
+`data/` (gitignored) holds replays, extractions, balance exports and training runs.
 
-### 🚧 In Progress
-*   **Model Architecture**: Currently designing the **ModelTorso** and **Heads** in `cosmicstar/models/` in PyTorch (the world model in `cosmicstar/worldmodel/` is PyTorch too; JAX/Flax were dropped in October 2026).
+## Setup
 
-## Key Scripts
-*   `scripts/download_maps.py`: **[Tool]** Sync maps from ladder or Battle.net depots.
-*   `scripts/download_replays.py`: **[Tool]** Download replay packs.
-*   `scripts/run_loop.py`: **[Env]** Validates installation by running an agent loop.
-*   `scripts/data_processor.py`: **[Data]** Bulk processing of replays into `.pt` files.
-*   `scripts/parse_replay.py`: **[Tool]** High-level entry point to test/debug replay parsing.
-
-## Setup Requirements
-*   StarCraft II (v5.0.15+)
-*   Python 3.10+
-*   Dependencies in `requirements.txt` (`pysc2`, `torch`, etc.)
+Python 3.12 in a virtual environment (`uv venv --python 3.12 .venv`, then
+`uv pip install -e . --all-extras`), then `python scripts/regen_s2proto.py` once so the
+protobuf bindings load with the fast parser. `requirements.txt` is the lock
+(`uv pip compile pyproject.toml --all-extras -o requirements.txt`).
 
 ## Running on Linux (Wine/Proton)
-Blizzard's Linux builds stop at 4.10, so a 5.0.x client runs under Proton from a Lutris
-Battle.net install (tested: Lutris + GE-Proton 11-11, prefix `~/Games/battlenet`).
-`cosmicstar/envs/wine_run_config.py` is a pysc2 run config that launches that client through
-`umu-run`; `extract_states.py`, `dump_rules.py` and `ReplayParser` import it, so they work
-unchanged, and `export_balance.py` runs the Editor's balance export the same way
-(`wine_command()`), with output identical to a Windows export. It finds
-the install at `~/Games/battlenet/drive_c/Program Files (x86)/StarCraft II`; set `SC2PATH`,
-`WINEPREFIX`, `SC2_WINE` or `PROTONPATH` to override (details in the module doc). The client
-needs a display (`DISPLAY`, default `:0`).
 
-Setup, from the repo root (needs [uv](https://docs.astral.sh/uv/)):
+Blizzard's headless Linux builds stop at 4.10; every 5.0.x client is Windows only. On Linux the
+client runs inside a Wine prefix: a Lutris Battle.net install under GE-Proton, launched through
+`umu-run`. `src/cosmicstar/envs/wine_run_config.py` registers a pysc2 run config that finds the
+install (`$SC2PATH`, else `~/Games/battlenet/...`), rewrites paths for the client and sets the
+Proton environment, so `scripts/extract_states.py` and the other engine-driven scripts run
+unchanged. The client is windowed (no headless mode) and needs a display.
 
-```bash
-uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt -e .
-```
-
-then run `scripts/regen_s2proto.py` once (see Protobuf below). Replays need their map and mods
-in the prefix's Battle.net cache (`drive_c/ProgramData/Blizzard Entertainment/Battle.net/Cache`);
-the API client does not download them, so `extract_states.py` fetches missing ones from
-Blizzard's depot (`cosmicstar/envs/depot.py`; the client's current host
-`https://<region>-s2-depot.classic.blizzard.com/<hash>.<type>`, the old `depot.battle.net:1119`
-hosts no longer resolve). Older patches (their `Versions/Base<build>` binaries and game data) are fetched from
-Blizzard's CDN by `cosmicstar/envs/tact.py` (worldmodel/README.md, "Older builds from the CDN"). Results and open items: `src/cosmicstar/worldmodel/README.md`,
-"Linux results".
+A replay only plays in the engine build it was recorded on. `python -m cosmicstar.envs.tact
+<build>` fetches an older build from Blizzard's CDN into a side copy of the install
+("StarCraft II old"), and the run config picks the install per build. The Editor's balance
+export (`scripts/export_balance.py`) runs under the same prefix.
 
 ## Running on Windows
-Anything that launches StarCraft II (`run_loop.py`, `parse_replay.py`, `data_processor.py`, `mining_probe.py`) must run from **native Windows Python**, not WSL (or on Linux as above).
 
-> **WSL does not work.** WSL can execute `SC2_x64.exe` (e.g. by symlinking `~/StarCraftII` to the Windows install and `Versions/BaseXXXXX/SC2_x64` → `SC2_x64.exe`), but pysc2's Linux run config passes Linux paths (`-dataDir /home/...`, `-tempDir /tmp/...`) and the wrong working directory, so SC2 fails to load its DLLs and the websocket never comes up. Pure-Python work that doesn't launch SC2 (analysis, training, `tools/apre`) is fine in WSL.
+The scripts find the standard install (`C:\Program Files (x86)\StarCraft II`); older builds
+are downloaded by the Battle.net client when a replay of that version is opened.
 
-Use a separate venv, `.venv-win`, so a WSL `python -m venv .venv` can't clobber it. From the repo root in PowerShell:
+## Dependencies
 
-```powershell
-py -3.10 -m venv .venv-win
-.\.venv-win\Scripts\python.exe -m pip install -e ".[analysis]"
-```
-
-To run something that launches the game:
-
-```powershell
-.\.venv-win\Scripts\python.exe scripts\mining_probe.py --out_dir data\mining
-```
-
-Protobuf (both platforms): `s2clientprotocol` 5.0.15 ships `_pb2` files generated by an old `protoc`, which protobuf 4+ refuses to load with its default C++ (upb) backend ("Descriptors cannot be created directly"). Run `scripts/regen_s2proto.py` once per environment: it rewrites the installed bindings in the modern style (originals kept as `*.py.orig`, `--restore` undoes it), after which the fast backend loads them and `extract_states.py` picks it automatically. The same script patches `s2protocol`'s version loader, which imports the `imp` module that Python 3.12 removed. Without that step, set `$env:PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION = "python"` before importing pysc2; the pure-Python backend works but parses observations about 150x slower.
-
-In the editor, select `.venv-win\Scripts\python.exe` as the interpreter so "Run Python File" uses it.
+`pysc2`, `s2protocol`, `mpyq`, `numpy`, `torch`, `requests`, `tqdm`, `absl-py`; `sc2reader`
+only for map dependency scanning in `download_maps.py`; `matplotlib` for analysis plots.

@@ -2,7 +2,7 @@
 
 Learned queries, one per player, cross-attend over the slots of a frame and of the frame one
 step later (tagged "before" / "after") and emit a small vector per player: the latent action.
-train_window.py trains it to agree with the command encoder's summary of the same interval
+The window model trained it to agree with the command encoder's summary of the same interval
 (InfoNCE) and to drive the predictor, so it has to encode the part of the change that the
 player's commands explain, and nothing the commands don't say (it can't just copy the next
 frame: the commands don't contain it).

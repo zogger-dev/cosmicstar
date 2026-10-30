@@ -697,29 +697,12 @@ def build_manifest(replay_dir, player, out_dir, require_player=False, any_rulese
 
 
 # The engine's view of slot 4 crashes at the game's first research order (worldmodel/README.md);
-# it's composed from the teammate's view and the observer view instead (compose_view.py).
+# that view is skipped (the 2v2 composition from the teammate's view was dropped with the 1v1 focus).
 CRASHING_VIEWS = {4}
 
 
 def pov_name(pov_out, job, slot):
     return os.path.join(pov_out, out_name(job["path"])[:-4] + f"_p{slot}.npz")
-
-
-def compose_crashing_views(jobs, obs_dir, pov_out):
-    """Writes the view of each crashing slot from its teammate's view and the observer view."""
-    from compose_view import compose
-    for j in {os.path.basename(j["path"]): j for j in jobs}.values():
-        obs = os.path.join(obs_dir, out_name(j["path"]))
-        teams = {int(k): v for k, v in j["teams"].items()}
-        for slot in set(j["slots"]) & CRASHING_VIEWS:
-            out = pov_name(pov_out, j, slot)
-            mates = [s for s in j["slots"] if s != slot and teams[s] == teams[slot] and s not in CRASHING_VIEWS]
-            if os.path.exists(out) or not mates or not os.path.exists(obs) or not os.path.exists(pov_name(pov_out, j, mates[0])):
-                continue
-            arrays = compose(dict(np.load(pov_name(pov_out, j, mates[0]))), dict(np.load(obs)), slot, mates[0])
-            np.savez_compressed(out + ".tmp.npz", **arrays)
-            os.replace(out + ".tmp.npz", out)
-            print(json.dumps(dict(composed=os.path.basename(j["path"]), view=slot, mate=mates[0])), flush=True)
 
 
 def claim(job):
@@ -856,7 +839,7 @@ def main():
             expanded.append(dict(j, perspective=0))
         if "players" in views:
             for slot in j["slots"]:
-                if slot in CRASHING_VIEWS:  # composed from the teammate's view afterwards
+                if slot in CRASHING_VIEWS:  # the engine crashes in this view
                     continue
                 expanded.append(dict(j, perspective=slot, out=pov_name(args.pov_out, j, slot)))
     jobs = expanded
@@ -896,9 +879,6 @@ def main():
             if os.path.exists(j["out"]):
                 break
         run(left, min(args.workers, len(left)))
-
-    if "players" in views:
-        compose_crashing_views(jobs, args.out, args.pov_out)
 
 
 if __name__ == "__main__":

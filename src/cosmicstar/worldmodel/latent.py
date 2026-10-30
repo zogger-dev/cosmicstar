@@ -11,7 +11,7 @@ only in what they see:
     prior      p(z | present)            what players tend to do from here; sampled at
                                          inference, a mixture so it can hold several branches
 
-Losses (train_pairs.py): the predictor is driven by a sample of the posterior (or of the
+Losses (as used by the pair model, now scripts/train_direct.py): the predictor is driven by a sample of the posterior (or of the
 command distribution); KL(posterior || prior) is charged per nat above --free_nats (the
 decision itself is always affordable) and trains the prior; KL(posterior || commands) ties
 the command encoder to what actually happened; an entropy bonus on the prior's batch-mean

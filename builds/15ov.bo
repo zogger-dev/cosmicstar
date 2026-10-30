@@ -1,5 +1,0 @@
-# 15 overlord via the extractor trick: at 14/14 start an extractor, make a
-# drone, cancel the extractor (its drone comes back -> 15/14), then overlord.
-14 extractor_trick
-15 overlord
-include zvx_standard.bo
