@@ -44,6 +44,7 @@ from cosmicstar.worldmodel import direct as dm  # noqa: E402
 from cosmicstar.worldmodel.action_encoder import ActionEncoder  # noqa: E402
 from cosmicstar.worldmodel.action_tokens import ActionVocab, GameActions, collate_actions  # noqa: E402
 from cosmicstar.worldmodel.inverse_model import InverseModel  # noqa: E402
+from cosmicstar.worldmodel.ruleset import RulesetEncoder, RulesetTables  # noqa: E402
 from cosmicstar.worldmodel.tokenize import GameFrames, collate  # noqa: E402
 
 TARGETS = ("exit", "dx", "dy", "hp", "sh", "en", "build", "order")
@@ -140,6 +141,12 @@ def main():
     ap.add_argument("--frames", type=int, default=16, help="present frames per batch")
     ap.add_argument("--hor", type=int, default=2, help="horizons per present frame")
     ap.add_argument("--act_drop", type=float, default=0.5, help="share of samples with commands withheld")
+    ap.add_argument("--types", default="table", help="unit / ability / upgrade embeddings: table (learned per id, the default; "
+                    "decided 2026-10-30: learn them from the replays first, use the game data for probes and distillation later) "
+                    "or ruleset (computed from the balance / game data, worldmodel/ruleset.py)")
+    ap.add_argument("--rules_tables", default="data/worldmodel/rulesets.json")
+    ap.add_argument("--rs_depth", type=int, default=3, help="attention layers over the ruleset's nodes")
+    ap.add_argument("--no_type_residual", action="store_true", help="no learned per-name residual on the ruleset embeddings")
     ap.add_argument("--d", type=int, default=256)
     ap.add_argument("--enc_depth", type=int, default=6)
     ap.add_argument("--pred_depth", type=int, default=4)
@@ -181,6 +188,22 @@ def main():
                 if os.path.exists(os.path.join(args.data, f)) and os.path.exists(os.path.join(args.actions_dir, f))]
 
     train_paths = available(split["train"])
+    tables = RulesetTables(args.rules_tables) if args.types == "ruleset" else None
+    if tables is not None:  # only games whose ruleset the balance data covers
+        def covered(paths):
+            keep = []
+            for q in paths:
+                if not os.path.exists(q):
+                    continue
+                with np.load(q) as z:
+                    if json.loads(str(z["meta"])).get("ruleset") in tables.rulesets:
+                        keep.append(q)
+            return keep
+        n0 = len(train_paths)
+        train_paths = covered(train_paths)
+        for k in ("train", "held_out_games", "held_out_map_games"):  # the game lists; held_out_maps are map names
+            split[k] = [os.path.basename(q) for q in covered([os.path.join(args.data, f) for f in split.get(k, [])])]
+        print(f"ruleset tables: {len(tables.rulesets)} rulesets; {len(train_paths)} of {n0} train games covered", flush=True)
     if args.max_games:
         train_paths = train_paths[:args.max_games]
     eval_paths = {"seen-games": train_paths[:args.val_games],
@@ -216,7 +239,8 @@ def main():
           f" | commands withheld on {args.act_drop:.0%} | z: d_z {args.d_z}, prior x{args.prior_k}, beta {args.beta}"
           f" (warmup {args.beta_warmup}), free {args.free_nats} nats | {run}", flush=True)
 
-    enc = dm.RoPEEncoder(v, args.d, args.enc_depth).to(dev)
+    rs = RulesetEncoder(tables, args.d, args.rs_depth, residual=not args.no_type_residual) if tables is not None else None
+    enc = dm.RoPEEncoder(v, args.d, args.enc_depth, ruleset=rs).to(dev)
     enc.grad_ckpt = not args.no_ckpt
     aenc = ActionEncoder(enc, av, d=args.d).to(dev)
     pred = dm.DirectPredictor(args.d, args.pred_depth).to(dev)
@@ -227,11 +251,11 @@ def main():
     withheld = nn.Embedding(2, args.d).to(dev)  # commands given / withheld, for the prior
     zup = nn.Linear(args.d_z, args.d).to(dev)
     modules = dict(encoder=enc, actions=aenc, predictor=pred, probes=probes, posterior=post, prior=prior,
-                   player_emb=player_emb, withheld=withheld, zup=zup)
+                   player_emb=player_emb, withheld=withheld, zup=zup)  # the ruleset encoder is inside the state encoder
     params = [p for m in modules.values() for p in m.parameters()]
     n = lambda m: sum(p.numel() for p in m.parameters()) / 1e6
-    print(f"encoder {n(enc):.2f}M, action encoder {n(aenc):.2f}M, predictor {n(pred):.2f}M, probes {n(probes):.2f}M, "
-          f"posterior {n(post):.2f}M, prior {n(prior):.2f}M", flush=True)
+    print(f"encoder {n(enc):.2f}M" + (f" (ruleset encoder {n(rs):.2f}M)" if rs is not None else "") + f", action encoder {n(aenc):.2f}M, "
+          f"predictor {n(pred):.2f}M, probes {n(probes):.2f}M, posterior {n(post):.2f}M, prior {n(prior):.2f}M", flush=True)
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
     warm = 200
     lr_at = lambda s: min(1, (s + 1) / warm) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps)))
@@ -269,6 +293,8 @@ def main():
         (a sample) or prior_mean. Returns the probes' logits, the targets' mask and the latent terms."""
         fb, tb, ab = b["fb"], b["tb"], b["ab"]
         fi = b["fi"]
+        if rs is not None:
+            rs.clear()  # one ruleset pass per batch
         with torch.autocast("cuda", dtype=torch.bfloat16):
             e = enc(fb)
             tokens, mask, ang = e["tokens"][fi], e["mask"][fi], e["ang"][fi]
@@ -361,7 +387,8 @@ def main():
                 cols = ("post", "prior", "prior_mean", "persist")
                 moving = np.mean(rows[True][0]["moving share"]["post"])
                 touched = np.mean(rows[True][0]["touched share"]["post"])
-                print(f"[{name} step {step}] k={k} ({hs:.2f}s) births/window {np.mean(births):.1f} | moving {moving:.0%} | touched by a command {touched:.0%}\n"
+                print(f"[{name} step {step}] k={k} ({hs:.2f}s) births/window {np.mean(births):.1f} | moving {moving:.0%} | touched by a command {touched:.0%}"
+                      + (" | type residual norms " + " ".join(f"{k_[:4]} {v_:.2f}" for k_, v_ in rs.residual_norms().items()) if rs is not None and rs.residual else "") + "\n"
                       f"   {'':16s} with commands: KL {rows[True][1]:5.2f} nats          | commands withheld: KL {rows[False][1]:5.2f} nats\n"
                       f"   {'':16s} " + "  ".join(f"{c[:6]:>6s}" for c in cols) + "  | " + "  ".join(f"{c[:6]:>6s}" for c in cols), flush=True)
                 for key in keys:

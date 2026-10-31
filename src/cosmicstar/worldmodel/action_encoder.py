@@ -107,7 +107,7 @@ class ActionEncoder(nn.Module):
             (se.team(b["act_rteam"]) + se.pcode(b["act_rpcode"])) * has_rec,
             se.pos(b["act_xy"]) * has_xy,
             se.entity_tokens(b, "tgt") * tgt_ok,
-            se.unit(b["act_snap"]),
+            se.snapshot_tokens(b),
             sel,
             self.num(num),
             self.time_in(self.time(b["act_t"])),

@@ -1095,3 +1095,104 @@ same loops). Token count ~1.3-1.6x a single view. Snapshot rows have client-assi
 link to their counterpart only by type and position. The observer playback becomes optional for
 1v1 once a few games confirm the owners' rows reproduce the observer's (compose_view.py's
 measurement says they do).
+
+## Ruleset encoder: types from the balance data (`worldmodel/ruleset.py`, 2026-10-30)
+
+**Parked the same day** (`train_direct.py --types ruleset`; the default is `table`, learned
+embeddings per id): the decision is to let the model learn the type embeddings from the
+replays first, then use the game data in two later roles: linear probes from the learned
+embeddings to the catalog fields (which values did the model discover from dynamics alone),
+and distillation, where this encoder becomes the student that reproduces the learned
+embeddings from the catalogs, so new patches and units get embeddings from numbers alone. A
+shared-per-type plus per-ruleset-residual decomposition of the learned tables (mirroring base
+data plus balance patch) was discussed and deferred. The parser validation against the export
+and the rules dump (below) is due when the probes and the student need trustworthy inputs.
+
+Original rationale: unit types, ability commands and upgrades embedded from the game's own
+data, so that a balance change moves the model's behaviour at once and a type the model
+never saw enters from its numbers. `scripts/build_ruleset_tables.py`
+turns each ruleset's Editor balance export (`data/worldmodel/balance/<ruleset>/*.xml`) and
+engine rules dump (`data/worldmodel/rules/<ruleset>.json`) into `data/worldmodel/rulesets.json`:
+per ruleset a graph of ~1060 unit nodes, ~440 ability-command nodes and ~90 upgrade-level nodes.
+
+Features, fixed width, every optional element as its numbers plus a presence bit (zeros when
+absent): units 46 numbers (life / shields / energy with regen, armor, costs, movement type and
+speed, radius, sight, cargo, supply, race, the 11 attribute tags); weapons 36 each (range,
+period, count, damage and max, splash, target class, kind, bonus damage and bonus max per
+attribute tag, so the marauder's `<bonus type="Armored">` is one slot and a unit without a
+bonus is zeros); ability commands 15 (type, range, costs, target kind from the rules dump);
+upgrade levels 4. A unit's weapons are a set: each through an MLP, summed, so any count works
+(2 is the most in these exports). Blizzard's hand-written strengths / weaknesses lists are
+left out: interface hints, not mechanics.
+
+Joins: API unit type id -> XML unit by name (1058 of 1061 mapped; 1063 of 1063 on 98310);
+API ability id -> (link name, command index) (410 of 442 commands); upgrade name -> level id
+(the tracker's names, case-insensitive fallback). Edges, 16 typed relations: unit has ability /
+upgrade, command makes unit / upgrade (from the producer's `<trains>` / `<builds>` /
+`<researches>` catalog indices), command or upgrade requires unit / upgrade, unit produced by
+unit. ~4100 edges per ruleset.
+
+`RulesetEncoder`: item MLPs -> node tokens (+ a kind embedding, + a zero-initialized residual
+per stable name, `--no_type_residual` turns it off) -> `--rs_depth` 3 attention layers over
+all ~1600 nodes with an additive bias per edge relation -> tables of unit / ability / upgrade
+embeddings (+ an "unknown" row each). Runs once per ruleset per batch (cached, `clear()` per
+step); entity tokens, order and production features, fogged command targets and the players'
+completed upgrades gather their rows (`lookup`). 3.1M parameters at d=256. Games whose ruleset
+has no balance export are skipped by `train_direct.py --types ruleset` (the default; `table`
+is the old learned embedding); the 1v1 viewer games on ruleset 98310_4e2c79d1 need
+`dump_rules.py` + `export_balance.py` first. The residual norms are printed per evaluation:
+a name whose residual grows is one the data describes badly.
+
+What this is for, beyond patches: the attention over the ruleset lets a type's vector hold
+what is true in every game (a bonus tag meets the attribute tags of the types it applies to,
+a target class meets movement types, a train command meets its product), so the entity-level
+attention over the frame only has to pair those properties with the situation.
+
+### Upgrade effects from the game data (2026-10-30)
+
+The balance export never says what an upgrade does: every weapon `<bonus>` has `max` equal to
+`damage`, and the per-unit `<upgrades>` levels carry only cost and requirements. The Marauder's
++1 vs Armored per weapons level (20/22/24/26) is nowhere in it. The numbers live in the game's
+own catalogs, `GameData/*.xml` inside the mods, which sit in the install's CASC storage:
+
+- **Root format.** SC2's TACT root is an MNDX file (`MNDX` magic): three compressed name
+  databases (a path-fragment trie over rank/select bit arrays) plus the CKey entries. It is
+  not a text manifest. Rather than port CascLib's ~3000-line parser, `envs/casc.py` loads
+  CascLib itself through ctypes (`scripts/build_casclib.sh` builds `lib/libcasc.so` with
+  plain gcc/g++, no cmake; compiled by the user, since the sandbox refuses to build downloaded
+  code). `Storage(install, build_key=...)` opens the storage at a build (the `.build.info`
+  row's Build Key; the Lutris install has no Product column, so no code name is passed),
+  `find(mask)` lists names (lower-case, backslashes, e.g.
+  `mods\liberty.sc2mod\base.sc2data\gamedata\upgradedata.xml`), `read(name)` returns bytes.
+- **Extraction.** `scripts/extract_gamedata.py` writes the ladder mods' catalogs per build to
+  `data/worldmodel/gamedata/<build>/mods/<mod>.sc2mod/base.sc2data/gamedata/*.xml`: 552 files,
+  19.8 MB per build, for core, liberty, swarm, void and voidmulti (the ladder dependency chain;
+  the storage also holds libertymulti / swarmmulti, the balance-test mods, coop and campaign
+  data). A build has to be installed (real or side install) to be read; the script refuses a
+  build it cannot find in `.build.info` rather than fall back to the active one.
+- **Layering and inheritance** (`worldmodel/gamedata.py`): mods are applied in load order; a
+  later entry with the same id sets scalar fields, patches array entries given by `index`
+  (voidmulti patches `TerranInfantryWeaponsLevel1`'s inherited `EffectArray[10]` to +2 for the
+  Ghost's rifle), appends entries without one, removes with `removed="1"`. `parent=` copies the
+  resolved parent, so the level entries (`...Level1`, parent `TerranInfantryWeapons`) inherit
+  the template's per-level effect list; `default="1"` entries are templates.
+- **What is read.** `CUpgrade.EffectArray` references `Catalog,Id,Field[Key]` with a value,
+  applied once per level: `Effect,PunisherGrenadesU,Amount +1`,
+  `Effect,PunisherGrenadesU,AttributeBonus[Armored] +1`, `Unit,Marine,LifeArmor +1`,
+  `Weapon,Claws,RateMultiplier +0.2` twice (adrenal glands, liberty and void each add 0.2:
+  +40% attack rate). Icons, tooltips and actors are dropped (`MECHANICS` lists the fields
+  kept). `AffectedUnitArray` names the units an upgrade touches.
+- **Into the tables.** Each weapon vector gains per-level increments (damage, attack-rate
+  multiplier, range, period, bonus per attribute tag) summed over the upgrade families that
+  touch its weapon or effect id, one representative level per family; each upgrade level gets
+  what it does (counts and means of damage / bonus / armor / life / speed / rate / range
+  deltas, affected-unit count) after the export's costs; `g_affects_u` edges link an upgrade to
+  the units it changes. A `has_gamedata` bit says whether the build's catalogs were available.
+  Verified on 98310: Marauder +1 and +1 vs Armored, Marine +1, Zergling +1 and rate +0.4,
+  Ghost +2 (voidmulti), infantry armor +1.
+- **Production commands.** The export's per-unit `<abilities>` lists leave out train / build /
+  research abilities (only `<trains>` / `<builds>` / `<researches>` entries with a catalog
+  index). `ability_links.json` names those indices, so each product becomes an ability-command
+  node (`BarracksTrain/Marine`, API id 560, type train / build / research, the product's cost)
+  with `a_makes_u` / `a_makes_g` edges; 641 commands per ruleset, 609 with API ids (was 442 /
+  410), so production orders now resolve to real rows instead of the unknown one.

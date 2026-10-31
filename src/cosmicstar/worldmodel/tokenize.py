@@ -98,12 +98,14 @@ class GameFrames:
             has1, has2 = count > 0, count > 1
             first = np.where(has1, start, 0)
             second = np.where(has2, start + 1, 0)
+            u["produce_raw"] = np.where(has1, abil[first] if len(abil) else 0, 0).astype(np.int32)
             u["produce"] = np.where(has1, self.vocab.ability_index(abil[first]) if len(abil) else PAD, PAD)
             u["progress"] = np.where(has1, prog[first] if len(prog) else 0, 0).astype(np.float32)
             u["progress2"] = np.where(has2, prog[second] if len(prog) else 0, 0).astype(np.float32)
             u["queue"] = count
         else:  # older extractions: first order of every unit, producers picked here
             producer = np.isin(u["type"], list(self.vocab.producers))
+            u["produce_raw"] = np.where(producer, u["order_abil"], 0).astype(np.int32)
             u["produce"] = np.where(producer, self.vocab.ability_index(u["order_abil"]), PAD)
             u["progress"] = np.where(producer, u.get("order_progress", np.zeros(n, np.float32)), 0).astype(np.float32)
             u["progress2"] = np.zeros(n, np.float32)
@@ -115,6 +117,7 @@ class GameFrames:
         unit, progress, log queue length). Zeros for extractions without orders."""
         u, n = self.u, len(self.u["id"])
         u["order"] = np.zeros(n, np.int64)
+        u["order_raw"] = np.zeros(n, np.int32)
         u["ord"] = np.zeros((n, C_ORDER), np.float32)
         if "ord_start" not in u or "ord_abil" not in d.files or not len(d["ord_abil"]):
             return
@@ -123,6 +126,7 @@ class GameFrames:
         has = count > 0
         first = np.where(has, start, 0)
         u["order"] = np.where(has, self.vocab.ability_index(d["ord_abil"][first]), PAD)
+        u["order_raw"] = np.where(has, d["ord_abil"][first], 0).astype(np.int32)
         tx, ty = d["ord_tx"][first], d["ord_ty"][first]
         has_pos = has & np.isfinite(tx)
         u["ord"][:, 0] = has
@@ -139,7 +143,7 @@ class GameFrames:
                 hp_max=np.float32, shield=np.float32, shield_max=np.float32, energy=np.float32, build=np.float16,
                 flags=np.uint8, contents=np.int16, harvesters=np.int16, unit_idx=np.int16, cat=np.int8,
                 resource=np.bool_, produce=np.int16, progress=np.float32, progress2=np.float32, queue=np.int8,
-                order=np.int16, ord=np.float32)
+                order=np.int16, ord=np.float32, produce_raw=np.int32, order_raw=np.int32)
 
     def _slim(self):
         self.u = {k: self.u[k].astype(t, copy=False) for k, t in self.KEEP.items() if k in self.u}
@@ -239,6 +243,10 @@ class GameFrames:
         own = np.array([owners.get(int(s), neutral) for s in u["owner"][rows]], np.int64).reshape(-1, 3)
         xy = np.stack([u["x"][rows], u["y"][rows]], 1).reshape(-1, 2)
         return {f"{prefix}_type": u["unit_idx"][rows].astype(np.int64),
+                # raw API ids, for the ruleset encoder (worldmodel/ruleset.py)
+                f"{prefix}_rtype": u["type"][rows].astype(np.int64),
+                f"{prefix}_rproduce": u["produce_raw"][rows].astype(np.int64),
+                f"{prefix}_rorder": u["order_raw"][rows].astype(np.int64),
                 f"{prefix}_team": own[:, 0], f"{prefix}_pcode": own[:, 1], f"{prefix}_rel": own[:, 2],
                 f"{prefix}_produce": u["produce"][rows].astype(np.int64),
                 f"{prefix}_order": u["order"][rows].astype(np.int64),
@@ -287,13 +295,15 @@ class GameFrames:
             ply_num=ply_num,
             ply_ups=ply_ups,
             vis=vis,
+            ruleset=self.meta.get("ruleset", ""),
+            ply_upnames=[[self.vocab.upgrade_names[k] for k in np.nonzero(ply_ups[i])[0]] for i in range(len(p_idx))],
             time=np.float32(self.loops[f] / 22.4),
             format=self.format,
             cells=self.half,  # map cells per normalized unit (x, y)
         )
 
 
-GROUPS = (("ent", ("type", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num")),
+GROUPS = (("ent", ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num")),
           ("ply", ("race", "team", "pcode", "rel", "num", "ups")))
 
 
@@ -318,6 +328,8 @@ def collate(frames):
     out["format"] = torch.from_numpy(np.stack([f["format"] for f in frames]))
     out["cells"] = torch.from_numpy(np.stack([f["cells"] for f in frames]))
     out["vis"] = torch.from_numpy(np.stack([f["vis"] for f in frames]))
+    out["ruleset"] = [f["ruleset"] for f in frames]          # per sample (strings; left alone by data.to)
+    out["ply_upnames"] = [f["ply_upnames"] for f in frames]  # per sample, per player: completed upgrade names
     if "win_center" in frames[0]:  # same number of windows per frame
         out["win_center"] = torch.from_numpy(np.stack([f["win_center"] for f in frames]))
         out["win_size"] = torch.from_numpy(np.stack([f["win_size"] for f in frames]))

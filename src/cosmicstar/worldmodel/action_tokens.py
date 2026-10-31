@@ -51,7 +51,7 @@ C_ACTION = 12                    # numeric features per token (see GameActions.w
 
 TOKEN_COLS = dict(loop=np.int32, player=np.int8, kind=np.int8, family=np.int32, button=np.int8,
                   queued=np.bool_, smart=np.bool_, minimap=np.bool_, presses=np.int16,
-                  tkind=np.int8, x=np.float32, y=np.float32, uid=np.int32, snap=np.int64,
+                  tkind=np.int8, x=np.float32, y=np.float32, uid=np.int32, snap=np.int64, snap_raw=np.int64,
                   group=np.int8, gop=np.int8, remove=np.int8, n_add=np.int16, n_rem=np.int16,
                   recipient=np.int8, minerals=np.int32, gas=np.int32, sel_start=np.int64)
 
@@ -105,8 +105,9 @@ class GameActions:
             return tag_to_uid.get(int(replay_tag) + ENGINE_TAG_OFFSET, -1) if replay_tag else -1
 
         def snap_type(link):
+            """(vocab index, raw API id) of a fogged target's unit type."""
             api = name_to_api.get(unit_links.get(int(link), ""), 0)
-            return int(frames.vocab.unit_index([api])[0]) if api else 0
+            return (int(frames.vocab.unit_index([api])[0]) if api else 0), int(api or 0)
 
         cols = {k: [] for k in TOKEN_COLS}
         sel = []
@@ -115,7 +116,7 @@ class GameActions:
         def add(**kw):
             for k, dt in TOKEN_COLS.items():
                 default = np.nan if k in ("x", "y") else (False if dt is np.bool_ else 1 if k == "presses"
-                                                          else 0 if k in ("family", "button", "snap") else -1)
+                                                          else 0 if k in ("family", "button", "snap", "snap_raw") else -1)
                 cols[k].append(kw.get(k, default))
             cols["sel_start"][-1] = len(sel)
             return len(cols["kind"]) - 1
@@ -128,7 +129,7 @@ class GameActions:
             if t == TK_UNIT:
                 out["uid"] = uid_of(d["target_tag"][i])
             if t == TK_SNAPSHOT:
-                out["snap"] = snap_type(d["snap_link"][i])
+                out["snap"], out["snap_raw"] = snap_type(d["snap_link"][i])
             return out
 
         kind, loop, player = d["kind"], d["loop"], d["player"]
@@ -178,7 +179,7 @@ class GameActions:
                 t = target(i)
                 t.update(x=float(d["tx"][i]), y=float(d["ty"][i]))  # a ping always has a point
                 if t["tkind"] == TK_UNIT and t.get("uid", -1) < 0:
-                    t["snap"] = snap_type(d["snap_link"][i])
+                    t["snap"], t["snap_raw"] = snap_type(d["snap_link"][i])
                 elif t["tkind"] != TK_UNIT:
                     t["tkind"] = TK_POINT
                 add(loop=L, player=p, kind=A_PING, minimap=bool(int(d["flags"][i]) & ra.FLAG_MINIMAP), **t)
@@ -258,6 +259,8 @@ class GameActions:
                 d_[f"{pre}_num"][:] = 0
                 d_[f"{pre}_produce"][:] = 0
                 d_[f"{pre}_order"][:] = 0
+                d_[f"{pre}_rproduce"][:] = 0
+                d_[f"{pre}_rorder"][:] = 0
                 d_[f"{pre}_ord"][:] = 0
 
         summarized = [only] if only else fr.slots
@@ -282,6 +285,7 @@ class GameActions:
             act_team=own[:, 0], act_pcode=own[:, 1],
             act_rteam=rec[:, 0], act_rpcode=rec[:, 1],
             act_snap=tk["snap"][idx].astype(np.int64),
+            act_rsnap=tk["snap_raw"][idx].astype(np.int64),
             act_xy=np.where(has_xy[:, None], fr.normalize_xy(np.nan_to_num(xy)), 0).astype(np.float32),
             act_num=num,
             act_t=((loops - t_loop) / 22.4).astype(np.float32),
@@ -292,6 +296,7 @@ class GameActions:
             seg_t=((np.asarray(bounds) - t_loop) / 22.4).astype(np.float32),
             sum_team=np.array([owners[s][0] for s in summarized], np.int64),
             sum_pcode=np.array([owners[s][1] for s in summarized], np.int64),
+            ruleset=fr.meta.get("ruleset", ""),
             # state unit ids the window's commands touched (selected or targeted), for diagnostics
             touched_uid=np.unique(np.concatenate([s_uid, tk["uid"][idx].astype(np.int64)])) if n else np.zeros(0, np.int64),
         )
@@ -306,8 +311,8 @@ def self_family(avocab, links, link):
 
 
 ACT_KEYS = ("kind", "family", "button", "tkind", "group", "gop", "remove", "team", "pcode", "rteam",
-            "rpcode", "snap", "xy", "num", "t", "seg", "player", "tgt_ok")
-ENT_KEYS = ("type", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num")
+            "rpcode", "snap", "rsnap", "xy", "num", "t", "seg", "player", "tgt_ok")
+ENT_KEYS = ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num")
 
 
 def collate_actions(windows):
@@ -333,6 +338,8 @@ def collate_actions(windows):
     for k in ENT_KEYS:
         out[f"sel_{k}"] = torch.from_numpy(np.concatenate([w[f"sel_{k}"] for w in windows]))
     out["sel_event"] = torch.from_numpy(np.concatenate([w["sel_event"] + b * N for b, w in enumerate(windows)]))
+    out["sel_sample"] = out["sel_event"] // N                 # flat selected unit -> its window
+    out["act_ruleset"] = [w["ruleset"] for w in windows]      # per window (strings; left alone by data.to)
     P = max(len(w["sum_team"]) for w in windows)
     pm = np.zeros((B, P), bool)
     team, pcode = np.zeros((B, P), np.int64), np.zeros((B, P), np.int64)

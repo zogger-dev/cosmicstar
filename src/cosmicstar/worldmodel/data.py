@@ -33,4 +33,4 @@ class GamePool:
 
 
 def to(b, dev):
-    return {k: x.to(dev, non_blocking=True) for k, x in b.items()}
+    return {k: (x.to(dev, non_blocking=True) if hasattr(x, "to") else x) for k, x in b.items()}

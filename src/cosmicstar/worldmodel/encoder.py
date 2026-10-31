@@ -171,6 +171,10 @@ class StateEncoder(nn.Module):
             tok = tok + self.ability(b[f"{g}_order"]) + self.ord_in(b[f"{g}_ord"])
         return tok
 
+    def snapshot_tokens(self, b):
+        """Unit-type embedding of fogged command targets (action tokens), [B, N, d]."""
+        return self.unit(b["act_snap"])
+
     def embed(self, b):
         """Token embeddings [B, T, d] and validity mask [B, T] (True = real token)."""
         B = b["time"].shape[0]

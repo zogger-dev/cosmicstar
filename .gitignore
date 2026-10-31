@@ -28,3 +28,4 @@ target/
 rustup-init.exe
 replay_dump/
 data/
+lib/

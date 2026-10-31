@@ -105,11 +105,56 @@ class RoPEEncoder(StateEncoder):
     tables) under RoPE self-attention. Returns the full token sequence; no grid or window
     readouts (this model predicts state, not slots)."""
 
-    def __init__(self, vocab, d=256, depth=6, heads=8, mlp_ratio=4.0):
+    def __init__(self, vocab, d=256, depth=6, heads=8, mlp_ratio=4.0, ruleset=None):
         super().__init__(vocab, d, depth=1, heads=heads, mlp_ratio=mlp_ratio)
         del self.blocks, self.windows
         self.rope = RoPE2D(d // heads)
         self.layers = nn.ModuleList([Block(d, heads, self.rope, mlp_ratio) for _ in range(depth)])
+        # types from the game's balance data (worldmodel/ruleset.py) instead of the learned tables
+        self.ruleset = ruleset
+        if ruleset is not None:
+            del self.unit, self.ability, self.upgrade
+            self._rs_sel = None  # (rulesets, upgrade names) of the current batch, set by embed()
+
+    def _rs_batch(self, b, g):
+        """The rulesets of the samples the group g belongs to: the frame's own for entities,
+        the window's for action pointers (collate_actions carries them as act_ruleset)."""
+        return b["ruleset"] if g == "ent" else b["act_ruleset"]
+
+    def entity_tokens(self, b, g="ent"):
+        if self.ruleset is None:
+            return super().entity_tokens(b, g)
+        rs = self._rs_batch(b, g)
+        if b[f"{g}_rtype"].dim() == 1:  # flat pointers (selections): one row per unit, with its sample index
+            rows = self.ruleset.lookup([rs[i] for i in b[f"{g}_sample"].tolist()] if f"{g}_sample" in b else rs,
+                                       unit_api=b[f"{g}_rtype"][:, None], abil_api=torch.stack([b[f"{g}_rproduce"], b[f"{g}_rorder"]], 1))
+            unit, abil = rows["unit"][:, 0], rows["ability"]
+        else:
+            rows = self.ruleset.lookup(rs, unit_api=b[f"{g}_rtype"], abil_api=torch.stack([b[f"{g}_rproduce"], b[f"{g}_rorder"]], -1))
+            unit, abil = rows["unit"], rows["ability"]
+        tok = unit + self.owner(b, g) + self.pos(b[f"{g}_xy"]) + self.ent_in(b[f"{g}_num"]) + abil[..., 0, :]
+        if self.use_orders:
+            tok = tok + abil[..., 1, :] + self.ord_in(b[f"{g}_ord"])
+        return tok
+
+    def snapshot_tokens(self, b):
+        if self.ruleset is None:
+            return super().snapshot_tokens(b)
+        return self.ruleset.lookup(b["act_ruleset"], unit_api=b["act_rsnap"])["unit"]
+
+    def embed(self, b):
+        if self.ruleset is None:
+            return super().embed(b)
+        B = b["time"].shape[0]
+        ent = self.entity_tokens(b)
+        P = b["ply_mask"].shape[1]
+        names = [b["ply_upnames"][i][p] if p < len(b["ply_upnames"][i]) else [] for i in range(B) for p in range(P)]
+        ups = self.ruleset.lookup([b["ruleset"][i] for i in range(B) for _ in range(P)], upg_names=names)["upgrade"].view(B, P, -1)
+        ply = (self.player_marker + self.race(b["ply_race"]) + self.owner(b, "ply") + self.ply_in(b["ply_num"]) + ups.to(ent.dtype))
+        cls = self.cls + self.cls_in(torch.cat([self.time_ff(b["time"]), b["format"]], -1))[:, None]
+        tokens = torch.cat([cls, ply, ent], 1)
+        mask = torch.cat([torch.ones(B, 1, dtype=torch.bool, device=ent.device), b["ply_mask"], b["ent_mask"]], 1)
+        return tokens, mask
 
     def forward(self, b):
         x, mask = self.embed(b)
