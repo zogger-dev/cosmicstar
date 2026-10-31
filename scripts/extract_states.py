@@ -9,7 +9,8 @@ aren't extracted here: they come from the replay's own command events (see
 unit_tag below for linking them to these units). Unit orders (move, attack, gather, train,
 ...) and their targets are kept (ord_*): they are the part of the coming change that is
 already decided, so a single frame with them is close to a Markov state. Output is one
-compressed .npz per replay in --out:
+packed state file (.cst, worldmodel/statefile.py: per-unit deltas + zstd, read with
+statefile.load) per replay in --out:
 
     frame_loop[F]            game loop of each frame
     frame_start[F+1]         unit rows of frame f are u_*[frame_start[f]:frame_start[f+1]]
@@ -50,9 +51,13 @@ compressed .npz per replay in --out:
 Not here: creep (an observer's creep map is always empty; creep's sources - hatcheries,
 tumors, overlords - are in the state) and commands (from the replay's own events).
 
-Player views (--views players): the same replay played as each player (observed_player_id =
-slot, fog on), exactly as the engine shows it to that player, written to --pov_out as
-<name>_p<slot>.npz with the same layout plus:
+Every player's view of the replay is extracted (observed_player_id = slot, fog on), exactly as
+the engine shows it to that player, to the games tree (worldmodel/corpus.py):
+data/games/<format>/<build>/<map>/<id>.p<slot>.cst, next to the game's action table
+(<id>.acts.npz) and its extraction sidecar (<id>.meta.json: per view the layout, step,
+substep, stats, extractor commit; a failed view leaves <id>.p<slot>.fail.json). The observer
+view (fog off, everything) is still a code path (perspective 0) but no longer extracted: the
+oracle is the two player views concatenated. Each view has the layout above plus:
 
     vis[F, H, W]             the player's visibility map per frame (0 never seen, 1 fogged,
                              2 visible; the engine's own map_state)
@@ -111,6 +116,11 @@ on the table for the model to need later:
     rd_*, rd_frame_start     radar rings (sensor towers)
     pu_id, pu_frame_start    the raw player block's upgrade ids per frame (the engine's own
                              list; up_* from the tracker names them)
+    cam_save[F, P, 8, 2], subgroup[F, P], lc_*[F, P], ac_*
+                             the rest of the players' interface memory, from the replay's
+                             events like grp_* (selection_tracker.frame_memory): camera hotkey
+                             positions, the selection's active subgroup (tab), the last command
+                             (what a repeat re-fires), autocast toggles with their recipients
     p_*                      now every PlayerStats field of the tracker (the nine classic
                              names plus minerals_killed_army, vespene_lost_economy,
                              minerals_used_in_progress_technology, ...; see stat_name)
@@ -144,8 +154,7 @@ plus our own per-frame processing. The Windows client has no headless mode; its 
 minimized after launch (minimize_client_window), which made stepping ~20% faster.
 
 Usage:
-    python scripts/extract_states.py --replays <dir> --out data/worldmodel/obs --step 4 --workers 8
-    python scripts/extract_states.py --views observer,players --pov_out data/worldmodel/pov ...
+    python scripts/extract_states.py --format 1v1 --step 4 --workers 12     # every 1v1 game not yet done
 """
 
 import argparse
@@ -169,6 +178,7 @@ EXCLUDED_BUILDS = {97364, 97425, 97563}  # patch 5.0.16, reverted
 # Wine/Proton from a Lutris prefix (cosmicstar/envs/wine_run_config.py; SC2PATH overrides).
 from cosmicstar.envs.wine_run_config import battlenet_cache_dirs, sc2_install_dir  # noqa: E402
 from cosmicstar.envs import depot  # noqa: E402  maps and mods by hash (the client won't fetch them)
+from cosmicstar.worldmodel import corpus  # noqa: E402  the replay and games trees
 
 SC2_DIR = sc2_install_dir() or r"C:\Program Files (x86)\StarCraft II"
 BALANCE_DIR = "data/worldmodel/balance"  # Editor exports per ruleset (export_balance.py)
@@ -225,60 +235,7 @@ def stat_name(key):
     return re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()
 
 
-def _protocol(archive):
-    from s2protocol import versions
-    header = versions.latest().decode_replay_header(archive.header["user_data_header"]["content"])
-    build = header["m_version"]["m_build"]
-    try:
-        return versions.build(build), build
-    except ImportError:
-        return versions.latest(), build
-
-
-def _s(b):
-    return b.decode("utf-8", "replace") if isinstance(b, bytes) else b
-
-
-def replay_info(path):
-    """Cheap metadata from the replay file (no engine)."""
-    import mpyq
-    a = mpyq.MPQArchive(path)
-    proto, build = _protocol(a)
-    header = proto.decode_replay_header(a.header["user_data_header"]["content"])
-    det = proto.decode_replay_details(a.read_file("replay.details"))
-    meta = json.loads(a.read_file("replay.gamemetadata.json"))
-    handles = det["m_cacheHandles"]
-    h = handles[-1]  # the map; the others are mods (core data, balance mods, ...)
-    mods = [x[8:].hex() for x in handles[:-1]]
-    players = [dict(slot=i + 1, name=_s(p["m_name"]), race=_s(p["m_race"]), team=p["m_teamId"], result=p["m_result"],
-                    mmr=None) for i, p in enumerate(det["m_playerList"])]
-    try:  # MMR lives with the lobby user; players and users meet through the working-set slot
-        init = proto.decode_replay_initdata(a.read_file("replay.initData"))["m_syncLobbyState"]
-        users = init["m_userInitialData"]
-        slot_user = {sl["m_workingSetSlotId"]: sl["m_userId"] for sl in init["m_lobbyState"]["m_slots"]
-                     if sl.get("m_userId") is not None}
-        for pl, p in zip(players, det["m_playerList"]):
-            u = slot_user.get(p.get("m_workingSetSlotId"))
-            if u is not None and users[u].get("m_scaledRating") is not None:
-                pl["mmr"] = users[u]["m_scaledRating"]
-    except Exception:
-        pass
-    base_build, data_version = int(meta["BaseBuild"][4:]), meta.get("DataVersion")
-    return dict(build=build, base_build=base_build, game_version=".".join(meta["GameVersion"].split(".")[:-1]),
-                data_version=data_version, map=_s(det["m_title"]), map_hash=h[8:].hex(), mods=mods,
-                handles=[depot.parse_handle(x) for x in handles],
-                ruleset=ruleset_key(base_build, data_version, mods),
-                # The header's exact loop count (metadata "Duration" is in normal-speed seconds
-                # of 16 loops, not real seconds)
-                duration_loops=int(header["m_elapsedGameLoops"]), players=players)
-
-
-def ruleset_key(base_build, data_version, mods):
-    """The rules a game ran under: build + data version + its mods (balance mods change
-    between games on the same build)."""
-    import hashlib
-    raw = json.dumps([base_build, data_version, mods])
-    return f"{base_build}_{hashlib.sha1(raw.encode()).hexdigest()[:8]}"
+from cosmicstar.worldmodel.corpus import _protocol, _s, replay_info, ruleset_key  # noqa: E402,F401  (the replay readers)
 
 
 def run_config_for(info):
@@ -421,7 +378,7 @@ class DesyncCheck:
                 raise RuntimeError(f"desync at {loop / LPS:.0f}s: unit {t} isn't in the replay's unit log")
 
 
-def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abilities=True):
+def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abilities=True, acts_path=None):
     """Plays one replay and saves every frame (see the module doc). perspective 0: observer,
     fog off; a player slot: as that player sees it (fog on); ui: also the engine's control group
     and selection panel summaries (ui_*), which need the feature layer on; abilities: query the
@@ -822,16 +779,19 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
     # summaries, selection and recipients (worldmodel/selection_tracker.py)
     from cosmicstar.worldmodel import replay_actions, selection_tracker
     acts = replay_actions.parse(path)
+    if acts_path and not os.path.exists(acts_path):  # the game's action table, once, next to its views
+        np.savez_compressed(acts_path + ".tmp.npz", **acts)
+        os.replace(acts_path + ".tmp.npz", acts_path)
     died = selection_tracker.deaths_by_replay_tag(desync.died)  # exact death loops, from the replay
     slots = [perspective] if perspective else [p["slot"] for p in info["players"]]
     arrays.update(selection_tracker.frame_groups(acts, slots, arrays["frame_loop"], tags, died))
+    arrays.update(selection_tracker.frame_memory(acts, slots, arrays["frame_loop"], tags, died))
     if perspective:
         checks = selection_tracker.validate(arrays, acts, perspective, died)
         stats["groups"] = {k: int(v) for k, v in checks.items() if k != "mismatches"}
     stats["units"] = len(ids)
-    tmp = out_path + ".tmp.npz"
-    np.savez_compressed(tmp, **arrays)
-    os.replace(tmp, out_path)
+    from cosmicstar.worldmodel import statefile
+    statefile.save(out_path, arrays)  # .cst: per-unit deltas + zstd (worldmodel/statefile.py), written atomically
     return stats
 
 
@@ -844,47 +804,58 @@ def installed_builds():
     return wine_run_config.installed_builds()
 
 
-def out_name(path):
-    import hashlib
-    return hashlib.sha1(os.path.basename(path).encode()).hexdigest()[:12] + ".npz"
-
-
-def build_manifest(replay_dir, player, out_dir, require_player=False, any_ruleset=False):
-    """Every replay we can extract: right patch, binary installed, map cached (and the
-    player present, if required). any_ruleset: also rulesets without an Editor balance export
-    (their abilities can't be named, which only matters for the action vocabulary)."""
+def build_manifest(replays_root, games_root, fmt, step, substep, builds=(), maps=(), ids=(), any_ruleset=False,
+                   redo=False, retry_failed=False):
+    """One job per (game, player view) still to extract, from the replay tree's index
+    (corpus.py): the format's games on installed base builds, long enough, with their map
+    cached (fetched from the depot unless --no_fetch) and a ruleset the Editor could export
+    (any_ruleset: those too; their abilities can't be named, which only matters for the action
+    vocabulary). A view already extracted with this layout, step and substep is done (redo: do it
+    again); a view with a fail file is left alone (retry_failed: try again). Returns (jobs,
+    {reason: count of skipped games or views})."""
     have = installed_builds()
-    # rulesets the Editor could export (export_balance.py): without that we can't name actions
     exported = os.path.join(BALANCE_DIR, "status.json")
     exported = json.load(open(exported)) if os.path.exists(exported) and not any_ruleset else None
-    jobs, skipped = [], {}
-    for path in sorted(glob.glob(os.path.join(replay_dir, "**", "*.SC2Replay"), recursive=True), key=os.path.getmtime):
-        try:
-            info = replay_info(path)
-        except Exception:
-            skipped["unreadable"] = skipped.get("unreadable", 0) + 1
+    index = corpus.load_index(replays_root)
+    maps = {corpus.map_slug(m) for m in maps}
+    jobs, skipped = [], collections.Counter()
+    for gid, d in sorted(index.items()):
+        if (fmt and d["format"] != fmt) or (builds and d["base_build"] not in builds) \
+                or (maps and corpus.map_slug(d["map"]) not in maps) or (ids and gid not in ids):
             continue
+        path = os.path.join(replays_root, d["path"])
         why = None
-        if info["build"] in EXCLUDED_BUILDS:
+        if not os.path.exists(path):
+            why = "replay file missing"
+        elif d["build"] in EXCLUDED_BUILDS:
             why = "patch 5.0.16"
-        elif info["base_build"] not in have:
-            why = f"base build {info['base_build']} not installed"
-        elif info["duration_loops"] < 90 * LPS:
+        elif d["base_build"] not in have:
+            why = f"base build {d['base_build']} not installed"
+        elif d["duration_loops"] < 90 * LPS:
             why = "under 90 s (remake/leave)"
-        elif map_path(info["map_hash"], info["handles"]) is None:
+        elif map_path(d["map_hash"], d.get("handles")) is None:
             why = "map not cached (depot fetch failed)" if FETCH_MISSING else "map not cached"
-        elif exported is not None and not exported.get(info["ruleset"], {}).get("ok"):
-            why = "ruleset not exported" if info["ruleset"] not in exported else "ruleset not exportable"
-        if why is None and require_player and not any(player and player.lower() in p["name"].lower()
-                                                       for p in info["players"]):
-            why = "player not in game"
+        elif exported is not None and not exported.get(d["ruleset"], {}).get("ok"):
+            why = "ruleset not exported" if d["ruleset"] not in exported else "ruleset not exportable"
         if why:
-            skipped[why] = skipped.get(why, 0) + 1
+            skipped[why] += 1
             continue
-        jobs.append(dict(path=path, out=os.path.join(out_dir, out_name(path)), map=info["map"],
-                         base_build=info["base_build"], ruleset=info["ruleset"],
-                         slots=[p["slot"] for p in info["players"]], teams={p["slot"]: p["team"] for p in info["players"]}))
-    return jobs, skipped
+        files = corpus.GameFiles(games_root, corpus.rel_dir(d["format"], d["base_build"], d["map"]), gid)
+        meta = corpus.read_meta(files.meta()).get("views", {})
+        for slot in [p["slot"] for p in d["players"]]:
+            if slot in CRASHING_VIEWS:
+                continue
+            out, rec = files.view(slot), meta.get(str(slot), {})
+            if os.path.exists(out) and rec.get("layout") == LAYOUT and rec.get("step") == step and rec.get("substep") == substep and not redo:
+                skipped["done"] += 1
+                continue
+            if os.path.exists(files.fail(slot)) and not retry_failed:
+                skipped["failed earlier (--retry_failed)"] += 1
+                continue
+            jobs.append(dict(id=gid, path=path, out=out, acts=files.acts(), meta=files.meta(), fail=files.fail(slot),
+                             map=d["map"], base_build=d["base_build"], ruleset=d["ruleset"], perspective=slot,
+                             slots=[p["slot"] for p in d["players"]], teams={p["slot"]: p["team"] for p in d["players"]}))
+    return jobs, dict(skipped)
 
 
 # The engine's view of slot 4 crashes at the game's first research order (worldmodel/README.md);
@@ -892,13 +863,10 @@ def build_manifest(replay_dir, player, out_dir, require_player=False, any_rulese
 CRASHING_VIEWS = {4}
 
 
-def pov_name(pov_out, job, slot):
-    return os.path.join(pov_out, out_name(job["path"])[:-4] + f"_p{slot}.npz")
-
-
 def claim(job):
     """Atomically claims a job for this worker (any free worker takes the next one)."""
     try:
+        os.makedirs(os.path.dirname(job["out"]), exist_ok=True)
         os.close(os.open(job["out"] + ".claim", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
         return True
     except FileExistsError:
@@ -950,15 +918,25 @@ def protobuf_impl():
 def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
     from absl import flags
     flags.FLAGS(sys.argv[:1])
+    commit = os.environ.get("COSMICSTAR_COMMIT", "")
     for j in jobs:
-        if os.path.exists(j["out"]) or not claim(j):
+        if not claim(j):
             continue
+        os.makedirs(os.path.dirname(j["out"]), exist_ok=True)
         t0 = time.time()
+        slot = j.get("perspective", 0)
         for attempt in range(3):
             try:
-                st = extract(j["path"], j["out"], step, until, j.get("perspective", 0), substep, ui, abilities)
-                print(json.dumps(dict(ok=os.path.basename(j["path"]), view=j.get("perspective", 0), **st,
-                                      mb=round(os.path.getsize(j["out"]) / 1e6, 1), s=round(time.time() - t0), tries=attempt + 1)), flush=True)
+                st = extract(j["path"], j["out"], step, until, slot, substep, ui, abilities, j.get("acts"))
+                rec = dict(layout=LAYOUT, step=step, substep=substep, until=until, ui=ui, abilities=abilities, stats=st,
+                           mb=round(os.path.getsize(j["out"]) / 1e6, 1), s=round(time.time() - t0), tries=attempt + 1,
+                           extractor=commit, when=time.strftime("%Y-%m-%dT%H:%M:%S"))
+                if j.get("meta"):
+                    corpus.update_meta(j["meta"], slot, rec)
+                if j.get("fail") and os.path.exists(j["fail"]):
+                    os.remove(j["fail"])
+                print(json.dumps(dict(ok=j.get("id", os.path.basename(j["path"])), view=slot, **st, mb=rec["mb"], s=rec["s"],
+                                      tries=attempt + 1)), flush=True)
                 break
             except Exception as ex:
                 # replay starts fail in bursts while another instance fetches data for a map it
@@ -969,33 +947,42 @@ def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
                 # or never comes up (ConnectError / ConnectionError / WebSocketConnectionClosed:
                 # 6 of 12 player views with 4 workers, 2026-10-30); those passed alone as well.
                 if any(k in repr(ex) for k in ("InvalidReplayData", "timed out", "Connect", "ended at start", "Status.ended")) and attempt < 2:
-                    print(json.dumps(dict(retry=os.path.basename(j["path"]), view=j.get("perspective", 0), error=repr(ex)[:200],
+                    print(json.dumps(dict(retry=j.get("id", os.path.basename(j["path"])), view=slot, error=repr(ex)[:200],
                                           attempt=attempt + 1, s=round(time.time() - t0))), flush=True)
                     time.sleep(45 * (attempt + 1))
                     continue
                 import traceback
                 where = " | ".join(l.strip() for l in traceback.format_exc().splitlines() if l.strip().startswith("File"))[-300:]
-                print(json.dumps(dict(fail=os.path.basename(j["path"]), view=j.get("perspective", 0), error=repr(ex)[:200],
-                                      tries=attempt + 1, s=round(time.time() - t0), where=where)), flush=True)
+                rec = dict(error=repr(ex)[:300], where=where, tries=attempt + 1, s=round(time.time() - t0), step=step,
+                           substep=substep, layout=LAYOUT, extractor=commit, when=time.strftime("%Y-%m-%dT%H:%M:%S"))
+                if j.get("fail"):
+                    json.dump(rec, open(j["fail"], "w"), indent=1)
+                print(json.dumps(dict(fail=j.get("id", os.path.basename(j["path"])), view=slot, error=rec["error"][:200],
+                                      tries=attempt + 1, s=rec["s"], where=where)), flush=True)
                 break
+        try:
+            os.remove(j["out"] + ".claim")  # done or failed: the claim has served
+        except OSError:
+            pass
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--replays", default=r"C:\Users\prade\Documents\StarCraft II\Accounts\52583725\1-S2-1-1544307\Replays\Multiplayer")
-    ap.add_argument("--player", default="zogger", help="with --require_player: only games with this player")
-    ap.add_argument("--require_player", action="store_true", help="skip games without --player")
-    ap.add_argument("--out", default="data/worldmodel/full")
+    ap.add_argument("--replays", default=corpus.REPLAYS, help="the replay tree (scripts/ingest_replays.py)")
+    ap.add_argument("--games", default=corpus.GAMES, help="the games tree the views go to")
+    ap.add_argument("--format", default="1v1", help="games of this format (1v1, 2v2, ...; empty = all)")
+    ap.add_argument("--builds", default="", help="comma-separated base builds (default: every installed one)")
+    ap.add_argument("--maps", default="", help="comma-separated map names or slugs (default: all)")
+    ap.add_argument("--ids", default="", help="comma-separated game ids, or @file with a JSON list of ids")
+    ap.add_argument("--redo", action="store_true", help="extract again views already done with this layout / step / substep")
+    ap.add_argument("--retry_failed", action="store_true", help="try views with a fail file again")
     ap.add_argument("--step", type=int, default=16, help="game loops between frames (16 = 0.71 s)")
     ap.add_argument("--until", type=float, default=0, help="seconds of game time to extract (0 = whole game)")
-    ap.add_argument("--substep", type=int, default=None, help="request an observation every this many loops (discarded "
-                    "unparsed) and keep one every --step loops; default 1 for player views, 0 (none) for observer-only "
-                    "runs. Without it a player view leaks enemy movement through the fog (module doc)")
+    ap.add_argument("--substep", type=int, default=1, help="request an observation every this many loops (discarded "
+                    "unparsed) and keep one every --step loops; without it a player view leaks enemy movement through "
+                    "the fog (module doc)")
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--limit", type=int, default=0, help="only the first N replays (newest last)")
-    ap.add_argument("--views", default="observer", help="observer, players, or observer,players")
-    ap.add_argument("--pov_out", default="data/worldmodel/pov", help="player views go here")
-    ap.add_argument("--games", help="json list of output names (<hash>.npz): only these games")
+    ap.add_argument("--limit", type=int, default=0, help="only the first N games of the job list")
     ap.add_argument("--no_fetch", action="store_true", help="don't fetch missing maps/mods from the depot")
     ap.add_argument("--slot", type=int, default=-1, help="(worker) its index; with --prefix_pool, worker k runs its engines in "
                     "Wine prefix k of wine_run_config.POOL_DIR, made on first use")
@@ -1003,8 +990,8 @@ def main():
                     "keeper, shared temp slots) instead of a prefix per worker")
     ap.add_argument("--no_abilities", action="store_true", help="skip the per-frame available-abilities query (ab_*, the "
                     "cooldown signal)")
-    ap.add_argument("--ui", action="store_true", help="player views: also keep the engine's control group / selection "
-                    "panel summaries (ui_*, for validating the tracked groups); turns the feature layer on")
+    ap.add_argument("--ui", action="store_true", help="also keep the engine's control group / selection panel summaries "
+                    "(ui_*, for validating the tracked groups); turns the feature layer on")
     ap.add_argument("--any_ruleset", action="store_true", help="also replays whose ruleset has no Editor balance export "
                     "(their abilities can't be named)")
     ap.add_argument("--worker", help=argparse.SUPPRESS)  # internal: job list for one worker process
@@ -1012,8 +999,6 @@ def main():
 
     global FETCH_MISSING
     FETCH_MISSING = not args.no_fetch
-    os.makedirs(args.out, exist_ok=True)
-    manifest = os.path.join(args.out, "manifest.json")
     if args.worker and sys.platform != "win32" and not args.no_prefix_pool and args.slot >= 0:
         from cosmicstar.envs import wine_run_config as _wrc
         os.environ["WINEPREFIX"] = _wrc.ensure_pool_prefix(args.slot)
@@ -1021,42 +1006,36 @@ def main():
     if args.worker:
         run_worker(json.load(open(args.worker)), args.step, int(args.until * LPS), args.substep, args.ui, not args.no_abilities)
         return
-    os.makedirs(args.pov_out, exist_ok=True)
+    logs = os.path.join(args.games, "logs")
+    os.makedirs(logs, exist_ok=True)
+    run_id = time.strftime("%Y%m%d-%H%M%S")
     # resuming: claims left by an interrupted run (no output, no partial file) are free again
-    for c in glob.glob(os.path.join(args.out, "*.claim")) + glob.glob(os.path.join(args.pov_out, "*.claim")):
+    for c in glob.glob(os.path.join(args.games, "**", "*.claim"), recursive=True):
         out_path = c[:-len(".claim")]
-        if not os.path.exists(out_path):
-            if os.path.exists(out_path + ".tmp.npz"):
-                os.remove(out_path + ".tmp.npz")
-            os.remove(c)
+        if os.path.exists(out_path + ".tmp"):
+            os.remove(out_path + ".tmp")
+        os.remove(c)
 
-    jobs, skipped = build_manifest(args.replays, args.player, args.out, args.require_player, args.any_ruleset)
-    if args.games:
-        keep = set(json.load(open(args.games)))
-        jobs = [j for j in jobs if os.path.basename(j["out"]) in keep]
+    builds = {int(b) for b in args.builds.split(",") if b}
+    maps = [m.strip() for m in args.maps.split(",") if m.strip()]
+    ids = set(json.load(open(args.ids[1:]))) if args.ids.startswith("@") else {i for i in args.ids.split(",") if i}
+    jobs, skipped = build_manifest(args.replays, args.games, args.format, args.step, args.substep, builds, maps, ids,
+                                   args.any_ruleset, args.redo, args.retry_failed)
     if args.limit:
-        jobs = jobs[-args.limit:]
-    views = set(args.views.split(","))
-    if args.substep is None:
-        args.substep = 1 if "players" in views else 0
-    expanded = []  # one job per (replay, view)
-    for j in jobs:
-        if "observer" in views:
-            expanded.append(dict(j, perspective=0))
-        if "players" in views:
-            for slot in j["slots"]:
-                if slot in CRASHING_VIEWS:  # the engine crashes in this view
-                    continue
-                expanded.append(dict(j, perspective=slot, out=pov_name(args.pov_out, j, slot)))
-    jobs = expanded
-    json.dump(jobs, open(manifest, "w"), indent=1)
-    for c in glob.glob(os.path.join(args.out, "*.claim")) + glob.glob(os.path.join(args.pov_out, "*.claim")):
-        os.remove(c)  # claims from a previous run
-    todo = sum(not os.path.exists(j["out"]) for j in jobs)
-    print(f"{len(jobs)} extractions ({args.views}; step {args.step}, substep {args.substep}; {todo} not done yet); "
-          f"skipped replays: {skipped}", flush=True)
+        keep = sorted({j["id"] for j in jobs})[:args.limit]
+        jobs = [j for j in jobs if j["id"] in keep]
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=HERE).stdout.strip()
+    except OSError:
+        commit = ""
+    settings = {k: v for k, v in vars(args).items() if k not in ("worker", "slot")}
+    json.dump(dict(run=run_id, extractor=commit, layout=LAYOUT, settings=settings, skipped=skipped, jobs=jobs),
+              open(os.path.join(logs, run_id + ".json"), "w"), indent=1)
+    print(f"run {run_id}: {len(jobs)} views of {len({j['id'] for j in jobs})} games to extract ({args.format or 'all formats'}; "
+          f"layout {LAYOUT}, step {args.step}, substep {args.substep}); skipped: {skipped}", flush=True)
     env = dict(os.environ)
     env["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = protobuf_impl()
+    env["COSMICSTAR_COMMIT"] = commit
     print("protobuf parser:", env["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"], flush=True)
 
     keeper = None
@@ -1068,15 +1047,15 @@ def main():
         keeper = _wrc.keep_prefix_alive()  # one wineserver for the whole run; returns once it is up
         print(json.dumps(dict(note="prefix keeper up", pid=keeper.pid)), flush=True)
 
-    worker_log = open(os.path.join(args.out, "workers.log"), "a")  # the workers' stderr (pysc2 / engine noise, stack dumps)
+    worker_log = open(os.path.join(logs, run_id + ".log"), "a")  # the workers' stderr (pysc2 / engine noise, stack dumps)
 
     def run(job_list, n):
         """n worker processes sharing job_list (each claims the next free job). Workers
         share this process's stdout; piping them through here would block all but one."""
-        path = os.path.join(args.out, "jobs_now.json")
+        path = os.path.join(logs, run_id + ".jobs.json")
         json.dump(job_list, open(path, "w"))
-        procs = [subprocess.Popen([sys.executable, os.path.abspath(__file__), "--out", args.out, "--step",
-                                   str(args.step), "--until", str(args.until), "--substep", str(args.substep), "--worker", path]
+        procs = [subprocess.Popen([sys.executable, os.path.abspath(__file__), "--step", str(args.step), "--until", str(args.until),
+                                   "--substep", str(args.substep), "--worker", path]
                                   + (["--no_fetch"] if args.no_fetch else []) + (["--ui"] if args.ui else [])
                                   + (["--no_abilities"] if args.no_abilities else [])
                                   + (["--no_prefix_pool"] if args.no_prefix_pool else []) + ["--slot", str(k)],

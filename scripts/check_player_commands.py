@@ -18,6 +18,7 @@ sys.path.insert(0, HERE)
 
 import extract_states as ex  # noqa: E402
 from cosmicstar.worldmodel import selection_tracker  # noqa: E402
+from cosmicstar.worldmodel import corpus, statefile  # noqa: E402
 
 
 def rate(st, k, total):
@@ -34,13 +35,17 @@ def main():
     args = ap.parse_args()
     total = {}
     for f in args.files:
-        name, slot = os.path.basename(f)[:-4].rsplit("_p", 1)
-        slot = int(slot)
-        pov = dict(np.load(f))
+        m = corpus.VIEW_RE.match(os.path.basename(f))
+        if m:  # games tree: <id>.p<slot>.cst with <id>.acts.npz next to it
+            name, slot, acts_file = m.group("id"), int(m.group("slot")), corpus.acts_path(f)
+        else:  # legacy flat layout
+            name, slot = os.path.basename(f)[:-4].rsplit("_p", 1)
+            slot, acts_file = int(slot), os.path.join(args.actions, name + ".npz")
+        pov = dict(statefile.load(f))
         if "cmd_loop" not in pov:  # an observer file or a composed view: no engine commands to check against
             print(f"{name} p{slot}: no cmd_* arrays (composed or observer view), skipped", flush=True)
             continue
-        acts = dict(np.load(os.path.join(args.actions, name + ".npz")))
+        acts = dict(np.load(acts_file))
         if "addsub_prio" not in acts:
             print(f"{name}: the action table predates the group masks / priorities; re-run extract_actions.py", flush=True)
             continue

@@ -6,10 +6,10 @@
                      matches it hasn't seen?
     train            everything else
 
-Files are the extracted state file names (the same names as the action files), so a game's
-split doesn't depend on whether it's extracted yet.
+Games are ids from the replay tree (worldmodel/corpus.py), so a game's split doesn't depend
+on whether it's extracted yet, and one split serves every view of a game.
 
-    python scripts/make_splits.py --maps "Arctic Flowers LE,Emerald City CE"
+    python scripts/make_splits.py --format 1v1 --maps "Ley Lines LE,Pylon LE" --out data/games/splits/default.json
 """
 
 import argparse
@@ -23,30 +23,34 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import extract_states as ex  # noqa: E402  (same replay selection and file names as the extraction)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
+
+from cosmicstar.worldmodel import corpus  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--replays", default=r"C:\Users\prade\Documents\StarCraft II\Accounts\52583725\1-S2-1-1544307\Replays\Multiplayer")
-    ap.add_argument("--maps", default="Arctic Flowers LE,Emerald City CE", help="maps held out entirely")
+    ap.add_argument("--replays", default=corpus.REPLAYS, help="the replay tree")
+    ap.add_argument("--format", default="1v1", help="games of this format (empty = all)")
+    ap.add_argument("--maps", default="", help="comma-separated maps (names or slugs) held out entirely")
     ap.add_argument("--game_share", type=float, default=0.05, help="share of each remaining map's games held out")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default="data/worldmodel/splits.json")
+    ap.add_argument("--out", default=os.path.join(corpus.GAMES, "splits", "default.json"))
     args = ap.parse_args()
     if os.path.exists(args.out):
         sys.exit(f"{args.out} exists; splits are fixed once made (delete it deliberately to remake)")
-    held_maps = [m.strip() for m in args.maps.split(",") if m.strip()]
-    jobs, _ = ex.build_manifest(args.replays, None, "data/worldmodel/obs")
+    held_maps = {corpus.map_slug(m) for m in args.maps.split(",") if m.strip()}
     by_map = collections.defaultdict(list)
-    for j in jobs:
-        by_map[ex.replay_info(j["path"])["map"]].append(os.path.basename(j["out"]))
-    unknown = set(held_maps) - set(by_map)
+    for gid, d in corpus.load_index(args.replays, rebuild=True).items():
+        if not args.format or d["format"] == args.format:
+            by_map[corpus.map_slug(d["map"])].append(gid)
+    unknown = held_maps - set(by_map)
     if unknown:
-        sys.exit(f"no games on {unknown}; maps: {sorted(by_map)}")
+        sys.exit(f"no games on {sorted(unknown)}; maps: {sorted(by_map)}")
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
     rng = np.random.RandomState(args.seed)
-    split = dict(held_out_maps=held_maps, held_out_map_games=[], held_out_games=[], train=[],
-                 seed=args.seed, game_share=args.game_share)
+    split = dict(held_out_maps=sorted(held_maps), held_out_map_games=[], held_out_games=[], train=[],
+                 seed=args.seed, game_share=args.game_share, format=args.format)
     for m in sorted(by_map):
         files = sorted(by_map[m])
         if m in held_maps:
@@ -58,7 +62,7 @@ def main():
         split["train"] += [f for i, f in enumerate(files) if i not in pick]
     json.dump(split, open(args.out, "w"), indent=1)
     print(f"train {len(split['train'])} | held-out games {len(split['held_out_games'])} | "
-          f"held-out maps {held_maps}: {len(split['held_out_map_games'])} games -> {args.out}")
+          f"held-out maps {sorted(held_maps)}: {len(split['held_out_map_games'])} games -> {args.out}")
 
 
 if __name__ == "__main__":

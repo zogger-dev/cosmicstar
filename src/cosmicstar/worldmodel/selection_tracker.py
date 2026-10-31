@@ -167,6 +167,90 @@ def frame_groups(acts, slots, frame_loop, unit_tag, died):
                 grp_id=np.asarray(flat, np.int32))
 
 
+N_CAMERA_SAVES = 8  # camera hotkey slots (F5-F8 and the shifted set; slots 0-7 all seen in pro replays)
+FLAG_SET_AUTOCAST, FLAG_AUTOCAST_ON = 0x40, 0x80  # SCmdEvent m_cmdFlags (3 toggles in 25 pro replays, all 0xC0: on)
+
+
+def frame_memory(acts, slots, frame_loop, unit_tag, died):
+    """The rest of what a player's interface remembers, per frame, from the replay's events
+    (the same frame rule as frame_groups: a frame at loop L shows the state after every event
+    at loops < L). For the players in slots (grp_player order), F frames, P players:
+
+        cam_save[F, P, 8, 2]   camera hotkey positions (slot 0-7), NaN until saved
+        subgroup[F, P]         the active subgroup (tab) of the selection: the last SELECT row's
+                               index; a control group recall resets it to 0 (assumed: the game
+                               logs no index for recalls)
+        lc_*[F, P]             the player's last command, what a REPEAT re-fires and a CMD_POINT /
+                               CMD_UNIT retargets: lc_link, lc_cmd (the replay's ability
+                               numbering), lc_flags, lc_target (replay_actions.TARGET_*), lc_x,
+                               lc_y, lc_unit (state id, -1 none), lc_loop (-1: no command yet)
+        ac_*                   autocast toggles, an event list: ac_loop, ac_player (slot),
+                               ac_link, ac_cmd, ac_on, and the units it applied to (the tracked
+                               alive selection at that row) ac_unit[ac_start[i]:ac_start[i+1]].
+                               The observation never shows autocast state; the tokenizer
+                               accumulates these per unit (rare: a few per game)
+    """
+    ids = {int(t) - ENGINE_TAG_OFFSET: i for i, t in enumerate(unit_tag.tolist())}
+    F, P = len(frame_loop), len(slots)
+    cam = np.full((F, P, N_CAMERA_SAVES, 2), np.nan, np.float32)
+    sub = np.zeros((F, P), np.int16)
+    lc = dict(link=np.full((F, P), -1, np.int16), cmd=np.full((F, P), -1, np.int16), flags=np.zeros((F, P), np.int64),
+              target=np.zeros((F, P), np.int8), x=np.full((F, P), np.nan, np.float32), y=np.full((F, P), np.nan, np.float32),
+              unit=np.full((F, P), -1, np.int32), loop=np.full((F, P), -1, np.int32))
+    ac = dict(loop=[], player=[], link=[], cmd=[], on=[], start=[0], unit=[])
+    for k, slot in enumerate(slots):
+        rows = player_rows(acts, slot)
+        toggles = [int(r) for r in rows if acts["kind"][r] == ra.CMD and int(acts["flags"][r]) & FLAG_SET_AUTOCAST]
+        _, at_rows, _ = replay(acts, slot, (), toggles)
+        cams = np.full((N_CAMERA_SAVES, 2), np.nan, np.float32)
+        subgroup = 0
+        last = dict(link=-1, cmd=-1, flags=0, target=0, x=np.nan, y=np.nan, unit=-1, loop=-1)
+        fi = 0
+        for r in rows:
+            r, loop = int(r), int(acts["loop"][r])
+            while fi < F and frame_loop[fi] <= loop:
+                cam[fi, k], sub[fi, k] = cams, subgroup
+                for key, v in last.items():
+                    lc[key][fi, k] = v
+                fi += 1
+            kind = acts["kind"][r]
+            if kind == ra.CAMERA_SAVE:
+                g = int(acts["group"][r])
+                if 0 <= g < N_CAMERA_SAVES:
+                    cams[g] = (acts["cam_x"][r], acts["cam_y"][r])
+            elif kind == ra.SELECT:
+                subgroup = int(acts["subgroup"][r])
+            elif kind == ra.GROUP and int(acts["group_op"][r]) == 2:
+                subgroup = 0
+            elif kind == ra.CMD:
+                tag = int(acts["target_tag"][r])
+                last = dict(link=int(acts["abil_link"][r]), cmd=int(acts["abil_cmd"][r]), flags=int(acts["flags"][r]),
+                            target=int(acts["target"][r]), x=float(acts["tx"][r]), y=float(acts["ty"][r]),
+                            unit=ids.get(tag, -1) if tag else -1, loop=loop)
+                if r in at_rows:
+                    ac["loop"].append(loop); ac["player"].append(slot)
+                    ac["link"].append(last["link"]); ac["cmd"].append(last["cmd"])
+                    ac["on"].append(bool(int(acts["flags"][r]) & FLAG_AUTOCAST_ON))
+                    ac["unit"].extend(ids[t] for t in at_rows[r] if t in ids and died.get(t, loop + 1) >= loop)
+                    ac["start"].append(len(ac["unit"]))
+            elif kind in (ra.CMD_POINT, ra.CMD_UNIT):
+                tag = int(acts["target_tag"][r])
+                last = dict(last, target=int(acts["target"][r]), x=float(acts["tx"][r]), y=float(acts["ty"][r]),
+                            unit=ids.get(tag, -1) if tag else -1)
+        while fi < F:
+            cam[fi, k], sub[fi, k] = cams, subgroup
+            for key, v in last.items():
+                lc[key][fi, k] = v
+            fi += 1
+    out = dict(cam_save=cam, subgroup=sub)
+    out.update({f"lc_{key}": v for key, v in lc.items()})
+    out.update(ac_loop=np.asarray(ac["loop"], np.int32), ac_player=np.asarray(ac["player"], np.int8),
+               ac_link=np.asarray(ac["link"], np.int16), ac_cmd=np.asarray(ac["cmd"], np.int16),
+               ac_on=np.asarray(ac["on"], np.bool_), ac_start=np.asarray(ac["start"], np.int64),
+               ac_unit=np.asarray(ac["unit"], np.int32))
+    return out
+
+
 def selected_at(arrays, loop):
     """The engine's is_selected set (replay tags) as of `loop`, from a player view's per-loop
     snapshots (sel_loop / sel_start / sel_id: stored at every loop the set changed). None when

@@ -53,7 +53,8 @@ class GameFrames:
     """One extracted replay, held in memory, served frame by frame."""
 
     def __init__(self, path, vocab):
-        d = np.load(path)
+        from . import statefile
+        d = statefile.load(path)
         self.path = path
         self.vocab = vocab
         self.meta = json.loads(str(d["meta"]))

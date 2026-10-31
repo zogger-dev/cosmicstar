@@ -39,6 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from cosmicstar.worldmodel.data import LPS, GamePool, to  # noqa: E402
+from cosmicstar.worldmodel import corpus, statefile  # noqa: E402
 from cosmicstar.worldmodel import vocab as vocab_mod  # noqa: E402
 from cosmicstar.worldmodel import latent as lat  # noqa: E402
 from cosmicstar.worldmodel import direct as dm  # noqa: E402
@@ -51,9 +52,13 @@ from cosmicstar.worldmodel.tokenize import GameFrames, collate  # noqa: E402
 TARGETS = ("exit", "dx", "dy", "hp", "sh", "en", "build", "order")
 
 
-def actions_name(path):
-    """A state file's action table: <game>.npz for <game>.npz and for the player views <game>_p<slot>.npz."""
-    return re.sub(r"_p\d+(?=\.npz$)", "", os.path.basename(path))
+def actions_path(path, actions_dir=None):
+    """A view's action table: <id>.acts.npz next to it in the games tree; for the legacy flat
+    layout (<game>_p<slot>.npz in one folder) <game>.npz in actions_dir."""
+    p = corpus.acts_path(path)
+    if p is not None:
+        return p
+    return os.path.join(actions_dir or os.path.dirname(path), re.sub(r"_p\d+$", "", os.path.splitext(os.path.basename(path))[0]) + ".npz")
 
 
 class Game:
@@ -61,9 +66,9 @@ class Game:
 
     def __init__(self, path, actions_dir, vocab, avocab):
         self.g = GameFrames(path, vocab)
-        self.ga = GameActions(os.path.join(actions_dir, actions_name(path)), self.g, avocab)
+        self.ga = GameActions(actions_path(path, actions_dir), self.g, avocab)
         self.viewer = self.g.viewer  # 0 = observer, else the player whose view this is (their commands only)
-        with np.load(path) as z:
+        with statefile.load(path) as z:
             self.dead_id, self.dead_start = z["dead_id"], z["dead_frame_start"]
         self.slot_index = {s: i for i, s in enumerate(self.g.slots)}
 
@@ -142,9 +147,10 @@ def collate_samples(samples, dev):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="data/worldmodel/obs")
-    ap.add_argument("--actions_dir", default="data/worldmodel/actions")
-    ap.add_argument("--splits", default="data/worldmodel/splits.json")
+    ap.add_argument("--games", default=corpus.GAMES, help="the games tree (every player view of a split's game ids), or a "
+                    "legacy flat folder of <game>_p<slot>.npz files named in the split")
+    ap.add_argument("--actions_dir", default=None, help="legacy flat layout only: the folder of <game>.npz action tables")
+    ap.add_argument("--splits", default=os.path.join(corpus.GAMES, "splits", "default.json"))
     ap.add_argument("--max_s", type=float, default=2.5, help="longest horizon in seconds")
     ap.add_argument("--eval_frames", default="1,4,8,14", help="horizons (in frames) evaluated")
     ap.add_argument("--frames", type=int, default=16, help="present frames per batch")
@@ -192,9 +198,14 @@ def main():
     dev = "cuda"
     split = json.load(open(args.splits))
 
+    views = corpus.views_by_id(args.games)  # games tree: id -> its extracted player views
+
     def available(names):
-        return [os.path.join(args.data, f) for f in sorted(names)
-                if os.path.exists(os.path.join(args.data, f)) and os.path.exists(os.path.join(args.actions_dir, actions_name(f)))]
+        """Every extracted view of the split's games (ids in the tree; legacy: file names)."""
+        paths = []
+        for n in sorted(names):
+            paths += views.get(n, []) if n in views else [os.path.join(args.games, n)]
+        return [p for p in paths if os.path.exists(p) and os.path.exists(actions_path(p, args.actions_dir))]
 
     train_paths = available(split["train"])
     tables = RulesetTables(args.rules_tables) if args.types == "ruleset" else None
@@ -204,14 +215,15 @@ def main():
             for q in paths:
                 if not os.path.exists(q):
                     continue
-                with np.load(q) as z:
+                with statefile.load(q) as z:
                     if json.loads(str(z["meta"])).get("ruleset") in tables.rulesets:
                         keep.append(q)
             return keep
         n0 = len(train_paths)
         train_paths = covered(train_paths)
         for k in ("train", "held_out_games", "held_out_map_games"):  # the game lists; held_out_maps are map names
-            split[k] = [os.path.basename(q) for q in covered([os.path.join(args.data, f) for f in split.get(k, [])])]
+            split[k] = sorted({corpus.VIEW_RE.match(os.path.basename(q)).group("id") if corpus.VIEW_RE.match(os.path.basename(q))
+                               else os.path.basename(q) for q in covered(available(split.get(k, [])))})
         print(f"ruleset tables: {len(tables.rulesets)} rulesets; {len(train_paths)} of {n0} train games covered", flush=True)
     if args.max_games:
         train_paths = train_paths[:args.max_games]

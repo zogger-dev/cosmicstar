@@ -1329,6 +1329,16 @@ the layout list in scripts/extract_states.py), so the redo is the last one for m
   more reason the oracle is the two player views concatenated. Still to confirm on a full game:
   that a unit on cooldown really drops the ability (the 90 s test used none).
 - not taken: alerts, chat, the feature-layer / render data.
+- the map's start locations in `meta`.
+- **interface memory from the replay**, per frame like the control groups
+  (`selection_tracker.frame_memory`): camera hotkey positions (`cam_save[F, P, 8, 2]`; all
+  eight slots are used in pro games), the selection's active subgroup (`subgroup[F, P]`, the
+  tab index; 515 tab presses in 25 replays, reset to 0 on a group recall by assumption), the
+  player's last command (`lc_*[F, P]`: what a repeat re-fires), and autocast toggles as an
+  event list with their recipients (`ac_*`; command flag 0x40 with 0x80 = on; rare, 3 in 25 pro
+  replays, e.g. Repair on for two SCVs). Also units lost / killed and resources lost: not
+  stored as such because the per-frame death list, the dead units' rows and the tracker's lost
+  / killed fields already give them exactly; the tokenizer accumulates them.
 
 Measured on 90 s of a pro game (both player views): all new arrays filled where the game had the
 thing (889 rally rows, 689 of them onto a mineral patch; 17 nonzero score fields; exact
@@ -1336,6 +1346,88 @@ minerals per frame), file +15% (591 KB vs 516 KB; the abilities table compresses
 Nothing is featurized yet: the tokenizer still reads the layout-1 columns and the first order
 only; the full order queue, rally, buffs, cooldowns, weapon cooldown / engaged target,
 passengers and the map grids are the model-side work that follows.
+
+## The corpus layout: replays and games in mirrored trees (2026-10-31)
+
+Outputs used to be flat folders of `<sha1 of file name>.npz` (`obs_pro`, `pov_pro`,
+`actions`, splits of file names). Now (worldmodel/corpus.py, scripts/ingest_replays.py):
+
+    data/replays/<format>/<build>/<map>/<id>.SC2Replay + <id>.json     the corpus, one tree for
+                                                                       every source
+    data/replays/index.json                                            every sidecar, rebuilt
+    data/games/<format>/<build>/<map>/<id>.p1.cst .p2.cst              the player views
+                                        <id>.acts.npz                  the action table
+                                        <id>.meta.json                 per view: layout, step,
+                                                                       substep, stats, commit
+                                        <id>.p<slot>.fail.json         a failed view
+    data/games/splits/<name>.json                                      game ids
+    data/games/logs/<run>.log, .json, .jobs.json                       per extraction run
+
+`<id>` is the content hash of the replay (first 16 hex of sha1), so a game in two packs is one
+game with both packs in its sidecar, and a renamed file is not a new game. The format (1v1,
+2v2, ..., ffa) comes from the replay's teams, the build is the base build, the map is a slug of
+its name (the sidecar has the real name; player names, races, MMR, result, duration and date
+are there too). Pruning: a format, a patch or a map is one `rm -rf` in both trees; anything
+else (a tournament, a player, games under five minutes, failed views) is a query over the
+sidecars or `index.json` that yields ids, then those ids' files. `jq` examples:
+
+    jq -r 'to_entries[] | select(.value.sources[0].pack | test("HSC")) | .key' data/replays/index.json
+    find data/games -name '*.fail.json'
+
+There is no dataset level: one extraction per game, and the extractor compares each view's
+sidecar (layout, step, substep) with its settings, so a layout change is an incremental redo
+in place (`--redo` forces one; `--retry_failed` retries views with a fail file). The observer
+view is gone from the outputs (the oracle is the two player views concatenated). The action
+table is written by the extractor itself, once per game, next to the views
+(scripts/extract_actions.py is gone). The source pack is in the sidecar, not the path, since
+it means nothing to training.
+
+Map directories follow the replay's own title, and tournaments ship their own versions:
+`ley_lines` next to `ley_lines_le`, `tokamak` next to `tokamak_le`, `tlmc21_celestial_enclave`
+next to `celestial_enclave_le`. Hold out or prune a map by prefix (`ley_lines*`) when the
+version doesn't matter; make_splits takes exact names or slugs.
+
+Ingest: `python scripts/ingest_replays.py <dir | archive | file>...` sorts replays into the
+tree (loose files are moved, archives unpacked with 7z and left in place, duplicates
+collapsed, unreadable files listed and left). The pro 1v1 pack went in on 2026-10-31: 629
+games, builds 93333 (65), 94137 (371), 95299 (1), 95841 (191), 96883 (1). The older 2v2
+extractions (`obs_1v1`, `pov_1v1`, `actions`, `splits_1v1.json`) stay as a legacy flat layout
+the loaders still read.
+
+## Packed state files (.cst, 2026-10-31)
+
+State files were `np.savez_compressed` (zlib on each raw column). On a median pro player view
+(8.6 MB from 253 MB raw) the bytes went to the visibility maps (20%), unit x / y (23%), ids,
+facing, hp and the ragged start indices. Measured alternatives on that file, all bit-exact:
+
+| scheme | size | write | read |
+|---|---|---|---|
+| zlib on raw columns (before) | 8.6 MB | 1.6 s | 0.3 s |
+| xz on raw columns | 5.2 MB | 10.6 s | 0.3 s |
+| zstd 9 on raw columns | 6.9 MB | 0.5 s | 0.06 s |
+| transforms + zlib | 2.8 MB | 0.6 s | 0.4 s |
+| transforms + zstd 9 (now) | 3.2 MB | 0.4 s | 0.4 s |
+| transforms + zstd 19 | 2.3 MB | 5 s | 0.05 s |
+
+The transforms (worldmodel/statefile.py) are what matter, the codec is second: per-unit deltas
+(each unit column minus the same unit's value in the previous frame, matched by id, so a unit
+standing still is zeros; float32 columns are exact multiples of 1/4096 and go to int32 fixed
+point, float16 columns are delta'd as bit patterns), XOR of consecutive visibility / creep
+frames, and consecutive differences of the monotonic start arrays. Parquet and Arrow IPC were
+tried too (pyarrow, since removed): on raw rows they match zstd (6.9 / 6.7 MB) and their own
+delta encodings make things worse because consecutive rows are different units; on rows sorted
+unit-major Parquet's delta gets to 3.4 MB; on the transformed columns they match the per-array
+blobs. So the container stayed a per-array one (JSON header + one zstd blob per array, arrays
+decoded lazily on access; `statefile.load` also opens the old .npz files). `u_id` is the one
+unit column kept raw: decoding the deltas needs it, and the engine's row order is only half
+stable between frames, so it is 20% of the file. Sorting rows by id within each frame would
+remove most of that but changes the engine's order, which was left as is. The 3.2 MB here vs
+2.6 MB in the first measurement is that: the experiment delta'd u_id by id, which cannot be
+decoded. With 100k replays the difference between the old and the new format is tens of TB.
+
+`zstandard` is a project dependency now. Loaders: `tokenize.GameFrames`, the training scripts,
+`vocab.build` and `check_player_commands` go through `statefile.load`; the action tables
+(replay_actions / extract_actions output) stay .npz.
 
 ## Confirmed: the API does not report a worker carrying rich vespene (2026-10-30)
 

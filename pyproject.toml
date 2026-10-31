@@ -18,6 +18,7 @@ dependencies = [
     "sc2reader",
     "torch",
     "tqdm",
+    "zstandard",
 ]
 
 [project.optional-dependencies]

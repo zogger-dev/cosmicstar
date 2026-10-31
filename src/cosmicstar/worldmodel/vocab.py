@@ -19,6 +19,8 @@ import os
 
 import numpy as np
 
+from . import statefile
+
 PAD, UNK = 0, 1
 RACES = ("Terran", "Zerg", "Protoss", "Random")
 # Unit categories (from scripts/dump_unit_data.py), used to sample readout windows.
@@ -94,7 +96,7 @@ def unit_info(unit_data_path):
 def build(paths, min_count=50, unit_data="data/worldmodel/unit_data.json"):
     types, abils, ups = collections.Counter(), collections.Counter(), collections.Counter()
     for p in paths:
-        d = np.load(p)
+        d = statefile.load(p)
         t, c = np.unique(d["u_type"], return_counts=True)
         types.update(dict(zip(t.tolist(), c.tolist())))
         for key in ("prod_abil", "ord_abil", "u_order_abil", "a_abil"):  # production and unit orders
@@ -116,7 +118,7 @@ def main():
     ap.add_argument("--out", default="data/worldmodel/vocab.json")
     ap.add_argument("--min_count", type=int, default=50)
     args = ap.parse_args()
-    paths = sorted(glob.glob(os.path.join(args.data_dir, "*.npz")))
+    paths = sorted(glob.glob(os.path.join(args.data_dir, "*.cst")) + glob.glob(os.path.join(args.data_dir, "*.npz")))
     v = build(paths, args.min_count)
     json.dump(v, open(args.out, "w"), indent=1)
     kinds = collections.Counter(k for k, _ in v["concepts"])

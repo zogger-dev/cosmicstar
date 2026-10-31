@@ -193,3 +193,5 @@ websocket-client==1.9.0
     # via pysc2
 wrapt==2.1.2
     # via dm-tree
+zstandard==0.25.0
+    # via cosmicstar (pyproject.toml)
