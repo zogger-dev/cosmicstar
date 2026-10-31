@@ -1219,3 +1219,14 @@ summaries are scattered to the frame's player order (the enemy's summary is zero
 so the prior sees "no commands" for the enemy, which is the point of the player view). The
 oracle as two concatenated views is not built yet; this is the single-view (belief) setting.
 The pro 1v1 extraction (two views per game) is running in its own session.
+
+## Open item: desyncs may be wrong map versions (noted 2026-10-30)
+
+Several replays fail the extractor's exact desync check (e.g. one DreamHack Dallas 2025 game at
+558 s; a share of the pro 1v1 set is expected to). Hypothesis (user): the map loaded for the
+playback is not the version the game was played on. `depot.py` fetches a map by the content
+hash in the replay's cache handles, so the file should be exact, but the engine may pick a map
+or mod from the Battle.net cache by name / another handle, or a dependency (mod) may resolve
+to a newer version. To check when it comes up: for a desyncing replay, compare the handles in
+`replay.details` with the files actually opened (the engine's log, or `-dataDir` cache
+contents), re-run with only the fetched files present, and see whether the desync moves.
