@@ -32,25 +32,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--replays", default=corpus.REPLAYS, help="the replay tree")
     ap.add_argument("--format", default="1v1", help="games of this format (empty = all)")
-    ap.add_argument("--maps", default="", help="comma-separated maps (names or slugs) held out entirely")
+    ap.add_argument("--maps", default="", help="comma-separated maps held out entirely: names, slugs or hash prefixes "
+                    "(a name takes every version of that map)")
     ap.add_argument("--game_share", type=float, default=0.05, help="share of each remaining map's games held out")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.path.join(corpus.GAMES, "splits", "default.json"))
     args = ap.parse_args()
     if os.path.exists(args.out):
         sys.exit(f"{args.out} exists; splits are fixed once made (delete it deliberately to remake)")
-    held_maps = {corpus.map_slug(m) for m in args.maps.split(",") if m.strip()}
-    by_map = collections.defaultdict(list)
-    for gid, d in corpus.load_index(args.replays, rebuild=True).items():
+    index = corpus.load_index(args.replays, rebuild=True)
+    names = [m.strip() for m in args.maps.split(",") if m.strip()]
+    held_maps = corpus.map_dirs_named(index, names)  # map directories (hashes): every version of a named map
+    by_map, map_name = collections.defaultdict(list), {}
+    for gid, d in index.items():
         if not args.format or d["format"] == args.format:
-            by_map[corpus.map_slug(d["map"])].append(gid)
-    unknown = held_maps - set(by_map)
-    if unknown:
-        sys.exit(f"no games on {sorted(unknown)}; maps: {sorted(by_map)}")
+            by_map[corpus.map_dir(d["map_hash"])].append(gid)
+            map_name[corpus.map_dir(d["map_hash"])] = d["map"]
+    if names and not held_maps:
+        sys.exit(f"no games on {names}; maps: {sorted(set(map_name.values()))}")
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     rng = np.random.RandomState(args.seed)
-    split = dict(held_out_maps=sorted(held_maps), held_out_map_games=[], held_out_games=[], train=[],
-                 seed=args.seed, game_share=args.game_share, format=args.format)
+    split = dict(held_out_maps={m: map_name.get(m) for m in sorted(held_maps)}, held_out_map_games=[], held_out_games=[],
+                 train=[], seed=args.seed, game_share=args.game_share, format=args.format)
     for m in sorted(by_map):
         files = sorted(by_map[m])
         if m in held_maps:
@@ -62,7 +65,7 @@ def main():
         split["train"] += [f for i, f in enumerate(files) if i not in pick]
     json.dump(split, open(args.out, "w"), indent=1)
     print(f"train {len(split['train'])} | held-out games {len(split['held_out_games'])} | "
-          f"held-out maps {sorted(held_maps)}: {len(split['held_out_map_games'])} games -> {args.out}")
+          f"held-out maps {split['held_out_maps']}: {len(split['held_out_map_games'])} games -> {args.out}")
 
 
 if __name__ == "__main__":

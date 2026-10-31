@@ -817,11 +817,11 @@ def build_manifest(replays_root, games_root, fmt, step, substep, builds=(), maps
     exported = os.path.join(BALANCE_DIR, "status.json")
     exported = json.load(open(exported)) if os.path.exists(exported) and not any_ruleset else None
     index = corpus.load_index(replays_root)
-    maps = {corpus.map_slug(m) for m in maps}
+    maps = corpus.map_dirs_named(index, maps) if maps else set()  # map directories (hashes); a name takes every version
     jobs, skipped = [], collections.Counter()
     for gid, d in sorted(index.items()):
         if (fmt and d["format"] != fmt) or (builds and d["base_build"] not in builds) \
-                or (maps and corpus.map_slug(d["map"]) not in maps) or (ids and gid not in ids):
+                or (maps and corpus.map_dir(d["map_hash"]) not in maps) or (ids and gid not in ids):
             continue
         path = os.path.join(replays_root, d["path"])
         why = None
@@ -840,7 +840,7 @@ def build_manifest(replays_root, games_root, fmt, step, substep, builds=(), maps
         if why:
             skipped[why] += 1
             continue
-        files = corpus.GameFiles(games_root, corpus.rel_dir(d["format"], d["base_build"], d["map"]), gid)
+        files = corpus.GameFiles(games_root, corpus.rel_dir(d["format"], d["base_build"], d["map_hash"]), gid)
         meta = corpus.read_meta(files.meta()).get("views", {})
         for slot in [p["slot"] for p in d["players"]]:
             if slot in CRASHING_VIEWS:
@@ -972,7 +972,7 @@ def main():
     ap.add_argument("--games", default=corpus.GAMES, help="the games tree the views go to")
     ap.add_argument("--format", default="1v1", help="games of this format (1v1, 2v2, ...; empty = all)")
     ap.add_argument("--builds", default="", help="comma-separated base builds (default: every installed one)")
-    ap.add_argument("--maps", default="", help="comma-separated map names or slugs (default: all)")
+    ap.add_argument("--maps", default="", help="comma-separated map names, slugs or hash prefixes (default: all)")
     ap.add_argument("--ids", default="", help="comma-separated game ids, or @file with a JSON list of ids")
     ap.add_argument("--redo", action="store_true", help="extract again views already done with this layout / step / substep")
     ap.add_argument("--retry_failed", action="store_true", help="try views with a fail file again")

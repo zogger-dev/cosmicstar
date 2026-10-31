@@ -43,7 +43,7 @@ class Ingest:
             self.unreadable.append((path, repr(ex)[:120]))
             self.counts["unreadable"] += 1
             return
-        rel = corpus.rel_dir(info["format"], info["base_build"], info["map"])
+        rel = corpus.rel_dir(info["format"], info["base_build"], info["map_hash"])
         dest = os.path.join(self.root, rel, gid + corpus.EXT)
         side = os.path.join(self.root, rel, gid + ".json")
         source = dict(pack=pack, file=original)
@@ -121,7 +121,7 @@ def main():
         print(f"  unreadable: {p}: {why}", file=sys.stderr)
     if not args.no_index:
         index = corpus.build_index(args.root)
-        print(f"index: {len(index)} games -> {os.path.join(args.root, corpus.INDEX)}")
+        print(f"index: {len(index)} games -> {os.path.join(args.root, corpus.INDEX)}, maps -> {os.path.join(args.root, corpus.MAPS)}")
 
 
 if __name__ == "__main__":

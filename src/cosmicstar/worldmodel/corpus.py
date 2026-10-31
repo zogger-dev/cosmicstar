@@ -1,12 +1,14 @@
 """The replay corpus and the games extracted from it: one tree each, mirrored.
 
-    data/replays/<format>/<build>/<map>/<id>.SC2Replay     the replay
+    data/replays/<format>/<build>/<map>/<id>.SC2Replay     the replay (<map>: the map's hash, see below)
                                         <id>.json          its sidecar (replay_sidecar): players (name,
                                                            race, MMR, result), teams, duration, date,
                                                            map, builds, ruleset, where it came from
     data/replays/index.json                                every sidecar in one file, rebuilt by
                                                            build_index (for queries; the sidecars
                                                            are the source of truth)
+    data/replays/maps.json                                 {map dir: name, games, builds}, rebuilt
+                                                           with the index: the human's map list
     data/games/<format>/<build>/<map>/<id>.p<slot>.cst     a player's view (scripts/extract_states.py)
                                         <id>.acts.npz      the replay's action table (replay_actions)
                                         <id>.meta.json     extraction sidecar: per view the layout,
@@ -20,8 +22,11 @@
 
 <id> is the first 16 hex digits of the sha1 of the replay file: the same game from two packs
 is one game (both packs listed in its sidecar), a renamed file is not a new game. <format> is
-1v1, 2v2, ..., ffa, from the replay's teams; <build> the base build; <map> the map name as a
-slug (map_slug; the sidecar has the real name). Pruning: a format, patch or map is one
+1v1, 2v2, ..., ffa, from the replay's teams; <build> the base build; <map> the first MAP_HEX
+digits of the map file's hash (the replay's cache handle, what the engine actually loaded): a
+tournament's own version of a ladder map, or a map's next revision, is a different directory
+even under the same name, and the same map under two names is one (the sidecar has the name;
+maps.json lists them). Pruning: a format, patch or map is one
 directory in both trees; anything else is a query over the sidecars (or index.json) that
 yields ids, then those ids' files. scripts/ingest_replays.py sorts packs into the replay tree.
 """
@@ -61,8 +66,15 @@ def game_format(players):
     return "v".join(str(s) for s in sizes)
 
 
-def rel_dir(fmt, base_build, map_name):
-    return os.path.join(fmt, str(base_build), map_slug(map_name))
+MAP_HEX = 16
+
+
+def map_dir(map_hash):
+    return map_hash[:MAP_HEX]
+
+
+def rel_dir(fmt, base_build, map_hash):
+    return os.path.join(fmt, str(base_build), map_dir(map_hash))
 
 
 # ---------------------------------------------------------------- replay metadata (no engine)
@@ -161,13 +173,38 @@ def iter_sidecars(root=REPLAYS, fmt=None):
                     continue
 
 
+MAPS = "maps.json"
+
+
 def build_index(root=REPLAYS):
-    """Rewrites root/index.json: {id: sidecar}. Returns the dict."""
+    """Rewrites root/index.json ({id: sidecar}) and root/maps.json ({map dir: {name, names,
+    games, builds, hash}}). Returns the index."""
     index = {d["id"]: d for _, d in iter_sidecars(root)}
-    tmp = os.path.join(root, INDEX + ".tmp")
-    json.dump(index, open(tmp, "w"), indent=0)
-    os.replace(tmp, os.path.join(root, INDEX))
+    maps = {}
+    for d in index.values():
+        m = maps.setdefault(map_dir(d["map_hash"]), dict(name=d["map"], names=[], games=0, builds=[], hash=d["map_hash"]))
+        m["games"] += 1
+        if d["map"] not in m["names"]:
+            m["names"].append(d["map"])
+        if d["base_build"] not in m["builds"]:
+            m["builds"].append(d["base_build"])
+    for name, obj in ((INDEX, index), (MAPS, dict(sorted(maps.items(), key=lambda kv: (kv[1]["name"], kv[0]))))):
+        tmp = os.path.join(root, name + ".tmp")
+        json.dump(obj, open(tmp, "w"), indent=0 if name == INDEX else 1)
+        os.replace(tmp, os.path.join(root, name))
     return index
+
+
+def map_dirs_named(index, names):
+    """The map directories whose name or hash prefix matches any of names (names: real map
+    names, slugs, or hash prefixes)."""
+    want = {map_slug(n) for n in names} | {n.lower() for n in names}
+    out = set()
+    for d in index.values():
+        md = map_dir(d["map_hash"])
+        if map_slug(d["map"]) in want or any(md.startswith(n) for n in want if n and all(c in "0123456789abcdef" for c in n)):
+            out.add(md)
+    return out
 
 
 def load_index(root=REPLAYS, rebuild=False):

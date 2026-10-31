@@ -1354,7 +1354,8 @@ Outputs used to be flat folders of `<sha1 of file name>.npz` (`obs_pro`, `pov_pr
 
     data/replays/<format>/<build>/<map>/<id>.SC2Replay + <id>.json     the corpus, one tree for
                                                                        every source
-    data/replays/index.json                                            every sidecar, rebuilt
+    data/replays/index.json, maps.json                                 every sidecar; the map
+                                                                       directories by name; rebuilt
     data/games/<format>/<build>/<map>/<id>.p1.cst .p2.cst              the player views
                                         <id>.acts.npz                  the action table
                                         <id>.meta.json                 per view: layout, step,
@@ -1365,9 +1366,12 @@ Outputs used to be flat folders of `<sha1 of file name>.npz` (`obs_pro`, `pov_pr
 
 `<id>` is the content hash of the replay (first 16 hex of sha1), so a game in two packs is one
 game with both packs in its sidecar, and a renamed file is not a new game. The format (1v1,
-2v2, ..., ffa) comes from the replay's teams, the build is the base build, the map is a slug of
-its name (the sidecar has the real name; player names, races, MMR, result, duration and date
-are there too). Pruning: a format, a patch or a map is one `rm -rf` in both trees; anything
+2v2, ..., ffa) comes from the replay's teams, the build is the base build, the map is the first
+16 hex digits of the map file's hash (the replay's cache handle, what the engine loaded), not
+its name: a tournament's own version of a ladder map or a map's next revision is a different
+map to the engine and to the model, and the same file under two names is one. The sidecar has
+the name, players, races, MMR, result, duration and date; `maps.json` lists the directories by
+name with their game counts and builds. Pruning: a format, a patch or a map is one `rm -rf` in both trees; anything
 else (a tournament, a player, games under five minutes, failed views) is a query over the
 sidecars or `index.json` that yields ids, then those ids' files. `jq` examples:
 
@@ -1382,10 +1386,9 @@ table is written by the extractor itself, once per game, next to the views
 (scripts/extract_actions.py is gone). The source pack is in the sidecar, not the path, since
 it means nothing to training.
 
-Map directories follow the replay's own title, and tournaments ship their own versions:
-`ley_lines` next to `ley_lines_le`, `tokamak` next to `tokamak_le`, `tlmc21_celestial_enclave`
-next to `celestial_enclave_le`. Hold out or prune a map by prefix (`ley_lines*`) when the
-version doesn't matter; make_splits takes exact names or slugs.
+`--maps` on the extractor and make_splits take names, slugs or hash prefixes; a name selects
+every version of that map (`maps.json` shows them: in the pro pack "Tokamak" and "Tokamak LE"
+are different files, and "[TLMC21] Tourmaline" is not "Tourmaline LE").
 
 Ingest: `python scripts/ingest_replays.py <dir | archive | file>...` sorts replays into the
 tree (loose files are moved, archives unpacked with 7z and left in place, duplicates
