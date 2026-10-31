@@ -44,8 +44,8 @@ compressed .npz per replay in --out:
                              engine tag = 2**32 + replay tag (verified exact on 5.0.14 and
                              5.0.17). Commands at fogged things carry tag 0 plus a snapshot
                              (type, position) instead.
-    meta (json string)       map, playable area, players (race, team, result, MMR), build,
-                             ruleset key, grid formats
+    meta (json string)       map, playable area, start locations, players (race, team, result,
+                             MMR), build, ruleset key, grid formats, layout
 
 Not here: creep (an observer's creep map is always empty; creep's sources - hatcheries,
 tumors, overlords - are in the state) and commands (from the replay's own events).
@@ -74,6 +74,46 @@ slot, fog on), exactly as the engine shows it to that player, written to --pov_o
                              with --ui: the engine's own summary of the same (ui_data: count and
                              leader type per group, the selection panel's unit types), for
                              validating grp_* (needs the feature layer on)
+
+Layout 2 (meta["layout"] == 2, 2026-10-30): everything else the raw API reports, nothing left
+on the table for the model to need later:
+
+    u_flags2                 F2_ACTIVE (a structure that is doing something), F2_BLIP (radar
+                             blip), F2_ONSCREEN (on the observed player's screen)
+    u_atk_up, u_arm_up, u_shd_up
+                             the unit's attack / armor / shield upgrade levels
+    u_buff_remain, u_buff_max
+                             the engine's buff timer (loops remaining and total, for the one
+                             buff it chooses to show; 0 without)
+    u_ideal_harvesters, u_cargo_max, u_detect_range, u_radar_range
+    rally_x, rally_y, rally_target
+                             rally points, ragged per unit row (u_rally_start): point (NaN if
+                             none) and target unit id (-1 if none); a town hall has two (units,
+                             workers). Player views only: like power sources, the observer view
+                             gets none (private details, as with production and cargo)
+    ab_id, ab_point          the abilities the unit can use right now (u_ab_start; costs ignored):
+                             the API's only cooldown signal, a used Blink / Stim / bile is absent
+                             until its cooldown ends. One query per frame for the observed
+                             player's visible units (meta["abilities_queried"]; the observer
+                             view gets no answer for anyone and skips it)
+    pc_*[F]                  the observed player's player_common per frame: minerals, vespene,
+                             food_cap / used / army / workers, idle_worker_count, army_count,
+                             warp_gate_count, larva_count (exact, every frame; the tracker's
+                             p_* are every 160 loops)
+    sc_*[F]                  the engine's score details per frame: collected / spent / killed /
+                             lost / friendly-fire minerals and vespene per category (army,
+                             economy, technology, upgrade, none), total_value_units /
+                             structures, killed_value_*, damage dealt / taken / healed per vital
+                             (life, shields, energy), idle production / worker time, apm.
+                             Zeros in the observer view (no observed player)
+    cam[F, 2]                the observed player's camera center
+    pw_*, pw_frame_start     power sources (pylons, warp prisms): position, radius, unit id
+    rd_*, rd_frame_start     radar rings (sensor towers)
+    pu_id, pu_frame_start    the raw player block's upgrade ids per frame (the engine's own
+                             list; up_* from the tracker names them)
+    p_*                      now every PlayerStats field of the tracker (the nine classic
+                             names plus minerals_killed_army, vespene_lost_economy,
+                             minerals_used_in_progress_technology, ...; see stat_name)
 
 Nothing is derived or masked here: other players' private details, snapshots of structures in
 fog and undetected cloaked units are whatever the engine reports for that player.
@@ -110,6 +150,9 @@ Usage:
 
 import argparse
 import glob
+import collections
+import faulthandler
+import hashlib
 import json
 import os
 import re
@@ -139,17 +182,26 @@ U_DTYPES = dict(  # one row per (frame, unit)
     energy=np.float32, build=np.float16, flags=np.uint8, contents=np.int16, harvesters=np.int16,
     add_on=np.int32, weapon_cooldown=np.float16, engaged=np.int32, cargo_used=np.int16,
     display=np.int8, cloak=np.int8,
-    prod_start=np.int64, buff_start=np.int64, pass_start=np.int64, ord_start=np.int64)
+    # layout 2 (2026-10-30): the rest of the raw Unit
+    flags2=np.uint8, atk_up=np.int8, arm_up=np.int8, shd_up=np.int8, buff_remain=np.int16, buff_max=np.int16,
+    ideal_harvesters=np.int16, cargo_max=np.int16, detect_range=np.float16, radar_range=np.float16,
+    prod_start=np.int64, buff_start=np.int64, pass_start=np.int64, ord_start=np.int64, rally_start=np.int64, ab_start=np.int64)
 R_DTYPES = dict(  # ragged: unit row i owns [<x>_start[i], <x>_start[i+1]) (the last row: to the end)
     prod_abil=np.int16, prod_progress=np.float16, b_id=np.int16, pass_id=np.int32, pass_type=np.int16, pass_hp=np.float32,
-    ord_abil=np.int16, ord_tx=np.float32, ord_ty=np.float32, ord_target=np.int32, ord_progress=np.float16)
+    ord_abil=np.int16, ord_tx=np.float32, ord_ty=np.float32, ord_target=np.int32, ord_progress=np.float16,
+    rally_x=np.float32, rally_y=np.float32, rally_target=np.int32, ab_id=np.int32, ab_point=np.bool_)
 E_DTYPES = dict(type=np.int16, owner=np.int8, x=np.float32, y=np.float32, radius=np.float16)
+# per-frame ragged tables from the raw observation's player block (row i of frame f: [<x>_frame_start[f], ...[f+1]))
+PW_DTYPES = dict(x=np.float32, y=np.float32, radius=np.float16, id=np.int32)  # power sources (pylons, warp prisms)
+RD_DTYPES = dict(x=np.float32, y=np.float32, radius=np.float16)  # radar rings (sensor towers)
 CMD_DTYPES = dict(  # player views: the engine's executed commands (recipients: cmd_unit, ragged by cmd_start)
     loop=np.int32, frame=np.int32, abil=np.int32, target=np.int8, tx=np.float32, ty=np.float32,
     target_id=np.int32, queued=np.bool_, start=np.int64)
 
 # Unit flags packed into u_flags (F_SELECTED: the observed player's selection, player views only).
 F_FLYING, F_BURROWED, F_CLOAKED, F_HALLUC, F_SNAPSHOT, F_POWERED, F_SELECTED = 1, 2, 4, 8, 16, 32, 64
+F2_ACTIVE, F2_BLIP, F2_ONSCREEN = 1, 2, 4  # u_flags2: is_active (a structure doing something), radar blip, on the player's screen
+LAYOUT = 2  # meta["layout"]: 2 = everything the raw API reports (rally, score, player_common, abilities, ...)
 
 PLAYER_STATS = {  # tracker PlayerStats field -> output name (food is fixed point /4096)
     "m_scoreValueMineralsCurrent": "minerals",
@@ -165,6 +217,13 @@ PLAYER_STATS = {  # tracker PlayerStats field -> output name (food is fixed poin
 
 
 # ---------------------------------------------------------------- replay metadata
+
+def stat_name(key):
+    """m_scoreValueMineralsLostArmy -> minerals_lost_army (the tracker's other stats: killed,
+    lost, friendly fire, used current / in progress, per army / economy / technology)."""
+    key = key[len("m_scoreValue"):] if key.startswith("m_scoreValue") else key.lstrip("m_")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()
+
 
 def _protocol(archive):
     from s2protocol import versions
@@ -238,7 +297,9 @@ def map_path(map_hash, handles=None):
     """The cached map archive; with the replay's handles and FETCH_MISSING, fetches the map and
     any missing mod from the depot first."""
     p = depot.find_cached(CACHE_DIRS, map_hash, "s2ma")
-    if p is None and handles and FETCH_MISSING:
+    if handles and FETCH_MISSING and (p is None or any(depot.find_cached(CACHE_DIRS, h, ext) is None
+                                                        for ext, h in handles)):
+        # a cached map with an uncached mod (a tournament's balance mod) fails to launch too
         depot.ensure_cached(handles, CACHE_DIRS, log=lambda m: print(m, flush=True))
         p = depot.find_cached(CACHE_DIRS, map_hash, "s2ma")
     return p
@@ -249,7 +310,7 @@ def tracker_tables(path, until):
     import mpyq
     a = mpyq.MPQArchive(path)
     proto, _ = _protocol(a)
-    stats = {k: [] for k in ("loop", "player", *PLAYER_STATS.values())}
+    stats = collections.defaultdict(list)  # every m_scoreValue* field (PLAYER_STATS names the classic ones)
     ups = {"loop": [], "player": [], "name": []}
     for e in proto.decode_replay_tracker_events(a.read_file("replay.tracker.events")):
         if e["_gameloop"] > until:
@@ -259,8 +320,8 @@ def tracker_tables(path, until):
             st = e["m_stats"]
             stats["loop"].append(e["_gameloop"])
             stats["player"].append(e["m_playerId"])
-            for k, name in PLAYER_STATS.items():
-                v = st.get(k, 0)
+            for k, v in st.items():
+                name = PLAYER_STATS.get(k) or stat_name(k)
                 stats[name].append(v / 4096 if name.startswith("food") else v)
         elif t == "SUpgradeEvent" and e["_gameloop"] > 0 and not _s(e["m_upgradeTypeName"]).startswith(COSMETIC):
             ups["loop"].append(e["_gameloop"])
@@ -278,7 +339,14 @@ STRUCTURE = 8  # Attribute.Structure
 # (orbital, lair, hive, baneling, overseer, warp gate...). Excludes structures' other
 # orders: lift/land, root/uproot, depot lower, tumor spread, attack, move, recharge.
 PRODUCTION = re.compile(r"Train|Research|AddOns|UpgradeTo|MorphTo|MorphBuilding", re.I)
+# `kill -USR1 <worker pid>` prints every thread's Python stack to the worker's stderr (the
+# workers' stderr goes to <out>/workers.log): the tool for a worker that sits on a stuck engine
+if hasattr(faulthandler, "register") and hasattr(__import__("signal"), "SIGUSR1"):
+    faulthandler.register(__import__("signal").SIGUSR1, all_threads=True)
 LAUNCH_LOCK = os.path.join(tempfile.gettempdir(), "cosmicstar_sc2_launch.lock")
+ENGINE_TIMEOUT = 90   # seconds a worker waits for the engine to launch and start the replay (map load included)
+STEP_TIMEOUT = 30     # seconds for any request once the replay runs (a step or observation normally takes milliseconds)
+LAUNCH_SETTLE = 8     # seconds the launch lock is held after the replay started, for the engine's shared temp files
 
 
 class launch_lock:
@@ -287,7 +355,10 @@ class launch_lock:
     shows up as InvalidReplayData or a desync."""
 
     def __enter__(self):
-        self.f = open(LAUNCH_LOCK, "a+")
+        # one lock per Wine prefix: engines in different pool prefixes share nothing
+        pfx = os.environ.get("WINEPREFIX", "")
+        path = LAUNCH_LOCK if not pfx else LAUNCH_LOCK[:-5] + "_" + hashlib.sha1(pfx.encode()).hexdigest()[:8] + ".lock"
+        self.f = open(path, "a+")
         if sys.platform == "win32":
             import msvcrt
             while True:
@@ -350,14 +421,16 @@ class DesyncCheck:
                 raise RuntimeError(f"desync at {loop / LPS:.0f}s: unit {t} isn't in the replay's unit log")
 
 
-def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
+def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abilities=True):
     """Plays one replay and saves every frame (see the module doc). perspective 0: observer,
     fog off; a player slot: as that player sees it (fog on); ui: also the engine's control group
-    and selection panel summaries (ui_*), which need the feature layer on."""
+    and selection panel summaries (ui_*), which need the feature layer on; abilities: query the
+    abilities each unit can use right now at every frame (ab_*: the only cooldown signal)."""
     from pysc2.lib import protocol
-    from s2clientprotocol import sc2api_pb2 as sc_pb
+    from s2clientprotocol import query_pb2, sc2api_pb2 as sc_pb
 
     info = replay_info(path)
+    info["layout"] = LAYOUT
     mp = map_path(info["map_hash"], info["handles"])
     if mp is None:
         raise FileNotFoundError("map not in the Battle.net cache: " + info["map"])
@@ -417,37 +490,120 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
     dead = []
     frame_loop, frame_start, eff_start, dead_start = [], [0], [0], [0]
     vis, creep = [], []  # player views only
+    # layout 2: the observed player's block per frame (player_common, score details, camera; the
+    # observer's are the engine's placeholders), and the raw player block's ragged tables
+    pc = collections.defaultdict(list)   # pc_<field>[F]
+    sc = collections.defaultdict(list)   # sc_<field>[_<category|vital>][F]
+    cam = []                             # cam_x, cam_y [F]
+    pw = {k: [] for k in PW_DTYPES}      # power sources
+    rd = {k: [] for k in RD_DTYPES}      # radar rings
+    pu = []                              # the raw player block's upgrade ids
+    pw_start, rd_start, pu_start = [0], [0], [0]
+    ab_failed = [0]                      # available-abilities queries refused (switched off after the first)
+
+    def take_player(obs, raw):
+        # every declared field (unset ones read as 0), so the per-frame columns stay aligned
+        for fd in obs.player_common.DESCRIPTOR.fields:
+            if fd.name != "player_id":
+                pc[fd.name].append(getattr(obs.player_common, fd.name))
+        det = obs.score.score_details
+        for fd in det.DESCRIPTOR.fields:
+            v = getattr(det, fd.name)
+            if fd.type == fd.TYPE_MESSAGE:  # per category (army, economy, ...) or per vital (life, shields, energy)
+                for sub in fd.message_type.fields:
+                    sc[f"{fd.name}_{sub.name}"].append(getattr(v, sub.name))
+            else:
+                sc[fd.name].append(v)
+        cam.append((raw.player.camera.x, raw.player.camera.y))
+        for ps in raw.player.power_sources:
+            pw["x"].append(ps.pos.x); pw["y"].append(ps.pos.y); pw["radius"].append(ps.radius)
+            pw["id"].append(uid(ps.tag) if ps.tag else -1)
+        for rr in raw.radar:
+            rd["x"].append(rr.pos.x); rd["y"].append(rr.pos.y); rd["radius"].append(rr.radius)
+        pu.extend(raw.player.upgrade_ids)
+        pw_start.append(len(pw["x"])); rd_start.append(len(rd["x"])); pu_start.append(len(pu))
+
+    def available_abilities(units):
+        """unit tag -> the abilities it can use right now (resource costs ignored): a used Blink,
+        Stim or bile is missing until its cooldown ends. One query per frame for the observed
+        player's visible units; the engine answers nothing for units the observer doesn't control
+        (tested: 0 rows for all three owners), so the observer view skips the query."""
+        if not abilities or ab_failed[0] or perspective == 0:
+            return {}
+        tags = [u.tag for u in units if u.display_type == 1 and u.alliance == 1]
+        if not tags:
+            return {}
+        try:
+            resp = c.query(query_pb2.RequestQuery(abilities=[query_pb2.RequestQueryAvailableAbilities(unit_tag=t) for t in tags],
+                                                  ignore_resource_requirements=True))
+        except (protocol.ProtocolError, ValueError) as ex:
+            ab_failed[0] = 1
+            print(f"available-abilities query refused, ab_* left empty: {str(ex)[:200]}", file=sys.stderr, flush=True)
+            return {}
+        return {r.unit_tag: r.abilities for r in resp.abilities}
 
     if perspective == 0:
         substep = 0  # no fog in the observer view: the per-loop observation requests are pointless there
-    proc = run_config.start(want_rgb=False)
+    # pysc2's default controller timeout is 6 hours: a hung engine (seen at startup when the
+    # prefix's wineserver was rebooting) would park the worker for the day. ENGINE_TIMEOUT makes
+    # it a "timed out" error, which run_worker retries.
+    # One launch at a time, through the replay start: eight Proton launches at once each run
+    # Proton's prefix setup, which restarts the prefix's wineserver under the others (the losers
+    # hang at the umu.exe stage), and the map load below must not overlap either. Once running,
+    # engines are concurrent; after the first wave they rarely collide.
+    lock = launch_lock()
+    lock.__enter__()
+    try:
+        proc = run_config.start(want_rgb=False, timeout_seconds=ENGINE_TIMEOUT)
+    except BaseException:
+        lock.__exit__(None, None, None)
+        raise
     with proc as c:
-        opts = sc_pb.InterfaceOptions(raw=True, score=False, show_cloaked=True, show_burrowed_shadows=True,
-                                      show_placeholders=False, raw_affects_selection=False)
-        if perspective and ui:
-            # ui_data (control groups, selection panel) is only filled with the feature layer
-            # on; the smallest one costs nothing measurable (3000 loops: 4.4 s vs 4.1 s raw-only)
-            opts.feature_layer.width = 24
-            opts.feature_layer.resolution.x = opts.feature_layer.resolution.y = 16
-            opts.feature_layer.minimap_resolution.x = opts.feature_layer.minimap_resolution.y = 16
-        req = sc_pb.RequestStartReplay(
-            # observer: fog off, everything; a player: that player's view, fog on (module doc)
-            replay_data=data, observed_player_id=perspective, disable_fog=perspective == 0, options=opts)
-        if current:
+        try:
+            opts = sc_pb.InterfaceOptions(raw=True, score=True, show_cloaked=True, show_burrowed_shadows=True,
+                                          show_placeholders=False, raw_affects_selection=False)
+            if perspective and ui:
+                # ui_data (control groups, selection panel) is only filled with the feature layer
+                # on; the smallest one costs nothing measurable (3000 loops: 4.4 s vs 4.1 s raw-only)
+                opts.feature_layer.width = 24
+                opts.feature_layer.resolution.x = opts.feature_layer.resolution.y = 16
+                opts.feature_layer.minimap_resolution.x = opts.feature_layer.minimap_resolution.y = 16
+            req = sc_pb.RequestStartReplay(
+                # observer: fog off, everything; a player: that player's view, fog on (module doc)
+                replay_data=data, observed_player_id=perspective, disable_fog=perspective == 0, options=opts)
+            if not current:
+                # the map passed in, not looked up by handle: by handle the older engine sometimes
+                # tries to validate / download the dependency through Battle.net, fails without a
+                # session and the replay is over the moment it starts (7 of 10 games in one batch,
+                # 2026-10-30, the same map both working and failing). The launch lock is held through
+                # this because with map_data SC2 writes a shared temp map file that concurrent
+                # starts can pick up from each other (InvalidReplayData or a desync).
+                req.map_data = open(mp, "rb").read()
             c.start_replay(req)
-        else:
-            req.map_data = open(mp, "rb").read()
-            with launch_lock():
-                c.start_replay(req)
+            c._client._sock.settimeout(STEP_TIMEOUT)  # the replay is running: a request that takes longer is a hung engine
+            data = c.data_raw()  # this game's own rules decide what counts as production
+            if c.status == protocol.Status.ended:
+                # the game is over the moment it starts, intermittently per start (the same game
+                # passes on another try; 2026-10-30): the start response still says in_replay,
+                # the ended status arrives with the next responses. Retried by run_worker.
+                raise RuntimeError("replay ended at start")
+            gi = c.game_info()
+            # The engine keeps reading its launch map from the shared temp folder (TempLaunchMap~N,
+            # TempKeyFrameP*) after start_replay returns; a start queued right behind it collided
+            # and was refused with InvalidReplayData (bursts, 2026-10-30). The lock is held through
+            # the first requests and a settle time so the next start begins on a quiet folder.
+            if not os.environ.get("WINEPREFIX"):  # shared base prefix only; pool prefixes share no temp files
+                time.sleep(LAUNCH_SETTLE)
+        finally:
+            lock.__exit__(None, None, None)
         minimize_client_window(proc.pid)
-        data = c.data_raw()  # this game's own rules decide what counts as production
         producers = {u.unit_id for u in data.units  # structures, eggs, cocoons, larva
                      if STRUCTURE in u.attributes or any(k in u.name for k in ("Egg", "Cocoon", "Larva"))}
         production = {a.ability_id for a in data.abilities if PRODUCTION.search(a.link_name)}
-        gi = c.game_info()
         sr = gi.start_raw
         info["playable"] = [sr.playable_area.p0.x, sr.playable_area.p0.y, sr.playable_area.p1.x, sr.playable_area.p1.y]
         info["map_size"] = [sr.map_size.x, sr.map_size.y]
+        info["start_locations"] = [[pt.x, pt.y] for pt in sr.start_locations]  # the possible enemy bases
         grids = {}
         for name in ("pathing_grid", "placement_grid", "terrain_height"):
             img = getattr(sr, name)
@@ -458,7 +614,6 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
             teams.setdefault(p["team"], set()).add(p["slot"])
         done_players = set()
         loop, stalled = 0, 0
-        ping = sc_pb.Request(observation=sc_pb.RequestObservation())
         while loop < until:
             try:
                 if substep and substep < step:
@@ -469,20 +624,26 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
                     # and deaths it reports, discarded; only every --step loops is one parsed in full and kept.
                     for _ in range(step // substep - 1):
                         c.step(substep)
-                        c._client.write(ping)
-                        r = c._client._sock.recv()
-                        if perspective:  # ~0.1 ms to parse with upb: the commands and deaths this observation
-                            ob = sc_pb.Response.FromString(r).observation  # reports (both are "since the last one"),
-                            take_actions(ob.actions, len(frame_loop))      # and the player's selection
+                        # pysc2's observe, not a raw websocket write / recv: the raw path hung mid-game
+                        # (worker blocked in recv, engine idle; reproduced on 93333 within a minute,
+                        # 2026-10-30). The response is parsed either way (~0.1 ms with upb).
+                        ob = c.observe()
+                        if perspective:  # the commands and deaths this observation reports (both are
+                            take_actions(ob.actions, len(frame_loop))  # "since the last one"), and the selection
                             dead.extend(ids[t] for t in ob.observation.raw_data.event.dead_units if t in ids)
                             take_selection(ob.observation.raw_data.units, ob.observation.game_loop)
                     c.step(substep)
                 else:
                     c.step(step)
                 o = c.observe()
-            except protocol.ProtocolError as ex:  # a player's view ends when that player leaves the game
-                if "already ended" in str(ex) and perspective:
-                    break
+            except protocol.ProtocolError as ex:
+                # The replay is over (a player's view ends when that player leaves the game; the
+                # engine's status turns ended and the next step is refused). pysc2 words it
+                # "`step` called while in state: Status.ended", older texts said "already ended".
+                if "already ended" in str(ex) or "Status.ended" in str(ex):
+                    if frame_loop:  # frames were extracted: the game ended, keep them
+                        break
+                    raise RuntimeError("replay ended at start")  # nothing extracted: retried by run_worker
                 raise
             prev, loop = loop, o.observation.game_loop
             stalled = stalled + 1 if loop <= prev else 0
@@ -491,6 +652,8 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
                     break
                 raise RuntimeError(f"replay stalled at {loop / LPS:.0f}s")
             raw = o.observation.raw_data
+            avail = available_abilities(raw.units)
+            take_player(o.observation, raw)
             for u in raw.units:
                 cols["id"].append(uid(u.tag))
                 cols["type"].append(u.unit_type)
@@ -517,6 +680,27 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
                 cols["cargo_used"].append(u.cargo_space_taken)
                 cols["display"].append(u.display_type)
                 cols["cloak"].append(u.cloak)
+                cols["flags2"].append(F2_ACTIVE * u.is_active | F2_BLIP * u.is_blip | F2_ONSCREEN * u.is_on_screen)
+                cols["atk_up"].append(u.attack_upgrade_level)
+                cols["arm_up"].append(u.armor_upgrade_level)
+                cols["shd_up"].append(u.shield_upgrade_level)
+                cols["buff_remain"].append(min(u.buff_duration_remain, 32767))
+                cols["buff_max"].append(min(u.buff_duration_max, 32767))
+                cols["ideal_harvesters"].append(u.ideal_harvesters)
+                cols["cargo_max"].append(u.cargo_space_max)
+                cols["detect_range"].append(u.detect_range)
+                cols["radar_range"].append(u.radar_range)
+                # Rally points (structures): where produced units go; town halls have two (units, workers)
+                cols["rally_start"].append(len(rag["rally_x"]))
+                for r in u.rally_targets:
+                    rag["rally_x"].append(r.point.x if r.HasField("point") else np.nan)
+                    rag["rally_y"].append(r.point.y if r.HasField("point") else np.nan)
+                    rag["rally_target"].append(uid(r.tag) if r.tag else -1)
+                # Abilities usable right now (cooldowns): see available_abilities
+                cols["ab_start"].append(len(rag["ab_id"]))
+                for ab in avail.get(u.tag, ()):
+                    rag["ab_id"].append(ab.ability_id)
+                    rag["ab_point"].append(ab.requires_point)
                 # Production queue (producers only); other units' orders are intent, not state.
                 cols["prod_start"].append(len(rag["prod_abil"]))
                 if u.unit_type in producers:
@@ -602,6 +786,13 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False):
                   e_frame_start=np.asarray(eff_start, np.int64), dead_frame_start=np.asarray(dead_start, np.int64),
                   dead_id=np.asarray(dead, np.int32), **grids)
     arrays.update({f"p_{k}": np.asarray(v, np.float32 if k not in ("loop", "player") else np.int32) for k, v in stats.items()})
+    arrays.update({f"pc_{k}": np.asarray(v, np.float32) for k, v in pc.items()})
+    arrays.update({f"sc_{k}": np.asarray(v, np.float32) for k, v in sc.items()})
+    arrays.update({f"pw_{k}": np.asarray(v, dtype=PW_DTYPES[k]) for k, v in pw.items()}, pw_frame_start=np.asarray(pw_start, np.int64))
+    arrays.update({f"rd_{k}": np.asarray(v, dtype=RD_DTYPES[k]) for k, v in rd.items()}, rd_frame_start=np.asarray(rd_start, np.int64))
+    arrays.update(pu_id=np.asarray(pu, np.int32), pu_frame_start=np.asarray(pu_start, np.int64),
+                  cam=np.asarray(cam, np.float32).reshape(-1, 2))
+    info["abilities_queried"] = bool(abilities) and not ab_failed[0] and perspective != 0
     arrays.update(up_loop=np.asarray(ups["loop"], np.int32), up_player=np.asarray(ups["player"], np.int8),
                   up_name=np.asarray(ups["name"]))
     if perspective and vis:
@@ -756,7 +947,7 @@ def protobuf_impl():
     return "upb" if "AddSerializedFile" in open(bindings, encoding="utf-8").read() else "python"
 
 
-def run_worker(jobs, step, until, substep=0, ui=False):
+def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
     from absl import flags
     flags.FLAGS(sys.argv[:1])
     for j in jobs:
@@ -765,7 +956,7 @@ def run_worker(jobs, step, until, substep=0, ui=False):
         t0 = time.time()
         for attempt in range(3):
             try:
-                st = extract(j["path"], j["out"], step, until, j.get("perspective", 0), substep, ui)
+                st = extract(j["path"], j["out"], step, until, j.get("perspective", 0), substep, ui, abilities)
                 print(json.dumps(dict(ok=os.path.basename(j["path"]), view=j.get("perspective", 0), **st,
                                       mb=round(os.path.getsize(j["out"]) / 1e6, 1), s=round(time.time() - t0), tries=attempt + 1)), flush=True)
                 break
@@ -777,10 +968,15 @@ def run_worker(jobs, step, until, substep=0, ui=False):
                 # and under Proton with several instances launching, the websocket of one is lost
                 # or never comes up (ConnectError / ConnectionError / WebSocketConnectionClosed:
                 # 6 of 12 player views with 4 workers, 2026-10-30); those passed alone as well.
-                if ("InvalidReplayData" in repr(ex) or "timed out" in repr(ex) or "Connect" in repr(ex)) and attempt < 2:
+                if any(k in repr(ex) for k in ("InvalidReplayData", "timed out", "Connect", "ended at start", "Status.ended")) and attempt < 2:
+                    print(json.dumps(dict(retry=os.path.basename(j["path"]), view=j.get("perspective", 0), error=repr(ex)[:200],
+                                          attempt=attempt + 1, s=round(time.time() - t0))), flush=True)
                     time.sleep(45 * (attempt + 1))
                     continue
-                print(json.dumps(dict(fail=os.path.basename(j["path"]), error=repr(ex)[:200], tries=attempt + 1)), flush=True)
+                import traceback
+                where = " | ".join(l.strip() for l in traceback.format_exc().splitlines() if l.strip().startswith("File"))[-300:]
+                print(json.dumps(dict(fail=os.path.basename(j["path"]), view=j.get("perspective", 0), error=repr(ex)[:200],
+                                      tries=attempt + 1, s=round(time.time() - t0), where=where)), flush=True)
                 break
 
 
@@ -801,6 +997,12 @@ def main():
     ap.add_argument("--pov_out", default="data/worldmodel/pov", help="player views go here")
     ap.add_argument("--games", help="json list of output names (<hash>.npz): only these games")
     ap.add_argument("--no_fetch", action="store_true", help="don't fetch missing maps/mods from the depot")
+    ap.add_argument("--slot", type=int, default=-1, help="(worker) its index; with --prefix_pool, worker k runs its engines in "
+                    "Wine prefix k of wine_run_config.POOL_DIR, made on first use")
+    ap.add_argument("--no_prefix_pool", action="store_true", help="all workers in the one base prefix (serialized launches, "
+                    "keeper, shared temp slots) instead of a prefix per worker")
+    ap.add_argument("--no_abilities", action="store_true", help="skip the per-frame available-abilities query (ab_*, the "
+                    "cooldown signal)")
     ap.add_argument("--ui", action="store_true", help="player views: also keep the engine's control group / selection "
                     "panel summaries (ui_*, for validating the tracked groups); turns the feature layer on")
     ap.add_argument("--any_ruleset", action="store_true", help="also replays whose ruleset has no Editor balance export "
@@ -812,8 +1014,12 @@ def main():
     FETCH_MISSING = not args.no_fetch
     os.makedirs(args.out, exist_ok=True)
     manifest = os.path.join(args.out, "manifest.json")
+    if args.worker and sys.platform != "win32" and not args.no_prefix_pool and args.slot >= 0:
+        from cosmicstar.envs import wine_run_config as _wrc
+        os.environ["WINEPREFIX"] = _wrc.ensure_pool_prefix(args.slot)
+        _wrc.clear_shared_temp(os.environ["WINEPREFIX"], force=True)  # its own temp slots; nothing else runs in this prefix
     if args.worker:
-        run_worker(json.load(open(args.worker)), args.step, int(args.until * LPS), args.substep, args.ui)
+        run_worker(json.load(open(args.worker)), args.step, int(args.until * LPS), args.substep, args.ui, not args.no_abilities)
         return
     os.makedirs(args.pov_out, exist_ok=True)
     # resuming: claims left by an interrupted run (no output, no partial file) are free again
@@ -853,6 +1059,17 @@ def main():
     env["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = protobuf_impl()
     print("protobuf parser:", env["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"], flush=True)
 
+    keeper = None
+    if sys.platform != "win32" and args.no_prefix_pool:
+        from cosmicstar.envs import wine_run_config as _wrc
+        # the engine's shared temp folder (launch maps, key frames of every start): stale files
+        # from killed engines pile up there; nothing runs in the prefix yet, so clear it
+        _wrc.clear_shared_temp(log=lambda m: print(json.dumps(dict(note=m)), flush=True))
+        keeper = _wrc.keep_prefix_alive()  # one wineserver for the whole run; returns once it is up
+        print(json.dumps(dict(note="prefix keeper up", pid=keeper.pid)), flush=True)
+
+    worker_log = open(os.path.join(args.out, "workers.log"), "a")  # the workers' stderr (pysc2 / engine noise, stack dumps)
+
     def run(job_list, n):
         """n worker processes sharing job_list (each claims the next free job). Workers
         share this process's stdout; piping them through here would block all but one."""
@@ -860,8 +1077,10 @@ def main():
         json.dump(job_list, open(path, "w"))
         procs = [subprocess.Popen([sys.executable, os.path.abspath(__file__), "--out", args.out, "--step",
                                    str(args.step), "--until", str(args.until), "--substep", str(args.substep), "--worker", path]
-                                  + (["--no_fetch"] if args.no_fetch else []) + (["--ui"] if args.ui else []),
-                                  env=env, stderr=subprocess.DEVNULL) for _ in range(n)]
+                                  + (["--no_fetch"] if args.no_fetch else []) + (["--ui"] if args.ui else [])
+                                  + (["--no_abilities"] if args.no_abilities else [])
+                                  + (["--no_prefix_pool"] if args.no_prefix_pool else []) + ["--slot", str(k)],
+                                  env=env, stderr=worker_log) for k in range(n)]
         for p in procs:
             p.wait()
 
@@ -879,6 +1098,8 @@ def main():
             if os.path.exists(j["out"]):
                 break
         run(left, min(args.workers, len(left)))
+    if keeper is not None:
+        keeper.terminate()
 
 
 if __name__ == "__main__":

@@ -1230,3 +1230,178 @@ or mod from the Battle.net cache by name / another handle, or a dependency (mod)
 to a newer version. To check when it comes up: for a desyncing replay, compare the handles in
 `replay.details` with the files actually opened (the engine's log, or `-dataDir` cache
 contents), re-run with only the fetched files present, and see whether the desync moves.
+
+Update, same day: a concrete candidate. Older-build replays were started with `map_data`,
+which makes SC2 write a shared temp map file; `launch_lock` existed because concurrent
+launches could load each other's map (InvalidReplayData or a desync). That lock also
+serialized every start of the pro 1v1 extraction (one engine loading, seven frozen). Older
+builds find the map in the Battle.net cache by handle just like the current one (a 93333
+replay starts in 13 s without map_data), so `extract_states` now starts without map_data and
+without the lock, with map_data as the fallback. If desyncs drop with this, the shared temp
+map was the wrong-version path.
+
+## Pro 1v1 extraction: what broke and what fixed it (2026-10-30 evening)
+
+Two player views per game (no observer; the oracle is the two views concatenated), 629 games,
+1258 views, builds 93333 / 94137 / 95841 (+2 on 95299 / 96883), `extract_states.py --views
+players --step 4 --workers 12`. Ten runs went wrong before one worked; the causes, in the
+order they were found, all in `scripts/extract_states.py` and `envs/wine_run_config.py`:
+
+1. **Finished views were discarded.** When a replay ends, the engine's status turns `ended` and
+   the next step is refused with pysc2's "`step` called while in state: Status.ended"; the end
+   handler only knew the older wording "already ended", so a view that had run the whole game
+   was logged as a `fail` and its frames dropped. Now: that error with frames extracted ends
+   the view; with no frames it is "replay ended at start" and retried (some starts do end the
+   game at once, intermittently per start, with or without map_data; a retry gets through).
+2. **Concurrent Proton launches.** Eight `umu-run` launches at once each run Proton's prefix
+   setup, which restarts the prefix's wineserver under the others; the losers hang at the
+   umu.exe stage on a dead fsync futex, forever. Launches are serialized behind the file lock,
+   held from `run_config.start` through `start_replay` (~20-25 s each); stepping is concurrent.
+3. **No wineserver between engines.** With the Battle.net app closed the wineserver exits with
+   the last Wine process and the next launch reboots the prefix. `keep_prefix_alive()` starts an
+   idle Notepad before the workers (awaited until the wineserver exists) and terminates it at
+   the end. Killing a keeper by hand kills the wineserver it owns and every engine on it.
+4. **Six-hour timeout.** pysc2's controller timeout here is 6 h, so a hung engine parked its
+   worker silently. `ENGINE_TIMEOUT = 90` s for launch + replay start, `STEP_TIMEOUT = 30` s per
+   request afterwards (set on the websocket), both turned into retried "timed out" errors.
+5. **Launcher trees left behind.** pysc2 terminates only the direct child; `WineProcess` now
+   launches in its own process group and `_shutdown` kills the group.
+6. **Raw websocket reads.** The per-loop fog-path observation used `c._client._sock.recv()`
+   directly; one stall was caught with the worker blocked there. It goes through `c.observe()`
+   now (same parse cost).
+7. Diagnostics: workers' stderr in `<out>/workers.log`, `kill -USR1 <worker>` dumps its Python
+   stacks there, `retry` / `fail` lines carry view, error and elapsed seconds.
+8. **The shared temp map.** A start with map_data writes the map to the Windows user's temp
+   folder (`AppData\Local\Temp\StarCraft II\TempLaunchMap.SC2Map`, one overflow slot `~00`,
+   plus TempKeyFrameP*), which the engine keeps reading after `start_replay` returns; starts
+   queued back-to-back behind the lock collided with the previous engine's load and were
+   refused with `InvalidReplayData` (bursts after many workers finished together, a cascade
+   through the retry sleeps; 100 spread-out starts in between had none). A private Windows
+   %TEMP% per engine did nothing (Wine ignores TEMP/TMP; the engine writes to the profile's Local
+   AppData), and a Windows user per engine is not possible under Proton (the user is pinned to
+   steamuser). Run 13 settles instead: the launch lock is held 8 s after `start_replay` returns
+   (`LAUNCH_SETTLE`) and the temp folder is emptied before a run. 0 fails, 0 retries, but the
+   serialized starts cap the run at ~2.5 views/min with 12 workers.
+10. **A Wine prefix per worker** (`wine_run_config.ensure_pool_prefix`, `~/Games/sc2-prefixes/<k>`):
+   a copy of the base prefix (~600 MB: registry, `drive_c/windows`, the user profile, dosdevices,
+   the `pfx -> .` link) with the two game installs and the Battle.net map cache symlinked back,
+   the launcher dropped and the copied temp folder emptied. Worker k sets `WINEPREFIX` to prefix k
+   before building its run config; `installs()` then resolves the installs through that prefix's
+   drive_c so the engine's C: paths are unchanged. Each prefix has its own wineserver, temp slots
+   and registry, so the launch lock is per prefix (no contention), there is no settle and no
+   keeper. Tested by hand first (`~/Games/sc2-prefix-test`: own wineserver, temp pair in its own
+   folder, a view extracted); run 14 is the first run on the pool. `--no_prefix_pool` restores
+   the shared-prefix path. `SC2PATH` must stay unset (it would bypass the prefix-relative lookup).
+9. The selection tracker sliced `start[i + 1]` on the action table's last row (no trailing
+   sentinel in the stored `*_start` columns); only reached once views ran to the end. Fixed.
+
+Measured with 12 workers (run 11): 115-135% CPU per engine, 2.2-3.0 GB RSS each, one
+wineserver, 68-577 s per view (median 217 s for a median 13.9-min game), ~2.6 views/min, no
+failures or retries in the first 11 minutes; alone a 10-min game took 73 s, so the engines
+contend about 2x. About 8 hours for the set. The RAM-backed `/tmp` holds the sessions' scratch
+folders; with 12 engines that memory matters (2-3 GB were freed).
+
+## Extractor layout 2: everything the raw API reports (2026-10-30 night)
+
+Taking stock of the state before the pro set is redone: the model saw 18 numbers per entity,
+nine tracker stats per player (every 160 loops) and a 16x16 visibility map; the files also held
+facing, weapon cooldown, engaged target, cargo, add-on, buffs, passengers, the full order queue,
+effects, creep and the map grids, none of which reached the model; and the extractor never read
+rally points, exact per-frame resources, buff timers, score details or anything about ability
+cooldowns. The extractor now takes everything the observation offers (`meta["layout"] == 2`,
+the layout list in scripts/extract_states.py), so the redo is the last one for missing data:
+
+- raw Unit: rally points (`rally_*`, ragged; town halls have two), upgrade levels, the buff
+  timer (`u_buff_remain/max`), is_active / blip / on-screen (`u_flags2`), ideal harvesters,
+  cargo capacity, detect and radar range.
+- the observed player per frame: `pc_*` (player_common: exact minerals, gas, food, idle workers,
+  army count, warp gates, larvae), `sc_*` (score details: collected / spent / killed / lost /
+  friendly-fire resources per category, unit and structure value, damage dealt / taken / healed
+  per vital, idle times, apm) and the camera. Zeros in the observer view.
+- the raw player block: power sources (`pw_*`), radar rings (`rd_*`), upgrade ids (`pu_*`).
+- the tracker: all 39 PlayerStats fields, not nine (`p_minerals_lost_army`, ...).
+- **cooldowns**: the API has no cooldown field, but `RequestQueryAvailableAbilities` lists what a
+  unit can use right now; a used Blink, Stim or bile is absent until its cooldown ends. One query
+  per frame for the observed player's visible units (`ab_id`, `ab_point`, ragged per unit row).
+  Costs ~13% per view (17 s vs 15 s for 90 s of game at step 4). The observer view gets no
+  answer for anyone (tested: 0 rows for all three owners) and skips the query; it also gets no
+  rally points and no power sources, private details like production and cargo, which is one
+  more reason the oracle is the two player views concatenated. Still to confirm on a full game:
+  that a unit on cooldown really drops the ability (the 90 s test used none).
+- not taken: alerts, chat, the feature-layer / render data.
+
+Measured on 90 s of a pro game (both player views): all new arrays filled where the game had the
+thing (889 rally rows, 689 of them onto a mineral patch; 17 nonzero score fields; exact
+minerals per frame), file +15% (591 KB vs 516 KB; the abilities table compresses to 31 KB).
+Nothing is featurized yet: the tokenizer still reads the layout-1 columns and the first order
+only; the full order queue, rally, buffs, cooldowns, weapon cooldown / engaged target,
+passengers and the map grids are the model-side work that follows.
+
+## Confirmed: the API does not report a worker carrying rich vespene (2026-10-30)
+
+The game data defines distinct carry buffs for every resource (`CarryMineralFieldMinerals`,
+`CarryHighYieldMineralFieldMinerals`, `CarryHarvestableVespeneGeyserGas[Protoss|Zerg]`,
+`CarryHarvestableRichVespeneGeyserGas[Protoss|Zerg]`, Terrazine variants), but the engine's API
+buff table (RequestData, `data/worldmodel/rules/<ruleset>.json` `buffs`) lists 186 of the 552
+`CBehaviorBuff` ids in the catalogs, and none of the Rich or Terrazine carry buffs. Checked in
+the extracted 2v2 games: next to regular geysers workers show the vespene carry buffs by the
+hundreds (604 Zerg, 424 Protoss, 154 Terran worker-frames); next to built rich extractors /
+refineries / assimilators (12 games, 2002 worker-frames within 3 units) no carry buff appears
+at all, only 33 mineral-carry buffs of workers passing by. So a worker returning rich gas
+carries no reported buff; the only cues are the gather target's unit type (RichVespeneGeyser /
+ExtractorRich / RefineryRich / AssimilatorRich) and the player's vespene rate. The wider point
+for buff features: the API exposes about a third of the game's buffs; the rest are invisible
+in the observation.
+
+### Deferred: isolating engines from each other (containerizing), sketch (2026-10-30)
+
+Every engine-vs-engine problem tonight came from sharing one Wine prefix: the wineserver
+(Proton's setup restarting it under concurrent launches), the Windows user's temp folder (the
+numbered TempLaunchMap / TempStartReplay slots that run out), and the registry. Options, cheapest
+first:
+
+1. **Per-engine Windows user in one prefix.** Wine names the profile after the Unix user; a
+   per-engine `USER` / `WINEUSERNAME` would give each engine its own `drive_c/users/<name>`
+   (Local AppData, Documents). Being tested in the extraction session. Keeps one wineserver.
+2. **Per-engine Wine prefix, shared install.** A pool of prefixes `~/Games/sc2-prefix-<k>`, each
+   a copy of the base prefix's small parts (`drive_c/windows`, `users`, registry files) with
+   `drive_c/Program Files (x86)/StarCraft II[ old]` and `ProgramData/.../Battle.net/Cache`
+   symlinked to the shared ones (Wine follows symlinks). Each prefix has its own wineserver, temp
+   folder and registry, so no launch lock, no keeper and no slot walk; Proton runs its prefix
+   setup once per prefix. Cost: ~100-200 MB RAM per wineserver + services, a few seconds of
+   prefix boot per engine (once), ~100 MB disk per prefix. `wine_run_config` would hand worker k
+   prefix k (WINEPREFIX per launch); the extractor's workers are already one engine each.
+   **Done** (item 10 above): `ensure_pool_prefix` / `--slot`, one prefix per worker.
+3. **A bind mount per engine** of a private directory over `drive_c/users/steamuser` (bwrap /
+   unshare -Ur around umu-run). Nests a user namespace inside pressure-vessel's; works on
+   Ubuntu if unprivileged user namespaces are allowed, but fragile across umu updates.
+4. **Full containers** (podman with the GPU and the X socket passed through, Wine inside):
+   complete isolation, heaviest to set up and to keep in step with Proton / DXVK.
+
+Option 2 is the one to build if option 1 fails: it removes the whole class of problems rather
+than the current instance, and it costs little.
+
+**Longer term (user's direction):** full containers with input isolation and a scheduler.
+Each container runs a headless Wayland compositor (Weston headless backend on the GPU's render
+node) with Xwayland for Wine, so DXVK presents as it does on the desktop but no screen or input
+device is involved; the container holds Wine, a private prefix, the mounted install with every
+build and a small agent that launches an engine on request and publishes its API port. The
+Python that drives replays stays on the host (pysc2's controller connects to a remote
+host:port), so the containers are pure simulation nodes. A host controller keeps a job queue
+(replay + seat + build now; game lobbies later) and a pool of nodes. For self-play the API's
+multiplayer path applies directly: one engine creates the game with participant slots, the
+others join with agreed ports, so container c1 serves seat 1 of game g1 and c2 seat 2 on a
+shared pod network, and the agents sit outside as API clients, which lets policy inference be
+one batched GPU process over many games. Memory rises by a wineserver and compositor per
+container; GPU access through the NVIDIA container toolkit.
+
+**Input isolation, refined (user):** agents are eventually to play through simulated keyboard
+and mouse, so each container needs its own seat and a way to inject into it. Pick a wlroots
+compositor (Cage or Sway, headless backend on the GPU render node) rather than Weston: its
+virtual-keyboard and virtual-pointer protocols let a client in the container type and move the
+mouse as ordinary Wayland requests, Xwayland forwards them to Wine and the game, and the
+screencopy protocol gives the agent's frames at render resolution. Alternatives: XTest against
+the container's Xwayland (compositor-dependent; GNOME's ignored it today), or a uinput virtual
+device (most faithful, needs the device and permissions inside the container). One seat per
+container means physical devices never reach the game and injected input cannot cross
+containers. The API stays alongside for rewards and ground truth.

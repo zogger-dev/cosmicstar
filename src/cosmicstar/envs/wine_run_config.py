@@ -28,6 +28,8 @@ import glob
 import os
 import platform
 import subprocess
+import tempfile
+import time
 
 from pysc2.lib import sc_process
 from pysc2.run_configs import platforms
@@ -60,11 +62,21 @@ def sc2_install_dir():
     return None
 
 
+INSTALL_NAMES = ("StarCraft II", "StarCraft II old")  # under drive_c/Program Files (x86)
+
+
 def installs():
-    """Every install to look in, the real one first: just $SC2PATH when it is set, else the
-    default install and the SIDE_INSTALLS that exist."""
+    """Every install to look in, the real one first: just $SC2PATH when it is set; in a pool
+    prefix ($WINEPREFIX, see ensure_pool_prefix) the installs symlinked into its drive_c, so
+    the engine sees the same C: drive paths; else the default install and the SIDE_INSTALLS."""
     if os.environ.get("SC2PATH"):
         return [os.path.expanduser(os.environ["SC2PATH"])]
+    pfx = os.environ.get("WINEPREFIX")
+    if pfx:
+        local = [os.path.join(os.path.expanduser(pfx), "drive_c", "Program Files (x86)", n) for n in INSTALL_NAMES]
+        local = [d for d in local if os.path.isdir(os.path.join(d, "Versions"))]
+        if local:
+            return local
     out = [d for d in [sc2_install_dir()] if d]
     for cand in SIDE_INSTALLS:
         cand = os.path.expanduser(cand)
@@ -181,6 +193,115 @@ def wine_env(prefix, launcher_path=None):
     return env
 
 
+POOL_DIR = "~/Games/sc2-prefixes"
+# not copied into a pool prefix (symlinked back to the base prefix instead, or dropped)
+POOL_SHARED = ("drive_c/Program Files (x86)/StarCraft II", "drive_c/Program Files (x86)/StarCraft II old",
+               "drive_c/ProgramData/Blizzard Entertainment/Battle.net/Cache")
+POOL_DROP = ("drive_c/Program Files (x86)/Battle.net", "GLCache", "shadercache", "pfx.lock")
+
+
+def base_prefix():
+    """The prefix the game is installed in (never a pool prefix): the directory above the
+    default install's drive_c."""
+    for cand in DEFAULT_INSTALLS:
+        cand = os.path.expanduser(cand)
+        if os.path.isdir(os.path.join(cand, "Versions")):
+            return os.path.dirname(os.path.dirname(os.path.dirname(cand)))
+    return wine_prefix()
+
+
+def ensure_pool_prefix(k, base=None, pool_dir=POOL_DIR):
+    """A Wine prefix of its own for worker k (POOL_DIR/<k>), made on first use as a copy of the
+    base prefix without the game installs and the map cache, which are symlinked back so the
+    C: drive paths stay the same. Each prefix has its own wineserver, registry, user profile and
+    temp folder (the engine's numbered TempLaunchMap slots), so engines in different prefixes
+    share nothing: no launch lock, no keeper, no slot walk (2026-10-30, ~600 MB, ~1.5 s to
+    make; tested: boots in <1 s, no Proton update step). Returns the prefix path."""
+    import shutil
+    base = base or base_prefix()
+    path = os.path.join(os.path.expanduser(pool_dir), f"{int(k):02d}")
+    if not os.path.isdir(os.path.join(path, "drive_c")):
+        tmp = path + ".part"
+        shutil.rmtree(tmp, ignore_errors=True)
+        skip = {os.path.join(base, rel) for rel in POOL_SHARED + POOL_DROP}
+        temp = os.path.join(base, "drive_c", "users", "steamuser", "AppData", "Local", "Temp")
+
+        def ignore(d, names):
+            if d == temp:  # the engine's temp slots and leftovers: the prefix starts with an empty temp folder
+                return list(names)
+            return [n for n in names if os.path.join(d, n) in skip]
+
+        shutil.copytree(base, tmp, symlinks=True, ignore=ignore)
+        for rel in POOL_SHARED:
+            src, dst = os.path.join(base, rel), os.path.join(tmp, rel)
+            if os.path.exists(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.symlink(src, dst)
+        os.replace(tmp, path)
+    return path
+
+
+def shared_temp_dir(prefix=None):
+    """The Windows user's `AppData\\Local\\Temp\\StarCraft II` in the prefix: the engine writes the
+    launch map, start replay and key frames of every start there (TempLaunchMap~N.SC2Map, ...),
+    shared by all engines; Wine ignores TEMP / TMP from the Unix environment, so it cannot be
+    moved per engine. Stale files pile up from killed engines."""
+    prefix = prefix or wine_prefix()
+    return os.path.join(prefix, "drive_c", "users", "steamuser", "AppData", "Local", "Temp", "StarCraft II")
+
+
+def clear_shared_temp(prefix=None, log=None, force=False):
+    """Removes the engine's shared temp files; only when no engine runs in the prefix (the
+    check counts every engine on the box, so a worker that owns its pool prefix passes force)."""
+    d = shared_temp_dir(prefix)
+    if not os.path.isdir(d):
+        return 0
+    import shutil
+    import subprocess
+    running = "0" if force else subprocess.run(["pgrep", "-fc", "-- -listen 127.0.0.1 -port"], capture_output=True, text=True).stdout.strip()
+    if running not in ("", "0"):
+        if log:
+            log(f"not clearing {d}: {running} engine processes are running in the prefix")
+        return 0
+    n = 0
+    for name in os.listdir(d):
+        path = os.path.join(d, name)
+        try:
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+            n += 1
+        except OSError:
+            pass
+    if log:
+        log(f"cleared {n} entries from {d}")
+    return n
+
+
+def keep_prefix_alive(prefix=None, wait_s=60):
+    """Starts a long-lived Windows process in the prefix (Notepad, idle) and returns the Popen. While it lives, the prefix's wineserver stays up between engine launches;
+    without it the wineserver exits with the last Wine process and the next launch reboots the
+    prefix (services, devices, explorer), and engines launched during that boot hang with no
+    CPU use (seen 2026-10-30 with 8 workers and no Battle.net app running). terminate() it to
+    let the prefix shut down."""
+    import subprocess
+    prefix = prefix or wine_prefix()
+    lp = launcher()
+    # notepad: cmd.exe /k and "pause" exit at once when stdin is a pipe under Wine
+    keeper = subprocess.Popen([lp, r"C:\windows\system32\notepad.exe"], env=wine_env(prefix, lp), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    # wait until it is really up (a wineserver and the notepad process exist): a Proton launch
+    # that starts while this one is still setting up the prefix kills it (seen 2026-10-30)
+    for _ in range(wait_s * 2):
+        time.sleep(0.5)
+        if keeper.poll() is not None:
+            raise RuntimeError("the prefix keeper (notepad.exe) exited during startup")
+        ps = subprocess.run(["pgrep", "-fc", "notepad.exe"], capture_output=True, text=True).stdout.strip()
+        ws = subprocess.run(["pgrep", "-xc", "wineserver"], capture_output=True, text=True).stdout.strip()
+        if int(ps or 0) and int(ws or 0):
+            time.sleep(2)  # let the window come up before anything else launches
+            return keeper
+    raise RuntimeError(f"the prefix keeper did not come up within {wait_s} s")
+
+
 def wine_command(exe, args=(), prefix=None):
     """(argv, env) to run a Windows exe from the install under Wine/Proton, e.g. the Editor:
     wine_command(f"{install}/Support64/SC2Editor_x64.exe", ["-exportreplay", windows_path(...)]).
@@ -203,10 +324,31 @@ class WineProcess(sc_process.StarcraftProcess):
         if "-displayMode" not in args:  # pysc2 leaves these out on Linux (its Linux build is headless)
             args += ["-displayMode", "0", "-windowwidth", "640", "-windowheight", "480", "-windowx", "0", "-windowy", "0"]
         cmd = [run_config.launcher] + args
+        env = run_config.env
         try:
-            return subprocess.Popen(cmd, cwd=run_config.cwd, env=run_config.env)
+            # its own process group: the launcher tree (umu-run, pressure-vessel, proton, umu.exe,
+            # the engine) must die as one, see _shutdown
+            return subprocess.Popen(cmd, cwd=run_config.cwd, env=env, start_new_session=True)
         except OSError as e:
             raise sc_process.SC2LaunchError(f"Failed to launch: {cmd}") from e
+
+    def _shutdown(self):
+        """pysc2 terminates only the direct child (umu-run); an engine that never came up leaves
+        its tree waiting on a dead wineserver's fsync futex forever (seen 2026-10-30), so the
+        whole process group is killed as well."""
+        import signal
+        pgid = self._proc.pid if self._proc is not None else None
+        try:
+            super()._shutdown()
+        finally:
+            if pgid is not None:
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(pgid, sig)
+                    except (ProcessLookupError, PermissionError):
+                        break
+                    time.sleep(0.5)
+
 
 
 class WineLinux(platforms.LocalBase):

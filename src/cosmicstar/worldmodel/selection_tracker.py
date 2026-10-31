@@ -43,6 +43,15 @@ SELECTION = 10
 ENGINE_TAG_OFFSET = 1 << 32
 
 
+
+def ragged(acts, start_key, flat_key, i):
+    """Row i's slice of a ragged action-table column. The *_start arrays hold one start per
+    row and no trailing sentinel, so the last row's slice ends at the flat array's end (indexing
+    start[i + 1] there raised IndexError on views whose frames reach the replay's last row)."""
+    start = acts[start_key]
+    end = start[i + 1] if i + 1 < len(start) else len(acts[flat_key])
+    return acts[flat_key][start[i]:end].tolist()
+
 class Tracker:
     def __init__(self):
         self.lists = [[] for _ in range(N_LISTS)]  # replay tags, ascending
@@ -69,9 +78,9 @@ class Tracker:
         """Applies row i of the action table (a SELECT or GROUP row)."""
         g = int(acts["group"][i])
         kind = int(acts["select_remove"][i])
-        positions = acts["rem_pos"][acts["rem_start"][i]:acts["rem_start"][i + 1]].tolist()
+        positions = ragged(acts, "rem_start", "rem_pos", i)
         if acts["kind"][i] == ra.SELECT:
-            added = acts["add_tag"][acts["add_start"][i]:acts["add_start"][i + 1]].tolist()
+            added = ragged(acts, "add_start", "add_tag", i)
             self.lists[g] = self.merge(self.remove(self.lists[g], kind, positions, i), added)
             return
         op = int(acts["group_op"][i])
@@ -295,8 +304,8 @@ def validate(arrays, acts, slot, died=None, verbose=False):
                 desc = []
                 for r in rs:
                     kind = ra.KINDS[acts["kind"][r]]
-                    mask = acts["rem_pos"][acts["rem_start"][r]:acts["rem_start"][r + 1]].tolist()
-                    added = acts["add_tag"][acts["add_start"][r]:acts["add_start"][r + 1]].tolist()
+                    mask = ragged(acts, "rem_start", "rem_pos", r)
+                    added = ragged(acts, "add_start", "add_tag", r)
                     desc.append(f"{kind} g{int(acts['group'][r])}" + (f" op{int(acts['group_op'][r])}" if kind == "GROUP" else "")
                                 + f" rm{int(acts['select_remove'][r])}{mask}" + (f" add{added}" if added else ""))
                 mismatches.append(dict(loop=loop, rows=desc, tracked_only=sorted(tracked - engine), engine_only=sorted(engine - tracked)))
