@@ -24,6 +24,7 @@ import collections
 import json
 import math
 import os
+import re
 import sys
 import time
 
@@ -50,12 +51,18 @@ from cosmicstar.worldmodel.tokenize import GameFrames, collate  # noqa: E402
 TARGETS = ("exit", "dx", "dy", "hp", "sh", "en", "build", "order")
 
 
+def actions_name(path):
+    """A state file's action table: <game>.npz for <game>.npz and for the player views <game>_p<slot>.npz."""
+    return re.sub(r"_p\d+(?=\.npz$)", "", os.path.basename(path))
+
+
 class Game:
-    """A replay's frames, its action tokens and its per-frame death lists."""
+    """A replay's frames (observer or one player's view), its action tokens and per-frame deaths."""
 
     def __init__(self, path, actions_dir, vocab, avocab):
         self.g = GameFrames(path, vocab)
-        self.ga = GameActions(os.path.join(actions_dir, os.path.basename(path)), self.g, avocab)
+        self.ga = GameActions(os.path.join(actions_dir, actions_name(path)), self.g, avocab)
+        self.viewer = self.g.viewer  # 0 = observer, else the player whose view this is (their commands only)
         with np.load(path) as z:
             self.dead_id, self.dead_start = z["dead_id"], z["dead_frame_start"]
         self.slot_index = {s: i for i, s in enumerate(self.g.slots)}
@@ -85,12 +92,13 @@ def make_sample(game, t, k, rng, with_actions, om, frame):
     now = {k: np.zeros(len(ids), np.float32) for k in ("dx", "dy", "hp", "sh", "en", "build")}
     now["order"] = u["order"][a:b].astype(np.int64)
     lo, hi = int(g.loops[t]), int(g.loops[t + k])
-    act = game.ga.window(lo, hi if with_actions else lo, np.array([lo]), lo, om, static_pointers=True)
+    act = game.ga.window(lo, hi if with_actions else lo, np.array([lo]), lo, om, static_pointers=True, only=game.viewer or None)
+    sum_pidx = [game.slot_index[s] for s in ([game.viewer] if game.viewer else g.slots)]  # summary -> player index
     pidx = np.array([game.slot_index.get(int(o), -1) for o in u["owner"][a:b]], np.int64)
     touched = np.isin(ids, act["touched_uid"][act["touched_uid"] >= 0])  # selected or targeted by a command in the window
     births = int(g.start[t + k + 1] - g.start[t + k]) - int(present.sum())
     return dict(frame=frame, future=g.frame(t + k, om), act=act, tgt=tgt, now=now, pidx=pidx,
-                has_act=with_actions, hor_s=k * g.step / LPS, births=births, touched=touched, _game=game, _lo=lo, _om=om)
+                has_act=with_actions, hor_s=k * g.step / LPS, births=births, touched=touched, sum_pidx=sum_pidx, _game=game, _lo=lo, _om=om)
 
 
 def withhold(samples):
@@ -98,7 +106,7 @@ def withhold(samples):
     out = []
     for s in samples:
         game, lo, om = s["_game"], s["_lo"], s["_om"]
-        out.append(dict(s, act=game.ga.window(lo, lo, np.array([lo]), lo, om, static_pointers=True), has_act=False))
+        out.append(dict(s, act=game.ga.window(lo, lo, np.array([lo]), lo, om, static_pointers=True, only=game.viewer or None), has_act=False))
     return out
 
 
@@ -125,6 +133,7 @@ def collate_samples(samples, dev):
              has_act=torch.tensor([s["has_act"] for s in samples], device=dev),
              pidx=pad([s["pidx"] for s in samples], N).to(dev),
              touched=pad([s["touched"] for s in samples], N).to(dev),
+             sum_pidx=(pad([np.array(s["sum_pidx"]) + 1 for s in samples], max(len(s["sum_pidx"]) for s in samples), np.int64) - 1).to(dev),
              births=float(np.mean([s["births"] for s in samples])))
     b["tgt"] = {k: pad([s["tgt"][k] for s in samples], N).to(dev) for k in TARGETS}
     b["now"] = {k: pad([s["now"][k] for s in samples], N).to(dev) for k in TARGETS if k != "exit"}
@@ -185,7 +194,7 @@ def main():
 
     def available(names):
         return [os.path.join(args.data, f) for f in sorted(names)
-                if os.path.exists(os.path.join(args.data, f)) and os.path.exists(os.path.join(args.actions_dir, f))]
+                if os.path.exists(os.path.join(args.data, f)) and os.path.exists(os.path.join(args.actions_dir, actions_name(f)))]
 
     train_paths = available(split["train"])
     tables = RulesetTables(args.rules_tables) if args.types == "ruleset" else None
@@ -280,7 +289,7 @@ def main():
             if hi < 1:
                 continue
             t = rng.randint(0, hi + 1)
-            om = game.g.owner_map("observer", augment=True, rng=rng)
+            om = game.g.owner_map("player" if game.viewer else "observer", me_slot=game.viewer or None, augment=True, rng=rng)
             frame = game.g.frame(t, om)  # one frame object per present frame: collate_samples groups by identity
             for j in range(n_hor):
                 k = int(ks[j]) if ks is not None else rng.randint(1, k_max + 1)
@@ -300,9 +309,19 @@ def main():
             tokens, mask, ang = e["tokens"][fi], e["mask"][fi], e["ang"][fi]
             P = e["P"]
             B, T, d = tokens.shape
-            summaries, s_mask, h = aenc(ab, horizon_s=b["hor"])
-            s_mask = s_mask[:, 0, :P] & fb["ply_mask"][fi]
-            summ = summaries[:, 0, :P] * b["has_act"][:, None, None].to(summaries.dtype)
+            summaries, s_mask0, h = aenc(ab, horizon_s=b["hor"])
+            # one summary per summarized player (all players in the observer view, the viewer alone
+            # in a player view): scatter them to the frame's player order; the rest stay zero / masked
+            S = summaries.shape[2]
+            summ = torch.zeros(B, P, d, device=tokens.device, dtype=summaries.dtype)
+            s_mask = torch.zeros(B, P, dtype=torch.bool, device=tokens.device)
+            pidx = b["sum_pidx"][:, :S]
+            valid = (pidx >= 0) & s_mask0[:, 0, :S]
+            bi = torch.arange(B, device=tokens.device)[:, None].expand(-1, S)[valid]
+            summ[bi, pidx[valid]] = summaries[:, 0][valid]
+            s_mask[bi, pidx[valid]] = True
+            s_mask = s_mask & fb["ply_mask"][fi]
+            summ = summ * b["has_act"][:, None, None].to(summ.dtype)
             # prior: present + commands (or "withheld"); posterior: present + future
             ply = e["players"][fi] + player_emb.weight[:P][None].to(tokens.dtype)
             wh = withheld(b["has_act"].long())[:, None].to(tokens.dtype)

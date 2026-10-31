@@ -132,7 +132,7 @@ class RoPEEncoder(StateEncoder):
         else:
             rows = self.ruleset.lookup(rs, unit_api=b[f"{g}_rtype"], abil_api=torch.stack([b[f"{g}_rproduce"], b[f"{g}_rorder"]], -1))
             unit, abil = rows["unit"], rows["ability"]
-        tok = unit + self.owner(b, g) + self.pos(b[f"{g}_xy"]) + self.ent_in(b[f"{g}_num"]) + abil[..., 0, :]
+        tok = unit + self.owner(b, g) + self.pos(b[f"{g}_xy"]) + self.ent_in(b[f"{g}_num"]) + abil[..., 0, :] + self.grp_in(b[f"{g}_groups"])
         if self.use_orders:
             tok = tok + abil[..., 1, :] + self.ord_in(b[f"{g}_ord"])
         return tok

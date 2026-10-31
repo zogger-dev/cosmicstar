@@ -1196,3 +1196,26 @@ own catalogs, `GameData/*.xml` inside the mods, which sit in the install's CASC 
   node (`BarracksTrain/Marine`, API id 560, type train / build / research, the product's cost)
   with `a_makes_u` / `a_makes_g` edges; 641 commands per ruleset, 609 with API ids (was 442 /
   410), so production orders now resolve to real rows instead of the unknown one.
+
+## Control-group memory in the state, player views as training data (2026-10-30)
+
+Decision (user): the model predicts at most 2.5 s ahead, so control-group contents cannot be
+rebuilt from events inside a window; they are state, encoded at extraction time. Each entity
+token now carries `ent_groups`: 11 bits, membership in its owner's control groups 0-9 and the
+active selection (10), read from the tracker's per-frame `grp_*` tables (`GameFrames.groups`),
+plus the engine's selected flag as the 7th flag bit of the entity numbers (`F_SELECTED` in
+`u_flags`). "Select group 1, cast Snipe" is then a predictable state change: the units whose
+group-1 bit is set get the selected bit, and the command's recipients are the selected ones.
+No hard binding of commands to the engine's recipients: the model is to learn it from the
+select / control-group / command tokens and these bits; `cmd_*` stays for evaluation (the
+"touched by a command" metric). On the 1v1 views ~4% of a player's unit rows are selected at
+any moment and most army units sit in some group.
+
+`train_direct.py` now trains on player-view files directly (`--data data/worldmodel/pov_1v1
+--splits data/worldmodel/splits_1v1.json`): the action table is `<game>.npz` for a view
+`<game>_p<slot>.npz`, the window keeps only the viewer's commands (`only=viewer`; the enemy's
+are unknown to them), the owner map uses me / enemy relations, and the per-player command
+summaries are scattered to the frame's player order (the enemy's summary is zero and masked,
+so the prior sees "no commands" for the enemy, which is the point of the player view). The
+oracle as two concatenated views is not built yet; this is the single-view (belief) setting.
+The pro 1v1 extraction (two views per game) is running in its own session.

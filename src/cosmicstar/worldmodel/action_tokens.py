@@ -312,7 +312,7 @@ def self_family(avocab, links, link):
 
 ACT_KEYS = ("kind", "family", "button", "tkind", "group", "gop", "remove", "team", "pcode", "rteam",
             "rpcode", "snap", "rsnap", "xy", "num", "t", "seg", "player", "tgt_ok")
-ENT_KEYS = ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num")
+ENT_KEYS = ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num", "groups")
 
 
 def collate_actions(windows):

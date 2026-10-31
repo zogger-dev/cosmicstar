@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .tokenize import C_ENTITY, C_FORMAT, C_ORDER, C_PLAYER, C_VIS, N_CODE_EMB, N_REL
+from .tokenize import C_ENTITY, C_FORMAT, C_GROUPS, C_ORDER, C_PLAYER, C_VIS, N_CODE_EMB, N_REL
 
 
 class Fourier(nn.Module):
@@ -142,6 +142,7 @@ class StateEncoder(nn.Module):
         self.rel = nn.Embedding(N_REL, d)
         self.pos = PositionEncoder(d)
         self.ent_in = mlp(C_ENTITY, d)
+        self.grp_in = nn.Linear(C_GROUPS, d)  # control-group / selection membership bits
         self.ord_in = mlp(C_ORDER, d)
         self.ply_in = mlp(C_PLAYER, d)
         self.time_ff = TimeFeatures()
@@ -166,7 +167,7 @@ class StateEncoder(nn.Module):
         """Input embedding of entities from their features (tokenize.entity_features). Also
         used by the action encoder for the units an action points at."""
         tok = (self.unit(b[f"{g}_type"]) + self.owner(b, g) + self.pos(b[f"{g}_xy"])
-               + self.ent_in(b[f"{g}_num"]) + self.ability(b[f"{g}_produce"]))
+               + self.ent_in(b[f"{g}_num"]) + self.ability(b[f"{g}_produce"]) + self.grp_in(b[f"{g}_groups"]))
         if self.use_orders:  # off for checkpoints trained before orders were extracted
             tok = tok + self.ability(b[f"{g}_order"]) + self.ord_in(b[f"{g}_ord"])
         return tok

@@ -36,7 +36,9 @@ REL_NONE, REL_ME, REL_ALLY, REL_ENEMY = 0, 1, 2, 3
 N_REL = 4
 NEUTRAL_PLAYER = 16              # engine owner id of neutral units
 
-C_ENTITY, C_PLAYER, C_FORMAT, C_VIS = 17, 9, 4, 2
+C_ENTITY, C_PLAYER, C_FORMAT, C_VIS = 18, 9, 4, 2
+C_GROUPS = 11  # the unit's membership in its owner's control groups 0-9 and active selection (10), from the
+# extraction's selection tracker (grp_*): the memory a 2.5 s window cannot rebuild from events
 C_ORDER = 6  # the entity's current order: has one, target offset (x, y), targets a unit, progress, queue length
 GRID = 16                        # the encoder's grid (G x G over the playable area)
 STAT_KEYS = ("minerals", "vespene", "mineral_rate", "vespene_rate", "workers", "food_used", "food_made",
@@ -59,6 +61,7 @@ class GameFrames:
         self.start = d["frame_start"]
         self.step = int(np.median(np.diff(self.loops))) if len(self.loops) > 1 else 16  # loops per frame
         self.unit_tag = d["unit_tag"] if "unit_tag" in d.files else None  # state unit id -> engine tag
+        self.grp = (d["grp_start"], d["grp_id"], len(d["grp_player"])) if "grp_start" in d.files else None
         self._rows_cache = {}
         u = self.u = {k[2:]: d[k] for k in d.files if k.startswith("u_")}
         u["unit_idx"] = vocab.unit_index(u["type"])
@@ -232,7 +235,7 @@ class GameFrames:
             u["energy"][rows] / 200.0,
             _log(hpm, 8.0), _log(shm, 8.0),
             u["build"][rows].astype(np.float32),
-            *[((flags >> k) & 1).astype(np.float32) for k in range(6)],  # flying burrowed cloaked halluc snapshot powered
+            *[((flags >> k) & 1).astype(np.float32) for k in range(7)],  # flying burrowed cloaked halluc snapshot powered selected
             u["progress"][rows],
             u["progress2"][rows],
             u["queue"][rows] / 5.0,
@@ -252,7 +255,8 @@ class GameFrames:
                 f"{prefix}_order": u["order"][rows].astype(np.int64),
                 f"{prefix}_ord": u["ord"][rows].reshape(-1, C_ORDER),
                 f"{prefix}_xy": self.normalize_xy(xy),
-                f"{prefix}_num": num}
+                f"{prefix}_num": num,
+                f"{prefix}_groups": np.zeros((len(rows), C_GROUPS), np.float32)}  # frame() fills the real bits
 
     def normalize_xy(self, xy):
         """Map coordinates -> [-1, 1] over the playable area."""
@@ -274,6 +278,23 @@ class GameFrames:
         i = np.clip(np.searchsorted(sid, ids), 0, len(sid) - 1)
         return np.where(sid[i] == ids, srow[i], -1)
 
+    def groups(self, f, rows):
+        """[len(rows), C_GROUPS] membership bits of the frame's units in control groups 0-9 and the
+        active selection (10), every player's (a unit is only in its owner's), zeros without data."""
+        out = np.zeros((len(rows), C_GROUPS), np.float32)
+        if self.grp is None:
+            return out
+        start, ids, P = self.grp
+        a = self.start[f]
+        for k in range(P):
+            base = (f * P + k) * C_GROUPS
+            for g in range(C_GROUPS):
+                members = ids[start[base + g]:start[base + g + 1]]
+                if len(members):
+                    r = self.rows_of(f, members) - a
+                    out[r[r >= 0], g] = 1.0
+        return out
+
     def frame(self, f, owners):
         u, a, b = self.u, self.start[f], self.start[f + 1]
         rows = np.arange(a, b)  # hook for views that hide things (fog): drop rows here
@@ -286,7 +307,7 @@ class GameFrames:
             ply_num, ply_ups = np.where(hide[:, None], 0, ply_num), np.where(hide[:, None], 0, ply_ups)
         vis = self.vis[f] if self.vis is not None else np.ones((GRID * GRID, C_VIS), np.float32)
         return dict(
-            **self.entity_features(rows, owners),
+            **{**self.entity_features(rows, owners), "ent_groups": self.groups(f, rows)},
             ent_cat=u["cat"][rows],
             ent_resource=u["resource"][rows],
             ply_race=np.array([self.vocab.race.get(self.players[i]["race"], self.vocab.race["Random"])
@@ -303,7 +324,7 @@ class GameFrames:
         )
 
 
-GROUPS = (("ent", ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num")),
+GROUPS = (("ent", ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num", "groups")),
           ("ply", ("race", "team", "pcode", "rel", "num", "ups")))
 
 
