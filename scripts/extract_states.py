@@ -454,7 +454,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
     cam = []                             # cam_x, cam_y [F]
     pw = {k: [] for k in PW_DTYPES}      # power sources
     rd = {k: [] for k in RD_DTYPES}      # radar rings
-    pu = []                              # the raw player block's upgrade ids
+    pu = []                              # the raw player block's upgrade ids (nothing else in extract() may bind `pu`)
     pw_start, rd_start, pu_start = [0], [0], [0]
     ab_failed = [0]                      # available-abilities queries refused (switched off after the first)
 
@@ -668,10 +668,10 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
                 cols["buff_start"].append(len(rag["b_id"]))
                 rag["b_id"].extend(u.buff_ids)
                 cols["pass_start"].append(len(rag["pass_id"]))
-                for pu in u.passengers:
-                    rag["pass_id"].append(uid(pu.tag))
-                    rag["pass_type"].append(pu.unit_type)
-                    rag["pass_hp"].append(pu.health)
+                for pas in u.passengers:
+                    rag["pass_id"].append(uid(pas.tag))
+                    rag["pass_type"].append(pas.unit_type)
+                    rag["pass_hp"].append(pas.health)
                 # Orders in queue order (production included): what the unit was told to do.
                 cols["ord_start"].append(len(rag["ord_abil"]))
                 for od in u.orders:
@@ -854,7 +854,8 @@ def build_manifest(replays_root, games_root, fmt, step, substep, builds=(), maps
                 continue
             jobs.append(dict(id=gid, path=path, out=out, acts=files.acts(), meta=files.meta(), fail=files.fail(slot),
                              map=d["map"], base_build=d["base_build"], ruleset=d["ruleset"], perspective=slot,
-                             slots=[p["slot"] for p in d["players"]], teams={p["slot"]: p["team"] for p in d["players"]}))
+                             slots=[p["slot"] for p in d["players"]], teams={p["slot"]: p["team"] for p in d["players"]},
+                             redo=os.path.exists(out)))  # redo: the output exists (stale layout / step, or --redo)
     return jobs, dict(skipped)
 
 
@@ -920,7 +921,8 @@ def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
     flags.FLAGS(sys.argv[:1])
     commit = os.environ.get("COSMICSTAR_COMMIT", "")
     for j in jobs:
-        if not claim(j):
+        # done earlier in this run (another worker) or before it: skip, unless the job says redo
+        if (os.path.exists(j["out"]) and not j.get("redo")) or not claim(j):
             continue
         os.makedirs(os.path.dirname(j["out"]), exist_ok=True)
         t0 = time.time()
@@ -960,10 +962,8 @@ def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
                 print(json.dumps(dict(fail=j.get("id", os.path.basename(j["path"])), view=slot, error=rec["error"][:200],
                                       tries=attempt + 1, s=rec["s"], where=where)), flush=True)
                 break
-        try:
-            os.remove(j["out"] + ".claim")  # done or failed: the claim has served
-        except OSError:
-            pass
+        # the claim stays until the run ends (main removes them): a view that finished or failed
+        # must not be picked up again by the next worker walking the same job list
 
 
 def main():
@@ -1068,15 +1068,18 @@ def main():
     # builds) fail to load replays (InvalidReplayData) or crash. So each build starts
     # with a single game alone, which pulls its data in, then runs in parallel.
     for build in sorted({j["base_build"] for j in jobs}):
-        left = [j for j in jobs if j["base_build"] == build and not os.path.exists(j["out"])]
+        left = [j for j in jobs if j["base_build"] == build and (j.get("redo") or not os.path.exists(j["out"]))]
         if not left:
             continue
         print(json.dumps(dict(build=build, todo=len(left))), flush=True)
-        for j in left[:3]:  # warm-up, alone, until one succeeds
+        for j in left[:3]:  # warm-up, alone, until one succeeds (a fresh output, not a redo job's old one)
+            t_warm = time.time()
             run([j], 1)
-            if os.path.exists(j["out"]):
+            if os.path.exists(j["out"]) and os.path.getmtime(j["out"]) >= t_warm - 1:
                 break
         run(left, min(args.workers, len(left)))
+    for c in glob.glob(os.path.join(args.games, "**", "*.claim"), recursive=True):
+        os.remove(c)  # the run is over; every claim has served
     if keeper is not None:
         keeper.terminate()
 
