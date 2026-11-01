@@ -135,3 +135,55 @@ def active_units(post_mu, threshold=0.01):
     if len(post_mu) < 2:
         return 0
     return int((post_mu.var(0) > threshold).sum())
+
+
+# ------------------------------------------------------------------ categorical latent (DreamerV3 style)
+# z = G one-hot variables with C classes each (32 x 32: ~2^160 states); logits [..., G, C].
+
+def cat_probs(logits, unimix=0.01):
+    """Class probabilities with `unimix` of uniform mixed in: no class reaches probability 0,
+    which keeps the KL bounded (DreamerV3)."""
+    p = F.softmax(logits.float(), -1)
+    return (1 - unimix) * p + unimix / p.shape[-1]
+
+
+def cat_sample(probs):
+    """One-hot sample per variable with a straight-through gradient: forward is discrete, the
+    backward pass flows through the probabilities."""
+    idx = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1).view(probs.shape[:-1])
+    hard = F.one_hot(idx, probs.shape[-1]).to(probs.dtype)
+    return hard + probs - probs.detach()
+
+
+def cat_mode(probs):
+    """The most likely class of each variable, one-hot (no gradient)."""
+    return F.one_hot(probs.argmax(-1), probs.shape[-1]).to(probs.dtype)
+
+
+def cat_kl(p, q):
+    """KL(p || q) summed over the variables and classes: [..., G, C] -> [...] (nats)."""
+    return (p * (torch.log(p) - torch.log(q))).sum((-1, -2))
+
+
+def cat_kl_balanced(post, prior, w_dyn=0.5, w_rep=0.1, free=1.0):
+    """DreamerV3's KL balancing with free bits: the prior learns to predict the posterior
+    (w_dyn, posterior stopped), the posterior is only lightly pulled toward the prior (w_rep,
+    prior stopped); each side is free below `free` nats. Returns (charged [...], raw KL [...])."""
+    dyn = cat_kl(post.detach(), prior)
+    rep = cat_kl(post, prior.detach())
+    return w_dyn * dyn.clamp(min=free) + w_rep * rep.clamp(min=free), cat_kl(post.detach(), prior.detach())
+
+
+class CategoricalPrior(nn.Module):
+    """p(z | input) as G x C logits per (sample, player): the input is what PriorHead reads
+    (CLS, the player's slot, its command summary or 'withheld')."""
+
+    def __init__(self, d_in, groups=32, classes=32, hidden=None):
+        super().__init__()
+        hidden = hidden or 2 * d_in
+        self.G, self.C = groups, classes
+        self.net = nn.Sequential(nn.LayerNorm(d_in), nn.Linear(d_in, hidden), nn.GELU(), nn.Linear(hidden, groups * classes))
+
+    def forward(self, x):
+        B, P, _ = x.shape
+        return self.net(x).float().view(B, P, self.G, self.C)

@@ -16,6 +16,7 @@ dependencies = [
     "requests",
     "s2protocol",
     "sc2reader",
+    "tensorboard",
     "torch",
     "tqdm",
     "zstandard",

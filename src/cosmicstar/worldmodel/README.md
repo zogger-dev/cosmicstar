@@ -1500,3 +1500,405 @@ the container's Xwayland (compositor-dependent; GNOME's ignored it today), or a 
 device (most faithful, needs the device and permissions inside the container). One seat per
 container means physical devices never reach the game and injected input cannot cross
 containers. The API stays alongside for rewards and ground truth.
+
+## Pro 1v1 set: extracted (2026-10-31, run 16)
+
+The 629 tournament games (two player views each, no observer) are in `data/games/1v1/` as
+layout 2, step 4, substep 1: 1258 `.cst` views, 629 `.acts.npz` action tables, 629 `.meta.json`
+sidecars, 6.2 GB. Run `20261031-000244` (`extract_states.py --format 1v1 --step 4 --substep 1
+--workers 12 --retry_failed`, logs in `data/games/logs/`) took 6 h 16 min on the 12-prefix pool:
+0 failed views, 1 retry (a `start_replay` websocket timeout, passed on the second try), no
+`InvalidReplayData`, no "ended at start", no duplicate views. The only tracebacks in the run log
+are umu-run's `ProcessLookupError` at engine shutdown.
+
+| build | games | views | ruleset(s) |
+|---|---|---|---|
+| 93333 (5.0.14, DH Dallas 2025) | 65 | 130 | 4742e079 56 games, 01973d3e 7, two singletons |
+| 94137 (HSC 27, EWC 2025, FEL Cracov 2025) | 371 | 742 | 715f8b55 343, 690bc661 9, bf25efab 7, fc4e1bac 6, 5d683877 5, one singleton |
+| 95299 | 1 | 2 | 39c4524e |
+| 95841 (HSC 28, pigosaur 62, random-replays) | 191 | 382 | b982a64c 151, 1f369ff1 19, e25ffd56 9, be1c3a89 6, 018b3cff 5, one singleton |
+| 96883 | 1 | 2 | 27099e7b |
+
+Every one of the 18 rulesets has its balance export (`data/worldmodel/balance/status.json`), so
+every view's abilities are named. Per view: mean 206 s, median 169 s, max 1520 s (a 25-minute
+game); 93333 games are the longest (median 203 s), 95841 the shortest (158 s). Output 5.2 MB per
+view on average (median 3.9 MB). Throughput with 12 engines 3.6-3.7 views/min on 94137/95841
+and 2.6/min in the first hour of 93333 games; each build changeover costs a few minutes (its
+warm-up game runs alone, and a single-game build runs both views alone). Memory with 12 pool
+engines: 37-51 GB used (engines 2.5-3.3 GB each, workers 0.8-0.9 GB each), lowest 7 GB
+available on a 64 GB box; 10 workers would be the safe setting for longer games. Rerunning the
+same command does nothing (every sidecar matches); `--redo` re-extracts, `--retry_failed`
+retries fail files. The pool prefixes stay in `~/Games/sc2-prefixes/00-11` (5.6 GB, remade on
+first use if deleted); `~/Games/sc2-prefix-test` (529 MB) was the hand-made trial copy and can go.
+
+## Horizons and times in game loops (2026-10-31)
+
+Decision (user): the model is told game loops, never frame numbers. `train_direct.py` draws
+horizons from the multiples of the extraction's frame step up to `--max_loops` (default 56 =
+2.5 s): on the step-4 pro set that is 4, 8, ..., 56 (a quarter of the per-loop horizons, fine for
+a first run); a step-1 extraction gives every loop 1..56 with no code change. `--eval_loops`
+(default `4,16,32,56`) must be multiples of the step. Each sample's horizon is the loop difference
+between its two frames, and the predictor, the action encoder's summary query and the inverse
+model read it through `LoopTime` (action_encoder.py: sin/cos at periods 2-2048 loops plus the
+signed value / 56). Command times and segment bounds inside the action window are loops
+relative to the present as well (they were seconds). Checkpoints from before this change don't
+load (the time features' width changed). The run's `config.json` records `step_loops` and
+`hor_loops`; each view's extraction settings are in its `<id>.meta.json` sidecar (layout, step,
+substep, until, abilities, extractor commit, stats).
+
+Smoke test (200 steps, pool 8, a scratch split holding out Ruby Rock LE): runs end to end on the
+pro player views and evaluates at 4 / 16 / 32 / 56 loops; at 200 steps it sits at persistence, as
+expected.
+
+**Step-1 extraction, measured** on one median game (14b0d10112accb33, 10.7 min, build 94137, two
+views, 2 workers on an idle box): 14,105 frames per view, 11.4 MB and 9.2 MB (3.1x the step-4
+files, 3.7 / 2.9 MB), 101-105 s per view against 170-176 s at step 4 in run 16 (12 workers,
+loaded box; the engine already stepped every loop at `--substep 1`, so writing every frame costs
+little). So the full pro set at step 1 is roughly 19 GB and a run no longer than run 16.
+
+## Pyramid encoder and the layout-2 inputs (`worldmodel/pyramid.py`, 2026-10-31)
+
+Decisions (user): every field layout 2 extracts becomes a model input; the encoder is the
+scatter-and-local-attention pyramid discussed on 2026-10-30, with static and dynamic map layers
+not yet separated (what that split should mean is still open).
+
+**Inputs** (`tokenize.py`):
+- Entity numbers grow from 18 to 49 (`ENTITY_NUMS`): facing (sin, cos), radius, weapon cooldown,
+  engaged target (flag + offset), attack / armor / shield levels, buff remaining fraction and
+  duration, ideal harvesters, cargo used / max, detection and radar range, display state (3),
+  cloak state (4), the second flag set (active, blip, on screen), passenger, in gas, abilities
+  known (the viewer's own units when abilities were queried), has an add-on.
+- List-valued state pooled into the entity token (`BAGS`): every order of the queue (ability +
+  target offset, targets a unit, progress, position), the production queue (ability, progress,
+  position), buffs (raw id, 512-row table), available abilities (raw id, 4096-row table, point
+  flag), rally points (offset, targets a unit). Per list: mean of the items' embeddings and the
+  log count, through a linear map. (A plain sum made a unit with 40 available abilities 40x
+  louder; the mean + log count keeps the count without the magnitude.)
+- Units inside units are rows of their own with a pointer (parent) to the container: passengers
+  from the extraction's passenger lists (transports, bunkers, command centers; same unit id as on
+  the map, so identity survives loading and unloading; position = the container's; max hp from
+  the unit's own map rows or the type's largest), and workers inside gas buildings, bridged while
+  out of sight for at most 64 loops when their order before the gap was the gas building. Add-ons
+  point at their building. The pointer adds the container's token through a linear map. On the
+  median test game: 1,232 passenger rows, 5,696 in-gas rows, 6,989 add-on links over 3,526 frames.
+  A loaded unit is now "present" at t + k (it was "gone"), so the targets follow it through a pickup.
+- Effects (storm, bile, ...) are tokens: effect table (64) + owner + position + radius. Not predicted.
+- Player tokens: tracker stats (9) + player_common (10) + score details (78) + units lost (from the
+  deaths and owners) + known flag + camera xy + subgroup + last command (age, point, x, y, targets
+  a unit) = 107 numbers; plus position embeddings of the camera and the mean of the saved camera
+  positions, and the last command's ability family. Private parts are the viewer's only.
+- Map grids at one cell per map unit: visible, seen, creep, pathable, placeable, height, on map,
+  playable (`GRID_CHANNELS`). Orientation checked: rows are y, no flip (own units on visible cells
+  100% vs 0% flipped; hatcheries on creep 100% vs 0%). The batch canvas is the largest map padded
+  to a multiple of 16 (Pylon LE 248 -> 256).
+
+**Encoder** (levels by cell size in map units):
+- Stem: two 3x3 convs over the grid channels -> width 32.
+- Every level (decision, user, same day): 3 conv blocks on the map (depthwise 3x3 + LayerNorm +
+  MLP, residual; `--conv_blocks`), then 3 attention blocks (`--attn_blocks`).
+- One width throughout (decision, user, same day): map cells have the units' width d at every level,
+  so units and cells attend together at full width with no projection. d is 128 everywhere (units,
+  cells, players, the action encoder, predictor and latent heads; `--d 128`), 8 heads of 16 (`--head_dim`;
+  the predictor gets the encoder's head count, since it reads the encoder's rotations). At head width
+  16 each head's 2D RoPE has 4 wavelengths per axis (1 to 256 map units) instead of 8.
+  (The first version grew the cells 32 / 64 / 128 at the local levels and projected units down into
+  them, which left a unit's exchange with the map at the 256-cell grid one 32-wide head.)
+- s = 1, 2, 4: each attention block is one round of local joint attention: each cell attends to its sliding 3x3 neighborhood of cells, the units / effects in
+  those cells, CLS + players and a learned null key; each unit attends to the 3x3 cells around its
+  cell, the units in them, the globals and the null key; the globals attend to every cell and unit.
+  No map-to-map attention beyond the neighborhood. Units keep width d (projected into the level's
+  width for attention and back); cells pool by 2x2 patch merge; units are reassigned to the coarser
+  cells. Implementation: neighbors as shifted views of the padded map, unit keys as sparse pairs,
+  one softmax per query merged across the dense and sparse key sets (`_segment_softmax_merge`);
+  checked against a dense masked-softmax reference to 2e-7 (`tests/test_pyramid_local.py`).
+- s = 8, 16 (width d): full joint attention over CLS, players, a null token, every map cell and
+  every unit / effect.
+- No additive scatter of units into cells: cells learn about units only through attention, and the
+  null key is their only density signal (an additive scatter per local level is the open option).
+- RoPE in map units everywhere (centered on the playable area), CLS / players / null at the origin.
+- Output to the predictor: [CLS, players, units, effects, s = 16 cells]; probes and z read the
+  units' rows (`unit_slice`).
+
+`train_direct.py --encoder pyramid` (default; `--encoder flat` keeps the October units-only encoder,
+which also reads the new entity numbers and player numbers but not the lists, pointers, effects or
+grids). With 1 conv + 1 attention block per local level and 2 full blocks per full level (the first
+version): encoder 8.5 M, 0.51 s/step at 16 frames x 2 horizons, 8.6 GB; at 400 steps (same seed)
+training loss 1.36 vs the flat encoder's 1.41, both still at persistence on held-out positions.
+With 3 + 3 at every level and cells 32 / 64 / 128: encoder 17.5 M (30.3 M in all), 1.35 s/step, 6.8 GB
+with activation checkpointing per block. With 3 + 3 and 256 everywhere: encoder 28.9 M (41.8 M in all);
+16 frames x 2 horizons runs out of the 32 GB; 8 frames: 3.3-3.75 s/step, 21.5 GB; 4 frames: 1.7-2.3 s/step,
+11.1 GB (about 2.4 frames/s, against 11.8 frames/s for the narrower version). With d = 128 everywhere
+(the default): encoder 7.7 M (11.0 M in all), 16 frames x 2 horizons at 3.2-3.45 s/step, 21.4 GB
+(about 5 frames/s); the 256-cell grid at full width is most of the cost. Flat (d 256): 0.10 s/step, 2.2 GB.
+
+## Combined view, enemy intent for the posterior, longer horizons (2026-10-31)
+
+Run 2026-10-31 13:28 (pyramid, d 128, stopped at step 2000) beat persistence clearly on held-out
+maps (moving units 2.56 vs 4.28 map units at 56 loops; orders 0.94 vs 0.87), but z collapsed: KL
+~0 with commands and without. Two causes in the code: KL was averaged (and charged) over the
+summarized players only, the viewer in a player view, so the enemy's z was never regularized
+or measured; and nothing pushed z to carry the enemy's choices, which at these horizons are a
+small share of the loss. Changes for the next run:
+
+- **Views.** A game is its two player views plus their combined view (`tokenize.CombinedFrames`).
+  The combined view is the two views side by side, not merged: every token of both (a unit both
+  players see is two tokens; a snapshot one player keeps of minerals the other saw destroyed
+  stays), each marked with its source view (`ent_src` / `eff_src`, that viewer's player code,
+  embedded) and with relations as that viewer sees them. Unit ids stay per view (the second
+  view's offset), so each token's target is its own view's future; replay pointers resolve to
+  either copy (`alias`). Both players' commands are given. `--obs_share` (1/3) of present frames
+  come from it.
+- **Minimap.** Visibility, seen and creep layers per player (slot order); the encoder embeds each
+  player's layers with that player's code and sums them into one grid before the stem
+  (`PyramidEncoder.minimap`), so "seen by this player, not that one" is learnable. `ply_gridok`
+  says whose layers are present (the viewer's in a player view, both in the combined view).
+- **Enemy intent, posterior only** (`inverse_model.EnemyIntent`, `train_direct.enemy_info`). In a
+  player view, for each enemy unit visible at t (not a snapshot, not inside anything): its true
+  order queue at t and the enemy's commands in [t, t+k) that selected it (stim, blink, moves),
+  read from the enemy's own view (units joined by engine tag: visible units share tags across
+  views, snapshots don't). Pooled per unit and added to the present tokens the posterior reads.
+  The prior never sees it, so KL charges for the enemy intent the prior can't predict.
+- **KL** is charged and reported for every player; the prior's commands-given flag is per player
+  (a player view never gives the enemy's). Evaluation splits KL into own (summarized players)
+  and enemy, adds `pos err enemy mv` (moving enemy units), and evaluates player views and the
+  combined view separately (`<set>` and `<set> obs`).
+- **Horizons** up to `--max_loops 224` (10 s), drawn log-uniformly (`--hor_dist log`); evaluated
+  at 4, 16, 56, 112, 224 loops. Births per window grow with the horizon (~35 at 224) and aren't
+  predicted.
+- Pool: `--pool 12` games (~1.75 GB each with three views); `--val_games 2`.
+
+Smoke test (50 steps): 5.2 s/step, 27 GB peak.
+
+## Dense windowed encoder (worldmodel/dense.py, 2026-10-31)
+
+The pyramid's sparse local attention kept the GPU memory-bound: ~300 W of a 600 W 5090 at
+"100%" utilization, 5.3 s/step (torch.compile: 4.1 s, 20 GB instead of 27). Neighbor shifts,
+pair searches, gathers, segment softmaxes and depthwise convs each touch every number once or
+twice. `DenseEncoder` (now `--encoder dense`, the default) rebuilds the map side from dense parts:
+
+- **Canvas cropped to the playable area** (`GameFrames.grid_origin`: the playable corner rounded
+  down to a multiple of 16; `collate` passes `grid_origin`). Borders were 40% of a typical full
+  map and 70% of Pylon's; playable areas sit ~6 units low on most maps.
+- **Minimap embedding** as before (static layers + each player's layers with their code, summed).
+- **Dense ResNet blocks** (3 x 3 convs, per-cell LayerNorm, identity skips): 2 in the stem, 3 per
+  level. Cells outside the frame's own cropped map are zeroed after every map step and between
+  a block's two convs. With GroupNorm (statistics over the whole canvas) and unmasked padding, a
+  frame's encoding depended on the largest map in its batch: a Taito Citadel frame batched with a
+  Mothership frame changed by up to 3.9 (`tests/test_dense_batch_independence.py`; now 1e-5 with
+  TF32 off). Zeroing between the convs matters because a norm turns a zero cell into its bias,
+  which the second conv reads at the map's edge.
+- **Levels at 1, 2, 4, 8, 16 map units per cell**, each with 3 conv blocks then 3 attention
+  blocks; 2 x 2 downsampling between them with a projection shortcut (learned 2 x 2 stride-2
+  merge + linear of the 2 x 2 average). Every level's map is returned in `maps` for a later
+  full-resolution decoder (U-Net skips).
+- **Attention** (FlexAttention, one softmax per query over [globals, entities, cells]): a cell
+  sees the 16 cells of its fixed 4 x 4 window, every entity and the globals; entities and
+  globals see everything. Cells are laid out window-major so the block mask is block-sparse.
+- **No pair biases.** A learned geometric bias inside the kernel (the gap between bodies, and
+  between a body and a cell's square) was built and dropped: even its cheapest form (fixed
+  per-head scales, learned per-query strengths) was ~40% of the full-resolution block, scalar
+  math on CUDA cores for ~1.5 billion scores per block. Measured at level 1 (16 frames, 26k
+  tokens, backward): no bias 8 ms, fixed bias 14 ms, one per-query strength 16 ms, two 32 ms,
+  a learned lookup table 401 ms, a small learned network 3.7 s (every score adds into a few
+  weights with atomics). Rotary angles to 1/8 map unit with learned q / k already give a learned
+  function of the offset, and the radius is in each entity's features; the tight-passage metric
+  checks what's lost. (FlexAttention notes: per-head weights must be 1-D tensors indexed by the
+  head; a captured Python float turns symbolic under dynamic shapes and breaks the backward.)
+- **Block mask** built from the structure (`DenseEncoder._block_mask`: the dense part and the cells
+  padded to 128-token blocks; cell blocks see the dense blocks fully and themselves through the
+  window rule). The generic builder evaluated every pair: 18 s per new entity count.
+- **Positions** at 0.125-512 map units: rotary angles (encoder and predictor) and the entity
+  position embedding (`MapFourier`, from map units instead of fractions of the playable area).
+- d 128 everywhere, 4 heads of 32 (`--head_dim` now defaults to 32).
+- Tests: `tests/test_dense_window.py` (the attention block vs a dense masked softmax: 5e-7;
+  gradients 2e-7).
+- Encoder alone, 16 frames, activation checkpointing: forward 0.13 s, forward + backward 0.81 s,
+  5.3 GB (after a one-time ~15 s compile).
+
+**Fine-scale passage evaluation** (`train_direct.tight_units`): moving army ground units whose
+body is within 1 map unit of unpathable terrain (a distance map per game) or a structure's
+edge, split by radius (`pos err tight sm`: < 0.5, zerglings and marines; `pos err tight lg`:
+>= 0.75, tanks, archons, ultralisks). Gaps formed by units holding a position (a stalker in a
+wall) aren't flagged yet.
+
+**Step time** (`train_direct.py`, 16 frames x 2 horizons, the same 100 steps and data):
+
+| encoder | s/step (steps 50-100) | peak memory |
+|---|---|---|
+| pyramid (sparse local attention) | 5.27 | 27.3 GB |
+| pyramid, its blocks compiled | 4.13 | 20.0 GB |
+| dense, learned pair-bias network in the kernel | 3.7-3.9 | 13.8 GB |
+| dense, pair bias as 2 per-query strengths | 2.1 | 13.7 GB |
+| **dense, no pair bias, everything compiled (default)** | **0.74** | **13.4 GB** |
+
+Everything compilable is compiled by default (`--no_compile` turns it off): the encoder's ResNet,
+downsample and attention blocks, the predictor, posterior, prior, probes and the enemy-intent
+pooling. The first ~25 steps include compilation (~5 s/step). Without activation checkpointing
+the step runs out of memory (32 GB). `--profile N` prints one step's GPU time by kernel; at
+2.1 s/step the attention backward was 41% and its forward (run twice under checkpointing) 20%.
+
+## Latent dynamics model (`--model latent`, worldmodel/latent_dynamics.py, 2026-11-01)
+
+The design is in `DESIGN_latent_dynamics.md`; this is what's built (everything except the
+engine-command teacher, which waits for the per-loop re-extraction):
+
+- **Residual dynamics in the encoder's space:** `ŝ_{t+k} = s_t + h(s_t, k) + g(s_t + h, A, z)`.
+  h (`PassiveDynamics`, `--h_depth 4`): self-attention over the state tokens with the encoder's
+  rotary angles, conditioned on the horizon. g (`ActionDynamics`, `--g_depth 2`): the state tokens
+  attend to the replay action tokens and the players' z tokens (queries only; actions never read
+  the state). Both end in zero-initialized projections: a fresh model predicts persistence.
+- **Targets:** every present token's counterpart in the encoding of frame t+k (globals by
+  position, units by id via `fut_row`, cells by grid position; effects have none), stop-gradient,
+  from the online encoder (`--target online`, the default) or a moving-average copy
+  (`--target ema`, `--ema_tau 0.996`). VICReg and stop-gradient already guard against collapse;
+  the moving average adds stability if it's needed. Either way the future frame is encoded
+  without a backward pass.
+- **Losses:** latent prediction (per-token MSE, `--w_lat`), VICReg on s_t (variance floor 1,
+  off-diagonal covariance; `--w_var`, `--w_cov`), decorrelation of g's delta from h's delta and
+  from s_t (cross-correlation to zero, `--w_dec`), a floor on g's spread over samples with
+  commands (`--g_floor 0.05`, `--w_gvar`; g = 0 is trivially uncorrelated), Barlow Twins between
+  the posterior's z and the players' command summaries (`--w_inv`, `--inv_off`), the KL.
+- **Probes** decode ŝ_{t+k}'s unit tokens on detached features, so the evaluation tables still
+  read positions, orders and deaths against persistence; `--probe_weight w` lets a share w of the
+  probes' gradient reach the latent (the "small decoder weight" escape hatch; the probes still
+  train at full strength). The train-vs-validation loss is the
+  latent loss.
+- **Speed:** 0.52 s/step at 16 frames x 4 horizons, 10.7 GB (the direct model: 1.15 s, 24 GB).
+- **Watch for:** collapse in time rather than across tokens. VICReg keeps tokens distinct but
+  doesn't stop the encoder from encoding only what doesn't change (type, owner, terrain), which
+  makes persistence a perfect latent prediction. The detached probes show it: position errors at
+  or above persistence while the latent loss looks small. Remedies: `--probe_weight` at a low
+  value (0.05-0.1), or a variance floor on the temporal differences s_{t+k} − s_t.
+
+**Latent model, runs of 2026-11-01** (all 16 frames x 4 horizons, same seed and data order):
+
+1. Plain latent model: latent loss flat at ~0.02 from step 25; probes at persistence. Read at
+   the time as collapse in time; see 3: the probes couldn't have done better.
+2. `--w_dinv 1` with yes/no targets (moved, touched, order changed, new order) from the latent
+   change Δ = s_{t+k} − s_t only, with gradient through the future encoding (~1.0 s/step, 24 GB):
+   the latent change rose (0.03 → 0.09-0.17), the dynamics beat persistence in latent space
+   (latent loss / change ≈ 0.6), but the probes stayed at persistence.
+3. **The probes were mis-posed.** Their targets are changes from t (dx, dy, ΔHP, ...), but they
+   read only the future token, which doesn't say where the unit is now: the best they could do
+   was "no change", i.e. persistence. Probes on the true future latent were at persistence too,
+   while the Δ inverse head decoded displacement from the latent change with a low loss. Fix:
+   the probes read [future token, present token] (`probe_in`, `probe_true_in`).
+4. Displacement as **Barlow Twins** between the latent change and the unit's raw feature change
+   (position as a fraction of the playable area + the 49 entity numbers, which are fractions,
+   logs and /max by construction, so no batch scaling; `--w_dbar 0.05`,
+   `--dbar_off`), instead of regressing dx, dy: every attribute that changed, aligned without
+   decoding it.
+
+Diagnostics logged every 25 steps: `chg` (how much the latent changes from t to t+k: persistence's
+error in latent space) and `ratio` (latent loss / chg; below 1: the dynamics beat persistence in
+latent space). Evaluation row `pos mv truelat`: moving-unit position error read from the true
+future latent (with the present token), against the predicted one in `pos err moving`.
+5. Run 4 at step 2,000 (held-out maps, moving units vs persistence): predicted latent −33% at
+   16 loops, −13% at 56 (the true latent: −45%, −29%), but worse than persistence at 4 loops
+   after being −31% at step 1,000 (the true-latent probes too); likely the representation
+   drifting under detached probes, worst where changes are tiny. z unused (KL ~0.1, flat over
+   horizons).
+
+**Categorical z** (`--z categorical`, now the default; latent.py `cat_*`, `CategoricalPrior`):
+32 one-hot variables of 32 classes per (sample, player) (~2^160 states; the design discussed
+earlier, which the Gaussian z had stood in for). Straight-through samples, 1% uniform mixed into
+both distributions (`--unimix`), DreamerV3's KL balancing with free bits: KL(sg(post) || prior)
+at `--kl_dyn 0.5` trains the prior, KL(post || sg(prior)) at `--kl_rep 0.1` regularizes the
+posterior, each free below `--free_bits 1` nat. Flattened to 1,024 and projected to the z token.
+Evaluation: the posterior's mode, a prior sample, the prior's class probabilities ("mean").
+`--z gauss` keeps the earlier diagonal Gaussian.
+
+**Energy score** (`--es_k K`, `--w_es`): K futures from prior samples (straight-through, so the
+prior learns), scored per token as mean distance to the true future latent minus half the mean
+distance between samples (/ sqrt(d)). A proper scoring rule: averaging two futures (pressing vs
+pulling back) is penalized, and so is a spread that doesn't match the real one. h runs once,
+g K times.
+
+**`--target ema` with `--w_dinv`:** the futures are encoded twice, by the online encoder (with
+gradient, for the Δ head only) and by the moving-average copy (no gradient, for the latent
+targets and the posterior): slowly changing targets against the drift seen in run 4.
+
+**Run 6: categorical z + energy score + moving-average target, 17,000 steps** (`--model latent
+--target ema --w_dinv 1 --z categorical --es_k 4`; 2,000 steps, then resumed to 17,000 on the
+20,000-step cosine; `data/worldmodel/runs/direct_20261101_011415`). ~1.3 s/step, 25 GB.
+
+- Training: latent loss 0.05 (step 500) → 0.017 validation (step 17,000), no train/validation gap.
+  KL held at 0.7-0.9 nats per player throughout (the Gaussian z had ~0.1), higher with commands
+  withheld and for the enemy. Online-probe readings: the predicted latent plateaued from ~step
+  10,000 (−45% at 16 loops, −25% at 56); the true latent kept improving to the end (−49% at 56,
+  −35% at 224 at step 16,000); 4-loop readings swung ±30% between evaluations (probe lag: the
+  probes chase a changing representation, have no horizon input, and 4-loop moves are ~0.7 map
+  units).
+- **Probe refit** (`--eval_only --refit_probes 1000 --val_states 256 --eval_sets unseen-maps`):
+  fresh probes with a horizon input (`probe_hor`, `probe_true_hor`) trained on the frozen
+  step-17,000 model, evaluated on 256 states per horizon. Held-out maps, moving units vs
+  persistence, posterior z:
+
+  | horizon | player views: predicted / true latent | combined view: predicted / true |
+  |---|---|---|
+  | 4 loops | −45% / −53% | −41% / −52% |
+  | 16 loops | −40% / −50% | −37% / −50% |
+  | 56 loops | −19% / −33% | −19% / −33% |
+  | 112 loops | −8% / −30% | −7% / −28% |
+  | 224 loops | −5% / −23% | −4% / −23% |
+
+  Player views, 4 / 16 / 56 loops: commanded units −28% / −17% / −11% (the first model better
+  than persistence on them at every horizon; in the combined view still worse at 4 loops), small
+  units near walls −56% / −44% / −20%, large −17% / −15% / −11%, enemy units −42% / −24% / −7%;
+  orders better than persistence everywhere. The posterior's z beats a prior sample by ~1-3% at
+  16-224 loops. The refit probes were still improving at step 1,000, so the true-latent numbers
+  are likely understated at long horizons.
+- Reading: the encoder holds far more than the dynamics predict (at 56 loops, −33% readable vs
+  −19% predicted; online probes showed −49%), and the dynamics plateaued while the encoder kept
+  improving. The direct model (step 2,000) is still ahead at 16-56 loops (−66%, −42% on 48
+  states). Next lever: the dynamics model (h, g, how z enters), not the representation.
+
+## Grid latent (`--model grid`, worldmodel/grid_latent.py, 2026-11-01)
+
+Design: `DESIGN_grid_latent.md`. The latent is now a fixed 16 x 16 grid (plus CLS and players)
+on every map, not one token per entity: the dense encoder's entity / effect tokens and its
+2-map-unit cells are scattered onto the grid (playable area centered, scaled by its longest side)
+and pooled per latent cell by attention with each token's offset from the cell center; 4
+transformer blocks mix the 259 tokens. The h / g dynamics, EMA target, categorical z and energy
+score run on them unchanged, with a latent loss on every token.
+
+Entities come back through a decoder (0.1 of its gradient reaches the latent): Poisson counts per
+(cell, owner, type), one query per counted entity (cell vector + class + slot in its group),
+readouts of the offset in the cell, the entity numbers and the order, paired with the truth
+within each (cell, owner, type) group by y offset (order-free, on the GPU). Second-moment losses
+(latent cells, decoded entities vs the target's entity tokens, entities x cells) at 0.1.
+Evaluation decodes ŝ_{t+k} (model), the target latent (what the latent holds) and compares with
+persistence; it also reports the position error under a global Hungarian assignment, the
+cell-border mismatch.
+
+Occupancy that set the decoder (150 player views, every 16th frame): 261 entities per frame
+(median; 623 max). At 16 x 16 (8.8 map units per cell) 68% of cells are empty, a non-empty cell
+holds 2 / 7 / 21 / 98 entities (p50 / p90 / p99 / max); at 32 x 32, 1 / 4 / 10 / 50.
+
+Also: `torch._dynamo.config.recompile_limit` raised to 64. The dense blocks see float32 and
+bfloat16 inputs, with and without gradient, at several shapes, and past the default 8 variants
+dynamo had been running the rest uncompiled in every earlier run. Compile errors (an inductor
+tiling assertion on rare shapes) now fall back to eager instead of crashing.
+
+Smoke run (100 steps, 16 frames x 4 horizons): ~0.5 s/step (the per-entity latent model ~1.15),
+11.9 GB. Run: `grid16_20261101_1019`, 20,000 steps, evaluation every 1,000.
+
+Result of `grid16_20261101_1019` (stopped at step 4,525): collapse in time. The latent's change
+t → t+k fell 0.42 → 0.027 and the latent ratio rose 0.50 → 2.5 (worse than copying the present);
+on held-out maps (step 2,000) decoding the true latent placed entities within ~2.5 map units
+(moving units 2.1 vs persistence 0.7 at 4 loops) with a count error of ~170-180 per frame against
+~260 entities; z unused (posterior = prior, commands given = withheld). The cell-border gap was
+small (in-cell pairing 2.54 vs global Hungarian 2.45 map units).
+
+Restart `grid16_inv_20261101_1108`: the posterior becomes the inverse of the action delta (from
+E_online(s_{t+k}) − E(s_t) − sg(h) only, Barlow-aligned with the action encoder), h trains alone on
+withheld samples, decoder gradient unchanged (0.1). See DESIGN_grid_latent.md, "The inverse".
+
+`grid16_inv_20261101_1108` (stopped at step 2,250): the same collapse (latent ratio 1.8 on held-out
+maps at step 1,000; true-latent decode ~2.8 map units, count error ~300 per frame), and the
+inverse's Barlow term stuck at ~64, no correlation: only ~43 pairs per batch for a 64-dimension
+Barlow at weight 0.05. Restart `grid16_vic_20261101_1214`: VICReg pairing (32 dims, weight 1),
+action windows always built in full (withholding is a mask on g and the prior, so every sample is
+a pair), the enemy's commands as targets in player views, a queue of 8 batches for the pairing's
+statistics. Training windows are now full in every mode (has_act masks them everywhere they were
+read); evaluation still builds empty windows for "withheld".

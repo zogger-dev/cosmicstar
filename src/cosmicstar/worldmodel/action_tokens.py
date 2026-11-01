@@ -214,6 +214,11 @@ class GameActions:
             if m.any():
                 rows[m] = fr.rows_of(int(ff), uids[m])
                 miss = m & (rows < 0)
+                alias = getattr(fr, "alias", None)  # the combined view: the same unit in the other player's view
+                if miss.any() and alias is not None:
+                    al = np.where(uids[miss] < len(alias), alias[np.clip(uids[miss], 0, len(alias) - 1)], -1)
+                    rows[miss] = np.where(al >= 0, fr.rows_of(int(ff), np.maximum(al, 0)), -1)
+                    miss = m & (rows < 0)
                 if miss.any() and ff + 1 < len(fr):
                     rows[miss] = fr.rows_of(int(ff) + 1, uids[miss])
         return rows
@@ -288,12 +293,12 @@ class GameActions:
             act_rsnap=tk["snap_raw"][idx].astype(np.int64),
             act_xy=np.where(has_xy[:, None], fr.normalize_xy(np.nan_to_num(xy)), 0).astype(np.float32),
             act_num=num,
-            act_t=((loops - t_loop) / 22.4).astype(np.float32),
+            act_t=(loops - t_loop).astype(np.float32),  # game loops relative to the present
             act_seg=(np.searchsorted(bounds, loops, side="right") - 1).astype(np.int64),
             act_player=np.array([slot_index.get(int(s), 0) for s in tk["player"][idx]], np.int64),
             act_tgt_ok=tok_ok,
             # one summary per (segment, player): when each segment starts, who the players are
-            seg_t=((np.asarray(bounds) - t_loop) / 22.4).astype(np.float32),
+            seg_t=(np.asarray(bounds) - t_loop).astype(np.float32),  # game loops
             sum_team=np.array([owners[s][0] for s in summarized], np.int64),
             sum_pcode=np.array([owners[s][1] for s in summarized], np.int64),
             ruleset=fr.meta.get("ruleset", ""),
@@ -312,7 +317,7 @@ def self_family(avocab, links, link):
 
 ACT_KEYS = ("kind", "family", "button", "tkind", "group", "gop", "remove", "team", "pcode", "rteam",
             "rpcode", "snap", "rsnap", "xy", "num", "t", "seg", "player", "tgt_ok")
-ENT_KEYS = ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "num", "groups")
+ENT_KEYS = ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "pos", "num", "groups")
 
 
 def collate_actions(windows):

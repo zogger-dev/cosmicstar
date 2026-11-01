@@ -7,7 +7,7 @@ by an MLP into d:
     actor (team + player code), recipient (trades), point (map position),
     target unit (pointer: the state encoder's embedding of that unit's state),
     snapshot type (fogged targets), selected units (mean of their state embeddings),
-    numbers (presses, counts, amounts, flags), time relative to the sample's present
+    numbers (presses, counts, amounts, flags), time relative to the sample's present (game loops)
 
 Owner codes, positions and unit embeddings are the state encoder's own tables, so a player
 code, a map position or a unit means the same thing in actions and in states.
@@ -31,21 +31,26 @@ from .action_tokens import C_ACTION, N_ACT_KINDS, N_GROUP_OPS, N_GROUPS, N_REMOV
 from .encoder import mlp
 
 
-class RelTime(nn.Module):
-    """Seconds relative to the present (past < 0 < future) -> sin/cos from 0.25 s to ~1 min,
-    plus the signed value: action timing matters at the scale of a fraction of a second."""
+class LoopTime(nn.Module):
+    """Game loops relative to the present (past < 0 < future; 22.4 loops per second) -> sin/cos
+    at periods from 2 loops to 2048 loops (~0.09 s to ~1.5 min, geometric), plus the signed
+    value scaled by the longest horizon (56 loops = 2.5 s). Every time the model reads (action
+    times, segment bounds, horizons) is in loops, the game's own clock, independent of the
+    extraction's frame step."""
 
-    def __init__(self, n_periods=8, shortest=0.25, longest=64.0):
+    def __init__(self, n_periods=10, shortest=2.0, longest=2048.0, scale=56.0):
         super().__init__()
         periods = torch.logspace(math.log10(shortest), math.log10(longest), n_periods)
         self.register_buffer("omega", 2 * math.pi / periods, persistent=False)
+        self.scale = scale
 
     def out_dim(self):
         return 2 * len(self.omega) + 1
 
     def forward(self, t):
+        t = t.float()
         a = t[..., None] * self.omega
-        return torch.cat([a.sin(), a.cos(), (t / 30.0)[..., None]], -1)
+        return torch.cat([a.sin(), a.cos(), (t / self.scale)[..., None]], -1)
 
 
 class ActionEncoder(nn.Module):
@@ -63,7 +68,7 @@ class ActionEncoder(nn.Module):
         self.gop = nn.Embedding(N_GROUP_OPS, d, padding_idx=0)
         self.remove = nn.Embedding(N_REMOVE, d, padding_idx=0)
         self.num = mlp(C_ACTION, d)
-        self.time = RelTime()
+        self.time = LoopTime()
         self.time_in = mlp(self.time.out_dim(), d)
         self.fuse = mlp(self.N_PARTS * d, d, 2 * d)
         self.start = nn.Parameter(torch.zeros(1, 1, d))  # always-present first token
@@ -114,10 +119,10 @@ class ActionEncoder(nn.Module):
         ]
         return self.fuse(torch.cat(parts, -1))
 
-    def forward(self, b, ahead=None, horizon_s=None):
+    def forward(self, b, ahead=None, horizon_loops=None):
         """Returns summaries [B, S, P, d], their mask [B, S, P] (real players) and the
-        contextualized tokens [B, N, d]. horizon_s [B]: the summarized interval's length in
-        seconds, when it varies between batches.
+        contextualized tokens [B, N, d]. horizon_loops [B]: the summarized interval's length in
+        game loops, when it varies between samples.
 
         ahead (in segments): instead of one summary per segment, one per (frame, player) over
         the `ahead` segments that follow the frame, i.e. the actions in the interval the
@@ -137,8 +142,8 @@ class ActionEncoder(nn.Module):
             S -= ahead
         q = (self.sum_query + self.sum_time(self.time(b["seg_t"][:, :S]))[:, :, None]
              + (se.team(b["sum_team"]) + se.pcode(b["sum_pcode"]))[:, None])  # [B, S, P, d]
-        if horizon_s is not None:
-            q = q + self.hor_time(self.time(horizon_s))[:, None, None]
+        if horizon_loops is not None:
+            q = q + self.hor_time(self.time(horizon_loops))[:, None, None]
         q = q.reshape(B, S * P, d)
         kv_src = torch.cat([self.nothing.expand(B, -1, -1).to(h.dtype), h], 1)
         seg = torch.arange(S, device=x.device).repeat_interleave(P)          # query -> segment

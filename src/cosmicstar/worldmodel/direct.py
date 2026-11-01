@@ -1,5 +1,5 @@
 """Direct state-space prediction: the state at t (+ the commands in [t, t+k)) -> each entity's
-state at t+k, read by probes, for every horizon k up to a few seconds.
+state at t+k, read by probes, for every horizon k (in game loops) up to 56 loops (2.5 s).
 
 Why not JEPA at this level: SC2 state is already an abstraction (a list of entities with exact
 attributes), so regressing it wastes no capacity on unpredictable detail, needs no target
@@ -13,7 +13,7 @@ Pieces (scripts/train_direct.py wires them):
     RoPEEncoder       the state encoder's token embedding (entities, players, CLS) under
                       self-attention with 2D rotary positions in map units, so a score depends
                       on the offset between two things, with sign (north of me != south of me)
-    DirectPredictor   the encoded present + a horizon embedding + z, through blocks of
+    DirectPredictor   the encoded present + a horizon embedding (k in loops) + z, through blocks of
                       self-attention (RoPE) and cross-attention to the window's action tokens
                       (the action encoder's causal transformer), so the entities read what was
                       done to them
@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .action_encoder import RelTime
+from .action_encoder import LoopTime
 from .encoder import StateEncoder, mlp
 from .latent import LV_MIN
 
@@ -176,18 +176,18 @@ class DirectPredictor(nn.Module):
     def __init__(self, d=256, depth=4, heads=8, mlp_ratio=4.0):
         super().__init__()
         self.rope = RoPE2D(d // heads)
-        self.time = RelTime()
+        self.time = LoopTime()
         self.hor_in = mlp(self.time.out_dim(), d)
         self.null = nn.Parameter(torch.zeros(1, 1, d))  # always-present memory token: "no commands"
         self.layers = nn.ModuleList([Block(d, heads, self.rope, mlp_ratio, cross=True) for _ in range(depth)])
         self.norm = nn.LayerNorm(d)
         nn.init.normal_(self.null, std=0.02)
 
-    def forward(self, x, mask, ang, hor_s, mem, mem_mask):
-        """x [B, T, d], mask [B, T], ang [B, T, dh/2], hor_s [B] seconds, mem [B, N, d] action
+    def forward(self, x, mask, ang, hor_loops, mem, mem_mask):
+        """x [B, T, d], mask [B, T], ang [B, T, dh/2], hor_loops [B] game loops, mem [B, N, d] action
         tokens with mem_mask [B, N] (False everywhere when commands are withheld)."""
         B = x.shape[0]
-        x = x + self.hor_in(self.time(hor_s))[:, None].to(x.dtype)
+        x = x + self.hor_in(self.time(hor_loops))[:, None].to(x.dtype)
         mem = torch.cat([self.null.expand(B, -1, -1).to(mem.dtype), mem], 1)
         mem_mask = torch.cat([torch.ones(B, 1, dtype=torch.bool, device=x.device), mem_mask], 1)
         for layer in self.layers:

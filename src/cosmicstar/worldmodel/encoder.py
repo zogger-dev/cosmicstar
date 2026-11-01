@@ -69,6 +69,23 @@ def mlp(d_in, d, hidden=None):
     return nn.Sequential(nn.Linear(d_in, hidden), nn.GELU(), nn.Linear(hidden, d))
 
 
+class MapFourier(nn.Module):
+    """sin/cos features of map-unit coordinates at octave wavelengths from `shortest` to
+    `longest` map units: the same physical scale on every map."""
+
+    def __init__(self, shortest=0.125, longest=512.0):
+        super().__init__()
+        n = int(round(math.log2(longest / shortest))) + 1
+        self.register_buffer("freqs", 2 * math.pi / (shortest * 2.0 ** torch.arange(n)), persistent=False)
+
+    def out_dim(self, d_in):
+        return d_in * 2 * len(self.freqs)
+
+    def forward(self, x):
+        a = x.float()[..., None] * self.freqs
+        return torch.cat([a.sin(), a.cos()], -1).flatten(-2)
+
+
 class PositionEncoder(nn.Module):
     """Map position (normalized to [-1, 1]) -> d. Shared by entities and readout queries."""
 
@@ -163,10 +180,14 @@ class StateEncoder(nn.Module):
     def owner(self, b, g):
         return self.team(b[f"{g}_team"]) + self.pcode(b[f"{g}_pcode"]) + self.rel(b[f"{g}_rel"])
 
+    def place(self, b, g):
+        """A token's position embedding (subclasses may read map units, <g>_pos, instead)."""
+        return self.pos(b[f"{g}_xy"])
+
     def entity_tokens(self, b, g="ent"):
         """Input embedding of entities from their features (tokenize.entity_features). Also
         used by the action encoder for the units an action points at."""
-        tok = (self.unit(b[f"{g}_type"]) + self.owner(b, g) + self.pos(b[f"{g}_xy"])
+        tok = (self.unit(b[f"{g}_type"]) + self.owner(b, g) + self.place(b, g)
                + self.ent_in(b[f"{g}_num"]) + self.ability(b[f"{g}_produce"]) + self.grp_in(b[f"{g}_groups"]))
         if self.use_orders:  # off for checkpoints trained before orders were extracted
             tok = tok + self.ability(b[f"{g}_order"]) + self.ord_in(b[f"{g}_ord"])
