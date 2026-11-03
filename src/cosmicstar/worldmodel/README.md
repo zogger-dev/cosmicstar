@@ -1902,3 +1902,135 @@ action windows always built in full (withholding is a mask on g and the prior, s
 a pair), the enemy's commands as targets in player views, a queue of 8 batches for the pairing's
 statistics. Training windows are now full in every mode (has_act masks them everywhere they were
 read); evaluation still builds empty windows for "withheld".
+
+`grid16_vic_20261101_1214` (stopped at step ~1,000): the VICReg pairing didn't move either (flat at
+~1.9) though the inverse gets ~140 pairs per batch; collapse as before (latent ratio 2.0-2.4 on
+held-out maps). Rollout training built (`--seq_len 14`, steps of 4 / 8 / 12 / 16 loops, open-loop
+loss, `--g_self`), smoke-tested, parked.
+
+## Grid latent pretraining (`scripts/train_ae.py`, 2026-11-01)
+
+Encoder and decoders alone: one frame -> grid latent -> the whole frame back (entities, map layers
+at 1 map unit, players' numbers and upgrades), gradients fully on, no dynamics. The test of whether a
+16 x 16 x 128 latent can hold the game state. Run `ae16_20261101_1254`: 64 frames per batch, 20,000
+steps, ~0.9 s/step, 20 GB. Code committed before it as 2fec194 (branch `grid-latent`).
+
+`ae16_20261101_1254` (stopped at step 3,425): training losses fell fast, but unseen maps stalled
+(median position error 2.30, count recall 0.36 at step 3,000) while seen games were at 1.09 by step
+1,000. Restart `ae16v2_20261101_1347`: no counts, (cell, slot) queries with type and owner decoded,
+numbers by kind, the order queue (4 slots), all 11 map channels, uncertainty weighting, batches of
+moments in all three views, and the decomposition check (player latents from the combined latent).
+See DESIGN_grid_latent.md, "Pretraining".
+
+v3 `ae16v3_20261101_1412` (v2 stopped at step 1,475): 8-slot order queue plus its length, 8-slot
+production queue, the container pointer, a per-cell entity count in the loss, on_map / playable out
+of the map loss.
+
+v4 `ae16v4_20261101_1435` (v3 stopped at step ~1,300): class-balanced losses for the order and
+production queues, the container pointer and the binary flags (v3 had production at 0.000, containers
+at 0.005 and the rare flags at F1 0 on unseen maps at step 1,000, all predicting the majority class).
+
+v5 `ae16v5_20261101_1504` (v4 stopped at step ~1,700): class-balanced cross entropy for display /
+cloak / inside (their 0.98-0.99 accuracy was the majority class: cloaked / detected are ~1 row in
+1,000), per-state recall in evaluation, type balanced accuracy.
+
+## Add-on captures: a test set to extract (2026-11-01)
+
+A Terran add-on can change player owner (the other Terran lands on an abandoned one). None of the
+extracted games has one; the tracker events (`SUnitOwnerChangeEvent`) of all 946 TvT games in the
+replay packs (18,162 replays) record exactly 4, every one an add-on, all 3.5-5 min in. To be
+extracted later as a test set (kept out of training):
+
+| pack (`data/replays/`) | game | owner changes |
+|---|---|---|
+| `2021_03-DH_SC2_Masters_Fall.zip` | Ro8, MarineLorD vs Clem G1, Lightshade LE | FactoryTechLab → p1 at 4.83 min |
+| `2022_02-DH_SC2_Masters_Valencia_2022.zip` | Ro16, Clem vs SpeCial G1, Cosmic Sapphire | BarracksTechLab → p1 at 3.93, → p2 at 4.10 min |
+| `2024_02-ESL_SC2_Masters_Spring_2024_Online.zip` | EU groups, Milkicow vs Clem G2, Crimson Court | BarracksReactor → p2 at 3.67, → p1 at 4.42 min |
+| `HSC XIII Replay Pack.zip` | group A, uThermal vs Cure, Lost and Found LE | BarracksReactor → p1 at 4.05 min |
+
+Archive member paths:
+- `2 - Fall/4 - Europe/Main Event/Playoffs/4 - Ro8 #4 - MarineLorD vs Clem/20210810 - GAME 1 - MarineLorD vs Clem - T vs T - Lightshade LE.SC2Replay`
+- `DH SC2 Masters - Valencia 2022 Festival/Playoffs/9 - Ro16 #1 - Clem vs SpeCial/20220702 - GAME 1 - Clem vs SpeCial - T vs T - Cosmic Sapphire.SC2Replay`
+- `2024_02-ESL_SC2_Masters_Spring_2024_Online/2 - Europe/1 - Group Stage/A - R1M1 - Clem vs Milkicow/20240410 - Game 2 - Milkicow vs Clem - TvT - Crimson Court.SC2Replay`
+- `HSC XIII Replay Pack/Day 1/Group A/uThermal vs. Cure/Lost and Found LE.SC2Replay`
+
+Note (2026-11-01, deferred): during a Neural Parasite the raw API reports the **controller** as the
+unit's owner (8 extracted views: an Archon / Carrier shows the Zerg player while it carries buff 22
+NeuralParasite, its own player before and after). The real owner is not a unit field; only the buff
+and history mark the transfer as temporary. The tracker's `SUnitOwnerChangeEvent` has both the control
+and the upkeep player (Neural changes control only). Judged trivially learnable (the buff is an
+input); if it ever matters, extract the upkeep owner and decode it with a neural flag / the buffs.
+
+## Frame cache (`worldmodel/frame_cache.py`, `scripts/build_frame_cache.py`, 2026-11-01)
+
+The pretraining run held 12 rotating games plus 6 evaluation games in RAM, each with its three views
+(~146k view-frames in the pool, ~2.3 GB per game), and the process grew to ~47 GB and was OOM-killed
+at step 6,800 of v5 (checkpoint at step 6,000 kept). Every batch also drew from only those 12 games,
+and the training split has only 14 maps.
+
+A state file can't be read frame by frame (delta-coded units, XOR'd maps) and part of a frame comes
+from whole-game preprocessing, so the cache is built once: each game is loaded with its three views,
+80 moments are chosen while it's decoded (one per equal slice of the game, jittered), and each
+moment's frame is written in all three views with fixed player codes (the player's index, 0 or 1).
+The reader swaps the two players at random per sample, every frame and view alike; collation then
+splits the map into static layers and one row per player view (`DESIGN_grid_latent.md`, "Player
+identity and map views"). ~30 KB per moment compressed (all three
+views), ~2.5 MB per game; reading 21 moments takes ~10 ms and batching ~10 ms (building frames from
+whole games took 0.3-0.8 s per batch). Layout: `<root>/vocab.json`, `<root>/<split>/<game id>.fcache`.
+
+Built: 629 games, 50,320 moments (150,960 frames), 1.5 GB, 7 minutes with 6 workers. Splits as
+directories: train 448 games (14 maps), held_out_games 23, held_out_map_games 158 (7 maps). v6
+`ae16v6_20261101_1657` trains from it (0.85 s/step, 20 GB GPU, RAM ~a few GB), with a train /
+validation loss every 100 steps on the held-out games and held-out maps.
+
+## Rare-state evaluation set (2026-11-01)
+
+Random evaluation frames rarely hold the rare entity states, so their F1 swung on a handful of units
+(blip F1 0-0.17). Measured in the training cache: blips are 0.025% of entities, in 0.6% of player
+view-frames (~11 blips each when present); in raw data 7 of 8 sampled Terran views with a sensor
+tower have them. Training sees ~3 blip entities per batch, which the balanced flag loss weighs fully,
+so this was an evaluation problem. `scripts/build_rare_eval.py` picks 270 fixed held-out frames
+(held-out games and maps) containing each state: blip (310 units), cloaked (325), burrowed (1,710),
+hallucination (58), engaged (1,400), has add-on (931), cloak cloaked (66) / detected (86), passenger
+(472), in gas (1,493), display hidden (909), units with a container (2,896). `train_ae.py` reports each
+state's recall / precision / F1 on them at every evaluation (`worldmodel/rare_eval.py`);
+`--eval_ckpt <model_latest.pt>` evaluates a saved model once.
+
+First reading, v6's step-6,000 checkpoint (`--eval_ckpt`): every rare state had recall 0.95-1.00 (blip
+1.00, cloaked 1.00, hallucination 0.98, detected 0.95, passenger 1.00) but precision 0.08-0.37: the
+fully balanced losses (mean over positives + mean over negatives) train as if each state were present
+half the time, so the decoder over-predicts them. Container pointer 0.41. Change: class weights
+count ** -0.5 (square root; `--balance_power`, 1 = fully balanced, 0 = plain mean) in every balanced
+loss (queues, container pointer, flags, categoricals); at 1% positives they carry ~10% of the weight
+instead of 50%. v6 resumed from step 6,000 with it (`--resume`), same run directory and logs.
+
+### Window cache (2026-11-01)
+
+v6 at step 7,000 began to overfit the 80-moment cache: validation losses split (train 1.87, held-out
+games 2.43, held-out maps 3.55; level at step 4,000), and vision / creep IoU reached 0.78 / 0.67 on
+the cached training moments but 0.22 / 0.11-0.21 on held-out games of the same maps (each of the 35,840
+training moments had been seen ~4 times). Rebuilt as windows for dynamics too: 300 windows per game,
+each 15 consecutive frames (a moment and the 14 after it: 56 game loops, 2.5 s at the 4-loop frame
+step, the rollout mode's Δ = 4 x 14 steps; longer horizons to come from a hierarchical level), every
+frame in all three views, compressed per window (5.8 KB per view-frame, ~78 MB per game, ~49 GB for
+629 games, ~23 s per game to build). One code permutation per sampled window. `FrameCache.sample`
+draws a random frame of a random window (encoder pretraining); `sample_windows` returns whole windows
+(dynamics). Directory: `data/worldmodel/frame_cache_seq`.
+
+The first full build crashed the machine (6 workers, every uncompressed frame of a game held until
+the write). The builder now compresses each window as it's built. One worker peaks at 13.6 GB on the
+largest games (state files vary 5-10x). A second attempt at 4 workers hit a 35 GB `systemd-run` cap in
+2 minutes (the cap held; the machine was untouched): a GameSet's views reference each other, so a
+finished game lived on until the cycle collector ran, under the next one. Each job now ends with
+`gc.collect()` and `malloc_trim`: 10.7 GB worst case per worker; 3 workers can't exceed the cap.
+
+Built: 629 games, 188,700 windows, 8.5M view-frames, 43 GB, 17 minutes for the last 409 games at 12
+workers (38 GB, under a 56 GB cap; the earlier 3-worker estimate guarded against an all-largest case
+that doesn't happen). v6 resumed from step 8,000 on it (`--cache data/worldmodel/frame_cache_seq`).
+
+## Fixed map pyramid (`worldmodel/quad_latent.py`, 2026-11-01)
+
+`scripts/train_ae.py` now encodes with `QuadEncoder`: one grid from 128 x 128 norm tokens down to the 16 x 16
+latent, real map cells and entities attending in sliding 4 x 4 windows, full attention at the latent's level.
+`GridEncoder` remains for the parked `train_direct.py --model grid`. Earlier pretraining checkpoints don't
+load. See `DESIGN_grid_latent.md`, "Fixed pyramid".

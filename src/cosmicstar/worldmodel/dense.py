@@ -195,7 +195,7 @@ class DenseEncoder(PyramidEncoder):
         pad_e = n0 - g0 - ne
         origin = b["grid_origin"] - b["center"]          # world (0, 0) of the canvas, in playable-centered units
         grid = b["grid"]
-        on_map = grid[:, ON_MAP:ON_MAP + 1] > 0
+        on_map = (b["on_map"] if "on_map" in b else grid[:, ON_MAP:ON_MAP + 1]) > 0
         # cells outside the frame's own (cropped) map are zeroed after every map step, so what a
         # frame computes never depends on how much padding its batch-mates added
         own = lambda s_: ((F.max_pool2d(on_map.float(), s_, s_) if s_ > 1 else on_map.float()) > 0).to(grid.dtype)

@@ -123,6 +123,166 @@ averaged, slow latent, and g / the inverse see one summary of up to 10 s of comm
   from Δ = 4; 112 from 8; 168 from 12; 224 from 16), z from the posterior or sampled from the prior
   on the predicted latent; same columns (model, true latent, persistence).
 
+## Pretraining (2026-11-01, `scripts/train_ae.py`, run `ae16_20261101_1254`)
+
+The grid runs stacked dynamics, z, the inverse and anti-collapse terms on a latent nobody had shown
+can hold the game, and all collapsed. Step back: train the encoder and the decoders alone, one frame
+in, the same frame out, gradients fully on. If it trains, a latent exists that holds the whole state
+in a decodable form; the dynamics come after, on a pretrained encoder.
+
+- Encoder: GridEncoder unchanged (16 x 16 x 128 + CLS and players).
+- Decoders: entities (counts per (cell, owner, type), one query per entity: offset, numbers,
+  order; order-free matching); map layers at 1 map unit (MapDecoder: each real cell from its latent
+  cell's vector and its offset; visible / seen / creep per player, pathable, placeable, height; 4,096
+  sampled cells per frame in training); players' numbers and upgrades from their tokens.
+- Not decoded yet: order queues beyond the current order, production, buffs, effects.
+- 64 frames per batch (a third from the combined view), 20,000 steps, ~0.9 s/step, 20 GB.
+- Evaluation: matched position error (mean, median, share within 0.5 map units), count precision /
+  recall from the predicted counts, count error per frame, HP, numbers, orders, map IoU per layer,
+  height, player numbers, upgrades; per (set, view).
+
+The rollout mode (`--seq_len`) is built and smoke-tested, parked until the encoder is pretrained.
+
+**v2 (run `ae16v2_20261101_1347`).** `ae16_20261101_1254` (stopped at step 3,425) was decoding with
+counts and type-given queries; on unseen maps it stalled (median position error 2.3 map units,
+count recall falling 0.49 -> 0.36 by step 3,000) while seen games reached 1.1 at step 1,000.
+Changes:
+- No counts. Queries are (cell, slot) only, one per true entity; type (CE over the unit vocabulary)
+  and owner (neutral / player 0 / 1) are decoded; matching within each cell by y offset.
+- The 49 entity numbers by kind: 27 continuous (smooth L1), 13 binary flags (BCE), 3 categorical
+  groups (display, cloak, inside; CE with a "none" class).
+- The order queue: the first 4 orders per entity (ability, with an "empty" class; target offset;
+  targets a unit; progress), replacing the single current order.
+- All 11 map channels (10 BCE, height MSE).
+- Loss groups balanced by learned uncertainty weights (exp(-s) L + s, 14 groups).
+- Batches are moments in all three views (p1, p2, combined; shared player codes), 21 per batch.
+- The decomposition check: a head predicts each player's view latent from the combined view's latent
+  of the same moment (stop-gradient targets; a probe, `--decomp_grad` 0); evaluation reports the
+  unexplained variance against copying the combined latent.
+- Evaluation per attribute: each continuous number's error, each flag's F1, each categorical's
+  accuracy, type / owner accuracy, order queue (order accuracy, length, target error), IoU per map
+  channel.
+
+**v3 (run `ae16v3_20261101_1412`).** v2 stopped at step 1,475 to add:
+- the order queue at 8 slots plus the queue's full length (log; orders can queue up to ~19, rarely;
+  20 sampled views reach 7, p99.9 is 3), and the production queue at 8 slots (ability, progress:
+  a reactored facility's full queue);
+- the container pointer: each entity points to its container (transport, bunker, command center,
+  gas building, an add-on's building) among the frame's queries, or none; cross entropy against the
+  query matched to the true parent's row;
+- a per-cell entity count (0-127, cross entropy) from the latent: in the loss, used to place the
+  queries at inference (training places them from the truth);
+- on_map and playable out of the map loss (structure: on_map is the mask, playable ~1 in the crop).
+19 loss groups under the uncertainty weights. v2's decomposition check at step 1,000: the head
+barely beat copying the combined latent (unexplained 0.26 vs 0.25 on seen games, 0.23 vs 0.30 on
+unseen maps); still a probe.
+
+**v4 (run `ae16v4_20261101_1435`).** v3 at step 1,000 generalized better than v1 (unseen-map median
+position error 1.68 vs 2.33; per-cell count accuracy 0.62 on non-empty cells; type 0.55, owner 0.64)
+and its decomposition probe beat copying (unexplained 0.27 vs 0.51-0.60). But production (0.000 on
+occupied slots), containers (0.005) and the rare flags (flying, burrowed, cloaked, selected, ...: F1
+0) stuck at the majority class: their losses averaged over every entity / slot, where "empty",
+"none" and "false" are almost always right. v4 balances them: the mean over occupied slots / units
+with a container / a flag's positives plus the mean over the rest (order and production queues,
+container pointer, each binary flag).
+
+**v5 (run `ae16v5_20261101_1504`).** v4 at step 1,000 learned what v3 had stuck (unseen maps:
+production 0.74, order queue 0.71, containers 0.26, flying F1 0.41, add-on 0.44, selected 0.35), at
+a small early cost (median position error 1.87 vs 1.68). But the categoricals' 0.98-0.99 accuracy was
+the majority class: cloak is 46% unknown and 53% not cloaked, with cloaked, detected and allied at
+0.04%, 0.06% and 0.004% of rows; inside is ~1% passengers and in-gas workers. v5: the categoricals'
+cross entropy is averaged per class (over the classes present) and then over classes; evaluation
+adds each state's recall and share, and type's balanced accuracy (mean recall over the types
+present). Display only takes visible / snapshot in player views (hidden doesn't occur), so it
+duplicates the snapshot flag.
+
+**v6 (run `ae16v6_20261101_1657`): the frame cache.** v5 reached step 6,800 (unseen maps at step
+5,000: median position 1.68, per-cell count 0.71, type balanced 0.42, production 0.90, containers
+0.40; seen games much better: count 0.95, position 1.03) and was OOM-killed: the in-memory pool (12
+rotating games + 6 evaluation games, three views each) grew to ~47 GB. Batches now come from the frame
+cache (worldmodel/frame_cache.py): all 629 extracted games, 80 moments each in all three views,
+50,320 moments / 150,960 frames / 1.5 GB on disk; train 448 games (14 maps), held out 23 games on the
+training maps and 158 games on 7 maps never trained on. Every batch draws its 21 moments from all 448
+training games instead of 12. Validation every 100 steps: the reconstruction loss on fixed batches
+from the held-out games and the held-out maps, next to the training average. Same model and losses
+as v5; RAM ~a few GB.
+
+### Player identity and map views (2026-11-01, after v6 at step 10,400)
+
+v6's player-view vision and creep scored 0.85-0.88 on seen games and 0.19-0.35 on held-out data, while
+the combined view held 0.76-0.78 everywhere. A player's frame filled `visible_0 / seen_0 / creep_0` or
+the `_1` set by slot, but player codes were random per sample and player tokens carry no position, so
+the encoder wasn't directly told which slot the viewer had. Suspected, not proven: the decoder had to
+pick a set it couldn't know, except by memorising seen games. Why the combined view scored well under
+the same setup wasn't explained.
+
+Changed (the cache stays; all of it happens when reading and collating):
+
+- **Player index:** the player code is the player's index, 0 or 1 (neutral its own), the same in all
+  three views. Team codes are no longer read by the grid encoder; the relation stays. One entity has one
+  owner and one source view, so these stay one-hot.
+- **Swap:** the reader exchanges the two players at random per sample (codes, token order, map layers,
+  all frames and views alike), so an index identifies a player and says nothing else.
+- **Viewer code:** multi-hot, once per frame, on CLS through a bias-free linear layer: `[1,0]`, `[0,1]`,
+  and `[1,1]` for the observer, whose embedding is therefore the sum of the players'.
+- **Map views:** no `_0 / _1` fields past collation. `map_views` splits a batch into the static layers
+  per frame and one row per player view: one in a player's frame, two in a combined frame. The encoder
+  sums the rows it has. One decoder reads a view from a latent cell, an offset and which player; another
+  reads pathable, placeable and height. The map metrics are now `visible`, `seen`, `creep`.
+
+Checkpoints from before this don't load.
+
+### Fixed pyramid (2026-11-01, `worldmodel/quad_latent.py`)
+
+The real-unit pyramid and the 16 x 16 latent were two grids that didn't line up: only level 1's cells were
+scattered, so levels 2-4 reached the latent only through entity and global tokens. Now one grid, by
+halving the map: 128, 64, 32, 16 norm tokens over a square of the longest playable side (132-166 map
+units across the 629 cached games, so a norm cell is 1.03-1.30 units and always holds a real cell). The
+16 x 16 level is the latent.
+
+| Level | Tokens | Attention |
+|---|---|---|
+| 128, 64, 32 | norm + lattice (1, 2, 4 units) + entities, reading the globals | 3 blocks in 4 x 4 windows, the middle block's slid by 2 |
+| 16 | norm + entities + globals | 3 full blocks |
+
+- 3 ResNet blocks on the norm tokens start each level; a 2 x 2 merge (`Down`) ends it. Norm tokens start
+  from their place and the mean of the lattice cells inside them.
+- Square cells: circles stay circles. Lattice cells of the square past the playable area stay tokens with
+  the playable layer false (real terrain inside the cached crop, zeros past it). 9% of the cells on average.
+- Globals read in every window and write through one attention over the level's tokens.
+- Attention is the only way entities reach cells: more entities take more of a joint softmax, so counts are
+  visible (saturating). No summed scatter unless counts stall.
+- Windows are padded by size group, never to the fullest; a large group is split.
+
+Tested against brute force: window membership, one block's output (1e-15, double precision), lattice
+placement. A frame's latent differs by ~0.005 (values up to ~4.6) with other batch-mates, the same as running
+one batch twice: conv rounding, not padding.
+
+Speed: the first version, plain SDPA with the block uncompiled, took 1.49 s/step at 48 frames, a third of it
+in SDPA's backward, and compiling the whole block crashed on fresh batches (checkpoint recompute mismatch).
+Now FlexAttention when training (SDPA without gradient: FlexAttention's no-gradient path doesn't compile inside
+these parts, and the two agree to 5e-7), and the block split into parts that take only tensors (`QuadPre`,
+`WinAttend`, `GlobalAttend`, `QuadPost`), so a window group's size is a dynamic shape. Encoder alone: 0.74 s/step
+and 20.3 GB on fresh batches, with compile errors not suppressed. Left uncompiled because they don't matter:
+window grouping (1.1% of a step; its output shapes depend on the data), token embedding (0.3%), decoder targets (0.1%).
+
+### Hungarian matching (2026-11-02)
+
+Pretraining paired predictions and entities by sorting both on y within a cell. Entities tied in y (26% within
+0.05 units: rows of buildings, mineral lines) got an arbitrary slot, so their x couldn't be learned: at step 8,000
+of `ae_20261101_223407`, x error 1.44 tied against 0.25 not tied, with y fine for both (12 frames, unseen games).
+Passengers and workers in gas sit exactly at their container, so they tie in x as well, and 5% of entities share
+an exact position; no chain of position tie-breakers helps those.
+
+`grid_latent.hungarian` now finds the cheapest pairing over each whole frame, not within cells: a latent cell's edge is
+a line we drew, and a unit just across it shouldn't be scored as a total miss. Cost: position error in map units + cross
+entropy of type and owner + mean error of the numbers. Offset targets are measured from the querying cell's center, so a
+cross-cell pair costs its real error. Slots and true counts still place the queries; they no longer define the pairing.
+Not done yet: soft counts at cell edges, and metrics for how fuzzy the boundaries are. Evaluation uses the same pairing,
+so scores from earlier runs (y-sorted) read lower for the same model. Set accuracy of types per cell (0.90 against 0.85
+paired, same checkpoint) suggests pairing cost type about 6 points; type also falls with crowding (1.00 in a cell of one,
+0.69 in a cell of 16-31), which matching won't fix.
+
 ## Identity
 
 Left out for now. Matching is within a frame only; nothing links a decoded unit at t to t+k.
