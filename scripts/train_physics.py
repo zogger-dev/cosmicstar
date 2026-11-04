@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import queue
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -180,7 +181,8 @@ def main():
     full = {k: fixed_windows(v, args.eval_windows, args.frames) for k, v in {"train": bases, **val_bases}.items()}
     all_bases = {k: v for d in (bases, *val_bases.values()) for k, v in d.items()}
     val_games = Games(all_bases, vocab, avocab, keep=2 * args.val_windows)
-    run = args.run or f"data/worldmodel/runs/physics_{time.strftime('%Y%m%d_%H%M%S')}"
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()   # which code these weights go with
+    run = args.run or f"data/worldmodel/runs/physics_{commit}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     def full_eval(at):
         t = time.time()
@@ -212,7 +214,7 @@ def main():
         del ck
     if not args.measure:
         os.makedirs(run, exist_ok=True)
-        json.dump(vars(args), open(f"{run}/config_from{start}.json" if start else f"{run}/config.json", "w"))
+        json.dump(dict(vars(args), commit=commit), open(f"{run}/config_from{start}.json" if start else f"{run}/config.json", "w"))
     steps = args.measure_steps if args.measure else args.steps
     t0 = time.time()
     for step in range(start, steps):

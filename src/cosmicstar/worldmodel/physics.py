@@ -702,8 +702,9 @@ class Physics(nn.Module):
         at2 = (bi[s2] * F_ + fi[s2] + 1) * R + ri[s2]
         tgt = torch.cat([b["engaged_row"].reshape(-1)[at2][:, None], b["parent_row"].reshape(-1)[at2][:, None], b["ord_row"].reshape(-1, QUEUE)[at2]], 1).long()
         logits = self.head.pointers(p[bi[s2], fi[s2], ri[s2]], rows)
-        logits = logits.masked_fill(~b["mask"][bi[s2], fi[s2]][:, None], -1e4).float()
-        has = tgt >= 0
+        live = b["mask"][bi[s2], fi[s2]]                        # a target not live in this frame can't be pointed at: it would score the mask's -1e4
+        logits = logits.masked_fill(~live[:, None], -1e4).float()
+        has = (tgt >= 0) & live.gather(1, tgt.clamp(min=0))
         pointers = F.cross_entropy(logits[has], tgt[has]) if has.any() else p.sum() * 0
         return queues, abilities, pointers
 
