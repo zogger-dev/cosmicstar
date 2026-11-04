@@ -378,3 +378,63 @@ class WineLinux(platforms.LocalBase):
         if not os.path.exists(exec_path):
             raise sc_process.SC2LaunchError("No SC2 binary found at: %s" % exec_path)
         return WineProcess(self, exec_path=exec_path, version=self.version, **kwargs)
+
+
+def keep_engine_windows_minimized(interval=5.0):
+    """A daemon thread that iconifies each StarCraft II window on the X display for its first two minutes. The client has no
+    headless mode, so every engine otherwise opens a window on the desktop, and it remaps the window while starting, which
+    undoes an early iconify; after that it's left alone, so a window restored by hand stays. Does nothing without X11."""
+    import ctypes
+    import threading
+    from ctypes import POINTER, byref, c_char_p, c_int, c_uint, c_ulong, c_void_p
+    try:
+        x = ctypes.CDLL("libX11.so.6")
+    except OSError:
+        return None
+    x.XOpenDisplay.restype = c_void_p
+    x.XOpenDisplay.argtypes = [c_char_p]
+    x.XDefaultRootWindow.restype = c_ulong
+    x.XDefaultRootWindow.argtypes = [c_void_p]
+    x.XDefaultScreen.argtypes = [c_void_p]
+    x.XQueryTree.argtypes = [c_void_p, c_ulong, POINTER(c_ulong), POINTER(c_ulong), POINTER(POINTER(c_ulong)), POINTER(c_uint)]
+    x.XFetchName.argtypes = [c_void_p, c_ulong, POINTER(c_char_p)]
+    x.XIconifyWindow.argtypes = [c_void_p, c_ulong, c_int]
+    x.XFree.argtypes = [c_void_p]
+    x.XFlush.argtypes = [c_void_p]
+    handler = ctypes.CFUNCTYPE(c_int, c_void_p, c_void_p)(lambda d, e: 0)  # a window closing mid-walk isn't fatal
+    x.XSetErrorHandler(handler)
+    dpy = x.XOpenDisplay(None)
+    if not dpy:
+        return None
+    root = x.XDefaultRootWindow(dpy)
+    screen = x.XDefaultScreen(dpy)
+
+    def children(w):
+        r, p, kids, n = c_ulong(), c_ulong(), POINTER(c_ulong)(), c_uint()
+        if not x.XQueryTree(dpy, w, byref(r), byref(p), byref(kids), byref(n)):
+            return []
+        out = [kids[i] for i in range(n.value)]
+        if n.value:
+            x.XFree(kids)
+        return out
+
+    def loop():
+        first = {}
+        while True:
+            now = time.time()
+            for w in children(root):
+                if w in first:
+                    if now - first[w] < 120:
+                        x.XIconifyWindow(dpy, w, screen)
+                    continue
+                name = c_char_p()
+                if x.XFetchName(dpy, w, byref(name)) and name.value and b"StarCraft II" in name.value:
+                    x.XIconifyWindow(dpy, w, screen)
+                    first[w] = now
+            x.XFlush(dpy)
+            time.sleep(interval)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.handler = handler  # keeps the callback alive
+    t.start()
+    return t

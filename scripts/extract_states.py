@@ -56,8 +56,8 @@ the engine shows it to that player, to the games tree (worldmodel/corpus.py):
 data/games/<format>/<build>/<map>/<id>.p<slot>.cst, next to the game's action table
 (<id>.acts.npz) and its extraction sidecar (<id>.meta.json: per view the layout, step,
 substep, stats, extractor commit; a failed view leaves <id>.p<slot>.fail.json). The observer
-view (fog off, everything) is still a code path (perspective 0) but no longer extracted: the
-oracle is the two player views concatenated. Each view has the layout above plus:
+view (fog off) is extracted only with --observer, for its neutrals; it reports no orders, production,
+passengers or effects, so a player's own units come from that player's view. Each view has the layout above plus:
 
     vis[F, H, W]             the player's visibility map per frame (0 never seen, 1 fogged,
                              2 visible; the engine's own map_state)
@@ -378,7 +378,119 @@ class DesyncCheck:
                 raise RuntimeError(f"desync at {loop / LPS:.0f}s: unit {t} isn't in the replay's unit log")
 
 
-def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abilities=True, acts_path=None):
+class TypedList:
+    """A growing column held as typed arrays instead of Python objects: append, extend and len as a list, np.asarray
+    for the whole. Python lists of a long game's available abilities alone reached about 7 GB at one frame per loop."""
+
+    def __init__(self, dtype, flush=1 << 16):
+        self.dtype, self.flush_at = np.dtype(dtype), flush
+        self.chunks, self.pending, self.n = [], [], 0
+
+    def _flush(self):
+        if self.pending:
+            self.chunks.append(np.asarray(self.pending, dtype=self.dtype))
+            self.pending = []
+
+    def append(self, v):
+        self.pending.append(v)
+        self.n += 1
+        if len(self.pending) >= self.flush_at:
+            self._flush()
+
+    def extend(self, vs):
+        before = len(self.pending)
+        self.pending.extend(vs)
+        self.n += len(self.pending) - before
+        if len(self.pending) >= self.flush_at:
+            self._flush()
+
+    def __len__(self):
+        return self.n
+
+    def take(self):
+        """What's held, as one array, and let it go; the count keeps running (ragged offsets stay absolute)."""
+        out = np.asarray(self)
+        self.chunks = []
+        return out
+
+    def __array__(self, dtype=None, copy=None):
+        self._flush()
+        if not self.chunks:
+            out = np.zeros(0, self.dtype)
+        elif len(self.chunks) == 1:
+            out = self.chunks[0]
+        else:
+            out = np.concatenate(self.chunks)
+            self.chunks = [out]  # one copy from here on, not the pieces and the whole
+        return out if dtype is None or np.dtype(dtype) == out.dtype else out.astype(dtype)
+
+
+RAGGED = dict(prod=("prod_abil", "prod_progress"), buff=("b_id",), **{"pass": ("pass_id", "pass_type", "pass_hp")},
+              ord=("ord_abil", "ord_tx", "ord_ty", "ord_target", "ord_progress"), rally=("rally_x", "rally_y", "rally_target"),
+              ab=("ab_id", "ab_point"))
+NEUTRAL = 16  # the API's owner of minerals, gas, rocks and critters
+ARROW_FRAMES = 64  # frames per record batch: a window reads and decompresses only its batches
+
+
+class ArrowView:
+    """Streams a view to <view>.units.arrow (one row per unit, ragged lists as list columns) and <view>.frames.arrow (one
+    row per frame: loop, grids, the player block), a record batch per ARROW_FRAMES frames, zstd per buffer. Unit columns are
+    deltas from the batch's first frame on (worldmodel/arrow_state.py)."""
+
+    def __init__(self, out_path):
+        import pyarrow as pa
+        self.pa, self.base = pa, out_path[:-len(".cst")]
+        self.options = pa.ipc.IpcWriteOptions(compression=pa.Codec("zstd", compression_level=3))
+        self.sinks, self.writers = {}, {}
+
+    def _write(self, name, batch, metadata=None):
+        if name not in self.writers:
+            self.sinks[name] = self.pa.OSFile(f"{self.base}.{name}.arrow.tmp", "wb")
+            self.writers[name] = self.pa.ipc.new_file(self.sinks[name], batch.schema, options=self.options)
+        self.writers[name].write_batch(batch, custom_metadata=metadata)
+
+    def write_units(self, first_frame, counts, chunks, rag):
+        pa = self.pa
+        cols = {k: chunks[k].take() for k in U_DTYPES}
+        from cosmicstar.worldmodel import arrow_state
+        stored, how = arrow_state.encode_units({f"u_{k}": cols[k] for k in U_DTYPES if not k.endswith("_start")}, counts)
+        names, arrs = list(stored), [pa.array(v) for v in stored.values()]
+        names.append("frame")
+        arrs.append(pa.array(np.repeat(np.arange(first_frame, first_frame + len(counts), dtype=np.int32), counts)))
+        for g, members in RAGGED.items():
+            st = cols[f"{g}_start"]
+            total = len(rag[members[0]])
+            off = np.append(st, total).astype(np.int64)
+            off -= off[0]
+            for c in members:
+                names.append(c)
+                arrs.append(pa.LargeListArray.from_arrays(pa.array(off), pa.array(rag[c].take())))
+        self._write("units", pa.record_batch(arrs, names=names), {"how": json.dumps(how)})
+
+    def write_frames(self, columns, grids):
+        pa = self.pa
+        names, arrs = list(columns), [pa.array(v) for v in columns.values()]
+        for k, frames in grids.items():
+            names.append(k)
+            arrs.append(pa.FixedSizeBinaryArray.from_buffers(pa.binary(frames[0].size), len(frames),
+                                                             [None, pa.py_buffer(b"".join(f.tobytes() for f in frames))]))
+        self._write("frames", pa.record_batch(arrs, names=names))
+
+    def close(self):
+        for k, w in self.writers.items():
+            w.close()
+            self.sinks[k].close()
+            os.replace(f"{self.base}.{k}.arrow.tmp", f"{self.base}.{k}.arrow")
+
+    def read_columns(self, *names):
+        """Whole columns of the units file, for the checks after the playback."""
+        r = self.pa.ipc.open_file(self.pa.memory_map(f"{self.base}.units.arrow"))
+        from cosmicstar.worldmodel import arrow_state
+        got = [arrow_state.read_units(r, i)[0] for i in range(r.num_record_batches)]
+        return {k: np.concatenate([g[k] for g in got]) for k in names}
+
+
+def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abilities=True, acts_path=None, arrow=False):
     """Plays one replay and saves every frame (see the module doc). perspective 0: observer,
     fog off; a player slot: as that player sees it (fog on); ui: also the engine's control group
     and selection panel summaries (ui_*), which need the feature layer on; abilities: query the
@@ -440,23 +552,40 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
             cmd["start"].append(len(cmd_tags))
 
     cols = {k: [] for k in U_DTYPES}      # the current frame's unit rows
-    chunks = {k: [] for k in U_DTYPES}    # ... packed into typed arrays per frame (Python lists for a whole game ran to GBs)
+    chunks = {k: TypedList(U_DTYPES[k]) for k in U_DTYPES}    # ... packed into typed arrays (Python lists for a whole game ran to GBs)
     n_rows = 0
-    rag = {k: [] for k in R_DTYPES}  # ragged per-unit lists (production, buffs, passengers, orders)
-    eff = {k: [] for k in E_DTYPES}  # per-frame effects, one row per effect position
-    dead = []
+    rag = {k: TypedList(R_DTYPES[k]) for k in R_DTYPES}  # ragged per-unit lists (production, buffs, passengers, orders)
+    eff = {k: TypedList(E_DTYPES[k]) for k in E_DTYPES}  # per-frame effects, one row per effect position
+    dead = TypedList(np.int32)
     frame_loop, frame_start, eff_start, dead_start = [], [0], [0], [0]
     vis, creep = [], []  # player views only
     # layout 2: the observed player's block per frame (player_common, score details, camera; the
     # observer's are the engine's placeholders), and the raw player block's ragged tables
-    pc = collections.defaultdict(list)   # pc_<field>[F]
-    sc = collections.defaultdict(list)   # sc_<field>[_<category|vital>][F]
+    pc = collections.defaultdict(lambda: TypedList(np.float32))   # pc_<field>[F]
+    sc = collections.defaultdict(lambda: TypedList(np.float32))   # sc_<field>[_<category|vital>][F]
     cam = []                             # cam_x, cam_y [F]
     pw = {k: [] for k in PW_DTYPES}      # power sources
     rd = {k: [] for k in RD_DTYPES}      # radar rings
     pu = []                              # the raw player block's upgrade ids (nothing else in extract() may bind `pu`)
     pw_start, rd_start, pu_start = [0], [0], [0]
+    sink = ArrowView(out_path) if arrow else None
+    flushed = [0, 0]                     # frames and rows already streamed to Arrow
     ab_failed = [0]                      # available-abilities queries refused (switched off after the first)
+
+    def flush_arrow():
+        f0, f1 = flushed[0], len(frame_loop)
+        if f1 == f0:
+            return
+        sink.write_units(f0, np.diff(np.asarray(frame_start[f0:f1 + 1], np.int64)), chunks, rag)
+        columns = dict(loop=np.asarray(frame_loop[f0:f1], np.int32))
+        columns.update({f"pc_{k}": v.take() for k, v in pc.items()}, **{f"sc_{k}": v.take() for k, v in sc.items()})
+        xy = np.asarray(cam, np.float32).reshape(-1, 2)
+        columns.update(cam_x=xy[:, 0], cam_y=xy[:, 1])
+        cam.clear()
+        sink.write_frames(columns, dict(vis=vis, creep=creep) if vis else {})
+        vis.clear()
+        creep.clear()
+        flushed[0] = f1
 
     def take_player(obs, raw):
         # every declared field (unset ones read as 0), so the per-frame columns stay aligned
@@ -527,7 +656,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
                 opts.feature_layer.minimap_resolution.x = opts.feature_layer.minimap_resolution.y = 16
             req = sc_pb.RequestStartReplay(
                 # observer: fog off, everything; a player: that player's view, fog on (module doc)
-                replay_data=data, observed_player_id=perspective, disable_fog=perspective == 0, options=opts)
+                replay_data=data, observed_player_id=perspective, disable_fog=(perspective == 0 or bool(os.environ.get("COSMICSTAR_FOG_OFF"))), options=opts)
             if not current:
                 # the map passed in, not looked up by handle: by handle the older engine sometimes
                 # tries to validate / download the dependency through Battle.net, fails without a
@@ -612,6 +741,8 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
             avail = available_abilities(raw.units)
             take_player(o.observation, raw)
             for u in raw.units:
+                if arrow and not perspective and u.owner != NEUTRAL:  # the observer pass is only for the neutrals; the players' views have the rest
+                    continue
                 cols["id"].append(uid(u.tag))
                 cols["type"].append(u.unit_type)
                 cols["owner"].append(u.owner)
@@ -695,7 +826,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
             frame_loop.append(loop)
             n_rows += len(cols["id"])
             for k, v in cols.items():
-                chunks[k].append(np.asarray(v, dtype=U_DTYPES[k]))
+                chunks[k].extend(v)
                 v.clear()
             frame_start.append(n_rows)
             eff_start.append(len(eff["type"]))
@@ -705,6 +836,8 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
                 creep.append(np.frombuffer(raw.map_state.creep.data, np.uint8).copy())
                 take_actions(o.actions, len(frame_loop) - 1)
                 take_selection(raw.units, loop)
+            if arrow and len(frame_loop) - flushed[0] >= ARROW_FRAMES:
+                flush_arrow()
             if perspective and ui:
                 ud = o.observation.ui_data
                 cnt, lead = np.zeros(10, np.int16), np.zeros(10, np.int32)
@@ -727,8 +860,9 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
                 ui_sel.extend(types)
                 ui_sel_start.append(len(ui_sel))
             # a player still sees snapshots of enemy structures that died in the fog, so in a
-            # player view only the player's own units are checked against the replay's log
-            desync.check(loop, [u.tag for u in raw.units if not perspective or u.owner == perspective])
+            # player view only the player's own units are checked against the replay's log; the observer
+            # keeps showing neutrals the replay has recorded as dead (mined out, destroyed), so not those
+            desync.check(loop, [u.tag for u in raw.units if u.owner == perspective or (not perspective and u.owner != NEUTRAL)])
             # The game is decided once every player of some team has a result (left or lost);
             # one player leaving a team game doesn't end it (their ally plays on).
             done_players |= {r.player_id for r in o.player_result}
@@ -736,27 +870,39 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
                 info["end"] = dict(loop=loop, results={str(r.player_id): r.result for r in o.player_result})
                 break
 
-    arrays = {f"u_{k}": (np.concatenate(chunks[k]) if chunks[k] else np.zeros(0, U_DTYPES[k])) for k in U_DTYPES}
-    arrays.update({k: np.asarray(v, dtype=R_DTYPES[k]) for k, v in rag.items()})
+    if arrow:
+        vis_format = dict(bits=raw.map_state.visibility.bits_per_pixel, size=[raw.map_state.visibility.size.x, raw.map_state.visibility.size.y]) if perspective else None
+        creep_format = dict(bits=raw.map_state.creep.bits_per_pixel, size=[raw.map_state.creep.size.x, raw.map_state.creep.size.y]) if perspective else None
+        flush_arrow()
+        sink.close()
+        arrays = {}
+    else:
+        arrays = {f"u_{k}": np.asarray(chunks[k], dtype=U_DTYPES[k]) for k in U_DTYPES}
+        arrays.update({k: np.asarray(v, dtype=R_DTYPES[k]) for k, v in rag.items()})
     arrays.update({f"e_{k}": np.asarray(v, dtype=E_DTYPES[k]) for k, v in eff.items()})
     arrays.update(frame_loop=np.asarray(frame_loop, np.int32), frame_start=np.asarray(frame_start, np.int64),
                   e_frame_start=np.asarray(eff_start, np.int64), dead_frame_start=np.asarray(dead_start, np.int64),
                   dead_id=np.asarray(dead, np.int32), **grids)
     arrays.update({f"p_{k}": np.asarray(v, np.float32 if k not in ("loop", "player") else np.int32) for k, v in stats.items()})
-    arrays.update({f"pc_{k}": np.asarray(v, np.float32) for k, v in pc.items()})
-    arrays.update({f"sc_{k}": np.asarray(v, np.float32) for k, v in sc.items()})
+    if not arrow:
+        arrays.update({f"pc_{k}": np.asarray(v, np.float32) for k, v in pc.items()})
+        arrays.update({f"sc_{k}": np.asarray(v, np.float32) for k, v in sc.items()})
     arrays.update({f"pw_{k}": np.asarray(v, dtype=PW_DTYPES[k]) for k, v in pw.items()}, pw_frame_start=np.asarray(pw_start, np.int64))
     arrays.update({f"rd_{k}": np.asarray(v, dtype=RD_DTYPES[k]) for k, v in rd.items()}, rd_frame_start=np.asarray(rd_start, np.int64))
-    arrays.update(pu_id=np.asarray(pu, np.int32), pu_frame_start=np.asarray(pu_start, np.int64),
-                  cam=np.asarray(cam, np.float32).reshape(-1, 2))
+    arrays.update(pu_id=np.asarray(pu, np.int32), pu_frame_start=np.asarray(pu_start, np.int64))
+    if not arrow:
+        arrays.update(cam=np.asarray(cam, np.float32).reshape(-1, 2))
     info["abilities_queried"] = bool(abilities) and not ab_failed[0] and perspective != 0
     arrays.update(up_loop=np.asarray(ups["loop"], np.int32), up_player=np.asarray(ups["player"], np.int8),
                   up_name=np.asarray(ups["name"]))
-    if perspective and vis:
+    if arrow and perspective:
+        info.update(vis_format=vis_format, creep_format=creep_format)
+    if perspective and vis and not arrow:
         ms = raw.map_state
         h, w = ms.visibility.size.y, ms.visibility.size.x
         arrays["vis"] = np.stack(vis).reshape(len(vis), h, -1)
         arrays["creep"] = np.stack(creep).reshape(len(creep), h, -1)
+        vis, creep = [], []
         info["vis_format"] = dict(bits=ms.visibility.bits_per_pixel, size=[w, h])
         info["creep_format"] = dict(bits=ms.creep.bits_per_pixel, size=[ms.creep.size.x, ms.creep.size.y])
     stats = dict(frames=len(frame_loop), rows=n_rows)
@@ -787,7 +933,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
     arrays.update(selection_tracker.frame_groups(acts, slots, arrays["frame_loop"], tags, died))
     arrays.update(selection_tracker.frame_memory(acts, slots, arrays["frame_loop"], tags, died))
     if perspective:
-        checks = selection_tracker.validate(arrays, acts, perspective, died)
+        checks = selection_tracker.validate({**arrays, **sink.read_columns("u_id", "u_type")} if arrow else arrays, acts, perspective, died)
         stats["groups"] = {k: int(v) for k, v in checks.items() if k != "mismatches"}
     stats["units"] = len(ids)
     from cosmicstar.worldmodel import statefile
@@ -805,7 +951,7 @@ def installed_builds():
 
 
 def build_manifest(replays_root, games_root, fmt, step, substep, builds=(), maps=(), ids=(), any_ruleset=False,
-                   redo=False, retry_failed=False):
+                   redo=False, retry_failed=False, observer=False):
     """One job per (game, player view) still to extract, from the replay tree's index
     (corpus.py): the format's games on installed base builds, long enough, with their map
     cached (fetched from the depot unless --no_fetch) and a ruleset the Editor could export
@@ -842,7 +988,7 @@ def build_manifest(replays_root, games_root, fmt, step, substep, builds=(), maps
             continue
         files = corpus.GameFiles(games_root, corpus.rel_dir(d["format"], d["base_build"], d["map_hash"]), gid)
         meta = corpus.read_meta(files.meta()).get("views", {})
-        for slot in [p["slot"] for p in d["players"]]:
+        for slot in ([0] if observer else []) + [p["slot"] for p in d["players"]]:
             if slot in CRASHING_VIEWS:
                 continue
             out, rec = files.view(slot), meta.get(str(slot), {})
@@ -868,10 +1014,50 @@ def claim(job):
     """Atomically claims a job for this worker (any free worker takes the next one)."""
     try:
         os.makedirs(os.path.dirname(job["out"]), exist_ok=True)
-        os.close(os.open(job["out"] + ".claim", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        fd = os.open(job["out"] + ".claim", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())  # who holds it, for the memory governor
+        os.close(fd)
         return True
     except FileExistsError:
         return False
+
+
+def available_gb():
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 2**20
+    return float("inf")
+
+
+def kill_prefix_processes(prefix):
+    """SIGKILL everything running in a Wine prefix (the engine and Proton's helpers), found by their environment."""
+    root = prefix.rstrip("/")
+    root = root[:-len("/pfx")] if root.endswith("/pfx") else root
+    want = f"STEAM_COMPAT_DATA_PATH={root}".encode()  # Proton points WINEPREFIX at <root>/pfx/ underneath
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = f.read()
+            if want in env.split(b"\0"):
+                os.kill(int(pid), 9)
+        except OSError:
+            pass
+
+
+def newest_claim(job_list, pids):
+    """(job, pid) of the most recently started game among those workers are still playing."""
+    best = None
+    for j in job_list:
+        c = j["out"] + ".claim"
+        try:
+            pid = int(open(c).read() or 0)
+            t = os.path.getmtime(c)
+        except (OSError, ValueError):
+            continue
+        if pid in pids and not os.path.exists(j["out"]) and (best is None or t > best[0]):
+            best = (t, j, pid)
+    return best[1:] if best else None
 
 
 def minimize_client_window(pid, tries=20):
@@ -929,7 +1115,7 @@ def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
         slot = j.get("perspective", 0)
         for attempt in range(3):
             try:
-                st = extract(j["path"], j["out"], step, until, slot, substep, ui, abilities, j.get("acts"))
+                st = extract(j["path"], j["out"], step, until, slot, substep, ui, abilities, j.get("acts"), j.get("arrow", False))
                 rec = dict(layout=LAYOUT, step=step, substep=substep, until=until, ui=ui, abilities=abilities, stats=st,
                            mb=round(os.path.getsize(j["out"]) / 1e6, 1), s=round(time.time() - t0), tries=attempt + 1,
                            extractor=commit, when=time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -994,6 +1180,14 @@ def main():
                     "(ui_*, for validating the tracked groups); turns the feature layer on")
     ap.add_argument("--any_ruleset", action="store_true", help="also replays whose ruleset has no Editor balance export "
                     "(their abilities can't be named)")
+    ap.add_argument("--observer", action="store_true", help="also the observer view (<id>.p0.cst: fog off, every neutral; no orders, "
+                    "production, passengers or effects, so it complements the players' views)")
+    ap.add_argument("--arrow", action="store_true", help="stream each view's units and frames to <view>.units.arrow and "
+                    "<view>.frames.arrow as it plays, the observer view's neutrals only; the rest (groups, effects, deaths, "
+                    "...) stays in the .cst")
+    ap.add_argument("--mem_low", type=float, default=4.0, help="GB available below which the most recently started game is "
+                    "stopped and put back in the queue; the rest play on")
+    ap.add_argument("--mem_high", type=float, default=9.0, help="GB available above which a stopped worker starts again")
     ap.add_argument("--worker", help=argparse.SUPPRESS)  # internal: job list for one worker process
     args = ap.parse_args()
 
@@ -1020,7 +1214,9 @@ def main():
     maps = [m.strip() for m in args.maps.split(",") if m.strip()]
     ids = set(json.load(open(args.ids[1:]))) if args.ids.startswith("@") else {i for i in args.ids.split(",") if i}
     jobs, skipped = build_manifest(args.replays, args.games, args.format, args.step, args.substep, builds, maps, ids,
-                                   args.any_ruleset, args.redo, args.retry_failed)
+                                   args.any_ruleset, args.redo, args.retry_failed, args.observer)
+    for j in jobs:
+        j["arrow"] = args.arrow
     if args.limit:
         keep = sorted({j["id"] for j in jobs})[:args.limit]
         jobs = [j for j in jobs if j["id"] in keep]
@@ -1047,6 +1243,10 @@ def main():
         keeper = _wrc.keep_prefix_alive()  # one wineserver for the whole run; returns once it is up
         print(json.dumps(dict(note="prefix keeper up", pid=keeper.pid)), flush=True)
 
+    if sys.platform != "win32":
+        from cosmicstar.envs import wine_run_config as _wrc
+        _wrc.keep_engine_windows_minimized()
+
     worker_log = open(os.path.join(logs, run_id + ".log"), "a")  # the workers' stderr (pysc2 / engine noise, stack dumps)
 
     def run(job_list, n):
@@ -1054,14 +1254,49 @@ def main():
         share this process's stdout; piping them through here would block all but one."""
         path = os.path.join(logs, run_id + ".jobs.json")
         json.dump(job_list, open(path, "w"))
-        procs = [subprocess.Popen([sys.executable, os.path.abspath(__file__), "--step", str(args.step), "--until", str(args.until),
-                                   "--substep", str(args.substep), "--worker", path]
-                                  + (["--no_fetch"] if args.no_fetch else []) + (["--ui"] if args.ui else [])
-                                  + (["--no_abilities"] if args.no_abilities else [])
-                                  + (["--no_prefix_pool"] if args.no_prefix_pool else []) + ["--slot", str(k)],
-                                  env=env, stderr=worker_log) for k in range(n)]
-        for p in procs:
-            p.wait()
+        def start(k):
+            return subprocess.Popen([sys.executable, os.path.abspath(__file__), "--step", str(args.step), "--until", str(args.until),
+                                     "--substep", str(args.substep), "--worker", path]
+                                    + (["--no_fetch"] if args.no_fetch else []) + (["--ui"] if args.ui else [])
+                                    + (["--no_abilities"] if args.no_abilities else [])
+                                    + (["--no_prefix_pool"] if args.no_prefix_pool else []) + ["--slot", str(k)],
+                                    env=env, stderr=worker_log)
+
+        def stop_newest(procs, stopped):
+            """The memory governor: the most recent game goes back in the queue; its worker waits for memory."""
+            found = newest_claim(job_list, {p.pid: k for k, p in procs.items()})
+            if found is None:
+                return
+            j_, pid = found
+            k = next(k for k, p in procs.items() if p.pid == pid)
+            procs.pop(k).kill()
+            if not args.no_prefix_pool:
+                from cosmicstar.envs import wine_run_config as _wrc
+                kill_prefix_processes(_wrc.ensure_pool_prefix(k))
+            for f in glob.glob(glob.escape(j_["out"][:-len(".cst")]) + "*.tmp") + [j_["out"] + ".claim", j_["out"] + ".tmp"]:
+                if os.path.exists(f):
+                    os.remove(f)
+            stopped.append(k)
+            print(json.dumps(dict(memory_stop=j_["id"], view=j_.get("perspective", 0), slot=k, available_gb=round(available_gb(), 1))), flush=True)
+
+        procs = {k: start(k) for k in range(n)}
+        stopped, last = [], 0.0
+        while True:
+            for k in [k for k, p in procs.items() if p.poll() is not None]:
+                del procs[k]
+            todo = any(not os.path.exists(j_["out"]) and not os.path.exists(j_["out"] + ".claim") for j_ in job_list)
+            if not procs and not (stopped and todo):
+                break
+            mem, now = available_gb(), time.time()
+            if mem < args.mem_low and len(procs) > 1 and now - last > 20:
+                stop_newest(procs, stopped)
+                last = now
+            elif stopped and todo and now - last > 30 and (mem > args.mem_high or not procs):
+                k = stopped.pop()
+                procs[k] = start(k)
+                last = now
+                print(json.dumps(dict(memory_resume=k, available_gb=round(mem, 1))), flush=True)
+            time.sleep(5)
 
     # One base build at a time. Older builds' game data is fetched on demand into the
     # shared data store; instances fetching at the same time (worse: for different

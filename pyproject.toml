@@ -12,6 +12,7 @@ dependencies = [
     "absl-py",
     "mpyq",
     "numpy",
+    "pyarrow",
     "pysc2",
     "requests",
     "s2protocol",

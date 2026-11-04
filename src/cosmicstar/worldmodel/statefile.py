@@ -127,18 +127,15 @@ def save(path, arrays, level=LEVEL):
     unit_cols = [k for k, v in arrays.items() if k.startswith("u_") and v.ndim == 1 and len(v) == n_rows
                  and k not in NO_DELTA and not k.endswith("_start")]
     prev = prev_rows(arrays["u_id"], arrays["frame_start"]) if unit_cols else None
-    plan, ints = {}, {}
-    for k in unit_cols:
-        ints[k], how = _to_ints(arrays[k])
-        plan[k] = dict(transform="delta_id", how=how)
-    deltas = encode_delta(ints, prev) if unit_cols else {}
+    unit_cols = set(unit_cols)
     header, blobs, offset = {}, [], 0
     comp = zstd.ZstdCompressor(level=level)
     for k, v in arrays.items():
         entry = dict(dtype=v.dtype.str, shape=list(v.shape), transform="raw")
-        if k in deltas:
-            stored = deltas[k]
-            entry.update(plan[k], stored_dtype=stored.dtype.str)
+        if k in unit_cols:  # one column at a time: a long game's columns together are GBs
+            ints, how = _to_ints(v)
+            stored = encode_delta({k: ints}, prev)[k]
+            entry.update(transform="delta_id", how=how, stored_dtype=stored.dtype.str)
         elif k in XOR_KEYS and v.ndim == 3 and v.dtype == np.uint8 and len(v) > 1:
             stored = v.copy()
             stored[1:] ^= v[:-1]

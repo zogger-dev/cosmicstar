@@ -44,7 +44,7 @@ N_ACT_KINDS = 13
 FAM_PAD, FAM_UNK, FAM_SMART, FAM_FIRST = 0, 1, 2, 3
 N_BUTTONS = 32                   # button index + 1 (0 = no ability)
 TK_NONE, TK_POINT, TK_UNIT, TK_SNAPSHOT = ra.TARGET_NONE, ra.TARGET_POINT, ra.TARGET_UNIT, ra.TARGET_SNAPSHOT
-N_GROUPS, N_GROUP_OPS, N_REMOVE = 12, 7, 5  # +1 each: 0 = n/a
+N_GROUPS, N_GROUP_OPS, N_REMOVE, N_SUBGROUPS = 12, 7, 5, 33  # +1 each: 0 = n/a
 BURST = 6                        # loops: plain REPEATs this close to the last press are the same burst
 MAX_SELECTED = 32                # pointers kept per SELECT (the count keeps the full number)
 C_ACTION = 12                    # numeric features per token (see GameActions.window)
@@ -52,7 +52,7 @@ C_ACTION = 12                    # numeric features per token (see GameActions.w
 TOKEN_COLS = dict(loop=np.int32, player=np.int8, kind=np.int8, family=np.int32, button=np.int8,
                   queued=np.bool_, smart=np.bool_, minimap=np.bool_, presses=np.int16,
                   tkind=np.int8, x=np.float32, y=np.float32, uid=np.int32, snap=np.int64, snap_raw=np.int64,
-                  group=np.int8, gop=np.int8, remove=np.int8, n_add=np.int16, n_rem=np.int16,
+                  group=np.int8, gop=np.int8, remove=np.int8, subgroup=np.int8, n_add=np.int16, n_rem=np.int16,
                   recipient=np.int8, minerals=np.int32, gas=np.int32, sel_start=np.int64)
 
 
@@ -166,7 +166,7 @@ class GameActions:
                 tags = d["add_tag"][add_start[i]:add_start[i + 1]]
                 n_rem = rem_start[i + 1] - rem_start[i]
                 add(loop=L, player=p, kind=A_SELECT, group=int(d["group"][i]) + 1,
-                    remove=int(d["select_remove"][i]) + 1, n_add=len(tags), n_rem=n_rem)
+                    remove=int(d["select_remove"][i]) + 1, subgroup=min(int(d["subgroup"][i]), N_SUBGROUPS - 2) + 1, n_add=len(tags), n_rem=n_rem)
                 sel.extend(uid_of(t) for t in tags[:MAX_SELECTED])
             elif k == ra.GROUP:
                 add(loop=L, player=p, kind=A_GROUP, group=int(d["group"][i]) + 1, gop=int(d["group_op"][i]) + 1)
