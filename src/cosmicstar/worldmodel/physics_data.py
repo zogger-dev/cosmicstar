@@ -133,6 +133,7 @@ class Game:
         static = np.stack([unpack("map_pathing_grid"), unpack("map_placement_grid"), d["map_terrain_height"].reshape(H, W), play,
                            np.ones((H, W), np.uint8)])
         self.static = self._patches(static)
+        self.static_grid = static[:, y0:y1, x0:x1].transpose(1, 2, 0)                 # [h, w, C_STATIC]: the playable area, at its own size
         self.grp = {s: (self.rest[s]["grp_start"], self.rest[s]["grp_id"]) if "grp_start" in self.rest[s].files else None for s in (1, 2)}
         self.tag_row = {s: {int(t): i for i, t in enumerate(self.rest[s]["unit_tag"].tolist())} for s in (1, 2)}
         self.acts = None
@@ -210,7 +211,8 @@ class Game:
         out["birth_row"] = np.array([b[1] for b in births], np.int64)
         out["birth_parent"] = np.array(parents, np.int64)
         out["death_frame"] = np.array([self._death(s, k, t0, L) for s, k in rows], np.int64)
-        out["map"], out["static"] = self._map_frames(t0, L, swap), self.static
+        out["map"], out["grid"] = self._map_frames(t0, L, swap)
+        out["static"], out["static_grid"], out["origin"] = self.static, self.static_grid, np.array(self.playable[:2], np.float32)
         out["center"], out["half"], out["side"] = self.center, self.half, np.float32(self.side)
         out["loops"] = t0 + 1 + np.arange(L)
         out["players"] = np.array([self.vocab.race.get(p["race"], 3) for p in self.meta["players"]], np.int64)[::-1 if swap else 1]
@@ -483,8 +485,11 @@ class Game:
             out["alive"][d + 1:, r_] = False
 
     def _map_frames(self, t0, L, swap):
-        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen and creep."""
+        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen and creep, the next-frame targets; and [L, h, w, C_DYNAMIC], the same over the
+        playable area at its own size, the input."""
         out = np.zeros((L, TOP, TOP, C_DYNAMIC * PATCH * PATCH), np.uint8)
+        x0, y0, x1, y1 = self.playable
+        grid = np.zeros((L, y1 - y0, x1 - x0, C_DYNAMIC), np.uint8)
         y, x = self.cells
         for pi, s in enumerate((1, 2)):
             at = (1 - pi if swap else pi) * 3 * PATCH * PATCH
@@ -497,7 +502,9 @@ class Game:
                 out[f, :, :, at:at + PATCH * PATCH] = (vis == 2)[y, x]
                 out[f, :, :, at + PATCH * PATCH:at + 2 * PATCH * PATCH] = (vis > 0)[y, x]
                 out[f, :, :, at + 2 * PATCH * PATCH:at + 3 * PATCH * PATCH] = creep[y, x]
-        return out
+                g = (1 - pi if swap else pi) * 3
+                grid[f, :, :, g], grid[f, :, :, g + 1], grid[f, :, :, g + 2] = (vis == 2)[y0:y1, x0:x1], (vis > 0)[y0:y1, x0:x1], creep[y0:y1, x0:x1]
+        return out, grid
 
 
 def _blank(L, R):
@@ -556,8 +563,15 @@ def collate(windows, vocab):
     for b, w in enumerate(windows):
         own[b, :len(w["owner"])] = w["owner"]
     out["owner"] = torch.from_numpy(own)
-    for k in ("center", "half", "side", "players", "ply_num", "map", "static"):
+    for k in ("center", "half", "side", "players", "ply_num", "map", "static", "origin"):
         out[k] = torch.from_numpy(np.stack([w[k] for w in windows]))
+    # the map at its own size, zero past its edge: the known layer tells. Sizes are multiples of 4, the tower's reduction
+    gh, gw = (int(np.ceil(max(w["grid"].shape[i] for w in windows) / 4)) * 4 for i in (1, 2))
+    grid, sgrid = np.zeros((B, F_, gh, gw, C_DYNAMIC), np.uint8), np.zeros((B, gh, gw, C_STATIC), np.uint8)
+    for b, w in enumerate(windows):
+        h_, w_ = w["grid"].shape[1:3]
+        grid[b, :, :h_, :w_], sgrid[b, :h_, :w_] = w["grid"], w["static_grid"]
+    out["grid"], out["static_grid"] = torch.from_numpy(grid), torch.from_numpy(sgrid)
     out["view"] = torch.ones(B, 2)
     flat = lambda b, wh: (b * F_ + wh[:, 0]) * R + wh[:, 1]
     bags = {k: ([], []) for k in ("ord", "prod", "buff", "rally", "ab")}
@@ -628,7 +642,7 @@ def collate(windows, vocab):
     out["birth_count"] = torch.from_numpy(count)
     out["birth_b"], out["birth_f"], out["birth_r"], out["birth_p"] = (torch.tensor(x, dtype=torch.int64) for x in (bb, ff, rr, pp))
     # actions, per frame
-    A = max(1, max((np.bincount(w["actions"]["frame"], minlength=1).max() if len(w["actions"]["frame"]) else 0) for w in windows))
+    A = max(2, max((np.bincount(w["actions"]["frame"], minlength=1).max() if len(w["actions"]["frame"]) else 0) for w in windows))
     shape = (B, F_, A)
     amask = np.zeros(shape, bool)
     keys = dict(kind=np.int64, family=np.int64, button=np.int64, tkind=np.int64, group=np.int64, gop=np.int64, remove=np.int64, subgroup=np.int64, player=np.int64)
@@ -648,7 +662,7 @@ def collate(windows, vocab):
             anum[b, f, s], axy[b, f, s], placed[b, f, s] = a["num"][i], a["xy"][i], a["placed"][i]
             target[b, f, s] = a["target"][i]
             orders[b][int(a["player"][i])].append(f * A + s)
-    N = max(1, max(max(len(o[0]), len(o[1])) for o in orders))
+    N = max(2, max(max(len(o[0]), len(o[1])) for o in orders))
     order = np.full((B, 2, N), -1, np.int64)
     for b, o in enumerate(orders):
         for p in (0, 1):

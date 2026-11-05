@@ -18,6 +18,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+# the cap below needs segments that grow; PyTorch 2.15's pool of compile workers crashes on this machine, and one thread avoids it
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+
 import numpy as np
 import torch
 
@@ -26,6 +30,7 @@ from cosmicstar.worldmodel.action_tokens import ActionVocab
 from cosmicstar.worldmodel.vocab import Vocab
 
 MOVING_NEUTRALS = (321, 322, 335, 336, 337, 612, 659, 660, 661)   # neutral types seen moving in 30 games: critters; data, not names
+TOKENS_PER_WINDOW = 259   # beyond its rows: 3 globals and 256 cells
 EXCLUDED = ("982fc2368b80adb3", "1ff02cd0dd2751fa", "c50626c6c77288c6", "5bf221dbd7045ab1", "d2de5d4aef655894")
 
 
@@ -56,21 +61,26 @@ class Games:
         return g.window(t0, L, swap=swap)
 
 
-def batches(games, ids, seqs, L, workers, prefetch=2, chosen=None):
-    """Passes of seqs windows, read ahead on threads. chosen: a fixed list of (game, frame) to cycle instead of random ones."""
+def batches(games, ids, seqs, L, workers, tokens, prefetch=2, chosen=None):
+    """Passes of windows, read ahead on threads: as many as fit a budget of tokens, at most seqs, padded rows counted, so a pass of large windows has fewer of them.
+    chosen: a fixed list of (game, frame) to cycle instead of random ones."""
     pool = ThreadPoolExecutor(workers)
     q = queue.Queue(prefetch)
 
     def fill():
-        i, rng = 0, np.random.default_rng()
+        i, rng, hold = 0, np.random.default_rng(), []
         while True:
             if chosen:
                 pick = [chosen[(i + k) % len(chosen)] for k in range(seqs)]
                 i += seqs
             else:
                 pick = [(ids[rng.integers(len(ids))], -1) for _ in range(seqs)]
-            ws = list(pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick))
-            q.put(physics_data.collate(ws, games.vocab))
+            for w in pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick):
+                r = max([w["mask"].shape[1]] + [h["mask"].shape[1] for h in hold])
+                if hold and (len(hold) == seqs or (len(hold) + 1) * (r + TOKENS_PER_WINDOW) > tokens):
+                    q.put(physics_data.collate(hold, games.vocab))
+                    hold.clear()
+                hold.append(w)
 
     threading.Thread(target=fill, daemon=True).start()
     while True:
@@ -135,12 +145,15 @@ def main():
     ap.add_argument("--games", default="data/games_arrow")
     ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
     ap.add_argument("--split", default="data/games/splits/default.json")
-    ap.add_argument("--seqs", type=int, default=6)
+    ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
+    ap.add_argument("--tokens", type=int, default=3000, help="budget of a pass: windows x (most rows + 259)")
+    ap.add_argument("--eval_seqs", type=int, default=4)
     ap.add_argument("--frames", type=int, default=56)
-    ap.add_argument("--accum", type=int, default=4)
+    ap.add_argument("--accum", type=int, default=2)
     ap.add_argument("--steps", type=int, default=40000)
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--d", type=int, default=128)
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--warmup", type=int, default=500, help="updates of a linear rise to --lr")
+    ap.add_argument("--d", type=int, default=512)
     ap.add_argument("--ckpt", action="store_true", help="gradient checkpointing")
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--no_demean", action="store_true", help="Barlow Twins correlations without removing each row's mean over time")
@@ -148,8 +161,7 @@ def main():
     ap.add_argument("--measure", action="store_true")
     ap.add_argument("--measure_steps", type=int, default=4)
     ap.add_argument("--typical", action="store_true", help="--measure on random windows instead of the largest")
-    ap.add_argument("--blocks", default="2,2,2", help="attention blocks per level, 64, 32, 16")
-    ap.add_argument("--cell_timeline_from", type=int, default=1, help="first level with map-cell timelines: 0 = 64, 1 = 32, 2 = 16, 3 = none")
+    ap.add_argument("--blocks", type=int, default=12, help="spatial-temporal blocks")
     ap.add_argument("--run", default="")
     ap.add_argument("--gpu_gb", type=float, default=29.0, help="most GPU memory PyTorch may hold, cache included, so the desktop keeps the rest")
     ap.add_argument("--save_every", type=int, default=500, help="checkpoint and full evaluation, in updates")
@@ -168,7 +180,7 @@ def main():
     bases = physics_data.base_paths(args.games, train_ids)
     ids = sorted(bases)
     print(f"{len(ids)} training games", flush=True)
-    model = physics.Physics(vocab, avocab, args.d, demean=not args.no_demean, moving_neutrals=MOVING_NEUTRALS, blocks=tuple(int(x) for x in args.blocks.split(",")), cell_timeline_from=args.cell_timeline_from).cuda()
+    model = physics.Physics(vocab, avocab, args.d, demean=not args.no_demean, moving_neutrals=MOVING_NEUTRALS, blocks=args.blocks).cuda()
     model.enc.grad_ckpt = args.ckpt
     if not args.no_compile:
         model.enc.compile_parts()
@@ -187,7 +199,7 @@ def main():
     def full_eval(at):
         t = time.time()
         for k, w in full.items():
-            r = dict(eval=k, step=at, windows=len(w), **evaluate(model, Games(all_bases, vocab, avocab, keep=8), w, args.seqs, args.frames, args.workers))
+            r = dict(eval=k, step=at, windows=len(w), **evaluate(model, Games(all_bases, vocab, avocab, keep=8), w, args.eval_seqs, args.frames, args.workers))
             print(json.dumps(r), flush=True)
             with open(f"{run}/eval.jsonl", "a") as f:
                 f.write(json.dumps(r) + "\n")
@@ -206,7 +218,7 @@ def main():
     if args.measure and not args.typical:
         chosen, info = largest_windows(bases, args.frames, args.seqs)
         print("largest", [(i[0], i[1], i[2]) for i in info], flush=True)
-    data = batches(games, ids, args.seqs, args.frames, args.workers, chosen=chosen)
+    data = batches(games, ids, args.seqs, args.frames, args.workers, args.tokens, chosen=chosen)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
     if ck:
@@ -232,18 +244,20 @@ def main():
                 logs[k] += float(v)
         n = args.accum if not args.measure else 1
         torch.nn.utils.clip_grad_norm_(params, 1.0)
+        for g in opt.param_groups:
+            g["lr"] = args.lr * min(1.0, (step + 1) / args.warmup)
         opt.step()
         opt.zero_grad(set_to_none=True)
         model.update_teacher()
         if args.measure or step % 20 == 0:
             print(json.dumps(dict(step=step, s=round(time.time() - t0, 1), data_s=round(data_s, 2), gpu_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
-                                  rows=b["mask"].shape[2], actions=b["act_mask"].shape[2], **{k: round(v / n, 4) for k, v in logs.items()})), flush=True)
+                                  windows=b["mask"].shape[0], rows=b["mask"].shape[2], actions=b["act_mask"].shape[2], **{k: round(v / n, 4) for k, v in logs.items()})), flush=True)
         if args.measure:
             continue
         if (step + 1) % args.val_every == 0:
             t = time.time()
             for k, w in quick.items():
-                print(json.dumps(dict(val=k, step=step + 1, **evaluate(model, val_games, w, args.seqs, args.frames, args.workers))), flush=True)
+                print(json.dumps(dict(val=k, step=step + 1, **evaluate(model, val_games, w, args.eval_seqs, args.frames, args.workers))), flush=True)
             print(json.dumps(dict(val_s=round(time.time() - t, 1), step=step + 1)), flush=True)
         if (step + 1) % args.save_every == 0:
             torch.save(dict(model=model.state_dict(), opt=opt.state_dict(), step=step + 1), f"{run}/model_step{step + 1}.pt")
