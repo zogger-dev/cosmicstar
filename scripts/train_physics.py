@@ -30,16 +30,20 @@ from cosmicstar.worldmodel import physics, physics_data
 from cosmicstar.worldmodel.action_tokens import ActionVocab
 from cosmicstar.worldmodel.vocab import Vocab
 
-MOVING_NEUTRALS = (321, 322, 335, 336, 337, 612, 659, 660, 661)   # neutral types seen moving in 30 games: critters; data, not names
 TOKENS_PER_WINDOW = 259   # beyond its rows: 3 globals and 256 cells
 EXCLUDED = ("982fc2368b80adb3", "1ff02cd0dd2751fa", "c50626c6c77288c6", "5bf221dbd7045ab1", "d2de5d4aef655894")
+
+
+def map_of(base):
+    """A game's map: its folder in the games tree, the map's hash."""
+    return os.path.basename(os.path.dirname(base))
 
 
 class Games:
     """Open games, least recently used closed. Reads windows on worker threads."""
 
-    def __init__(self, bases, vocab, avocab, keep=48):
-        self.bases, self.vocab, self.avocab, self.keep = bases, vocab, avocab, keep
+    def __init__(self, bases, vocab, avocab, keep=48, map_ids=None):
+        self.bases, self.vocab, self.avocab, self.keep, self.map_ids = bases, vocab, avocab, keep, map_ids or {}
         self.open, self.lock = collections.OrderedDict(), threading.Lock()
 
     def get(self, gid):
@@ -50,6 +54,7 @@ class Games:
                 return g
         g = physics_data.Game(self.bases[gid], self.vocab)
         g._load_actions(self.avocab)
+        g.map_id = self.map_ids.get(map_of(self.bases[gid]), 0)
         with self.lock:
             self.open[gid] = g
             while len(self.open) > self.keep:
@@ -159,7 +164,7 @@ def evaluate(model, games, windows, seqs, L, workers):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--games", default="data/games_arrow")
+    ap.add_argument("--games", default="data/games_v3")
     ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
@@ -178,6 +183,7 @@ def main():
     ap.add_argument("--measure", action="store_true")
     ap.add_argument("--measure_steps", type=int, default=4)
     ap.add_argument("--typical", action="store_true", help="--measure on random windows instead of the largest")
+    ap.add_argument("--min_map_games", type=int, default=5, help="a map with fewer training games is left out: too little to learn its tokens")
     ap.add_argument("--blocks", type=int, default=6, help="spatial-temporal blocks")
     ap.add_argument("--run", default="")
     ap.add_argument("--gpu_gb", type=float, default=29.0, help="most GPU memory PyTorch may hold, cache included, so the desktop keeps the rest")
@@ -195,28 +201,31 @@ def main():
     split = json.load(open(args.split))
     train_ids = set(split["train"]) - set(EXCLUDED)
     bases = physics_data.base_paths(args.games, train_ids)
+    # a learned table per map: only maps with games enough to learn one
+    per_map = collections.Counter(map_of(b) for b in bases.values())
+    map_ids = {m: i for i, m in enumerate(sorted(m for m, n in per_map.items() if n >= args.min_map_games))}
+    bases = {g: b for g, b in bases.items() if map_of(b) in map_ids}
     ids = sorted(bases)
-    print(f"{len(ids)} training games", flush=True)
-    model = physics.Physics(vocab, avocab, args.d, demean=not args.no_demean, moving_neutrals=MOVING_NEUTRALS, blocks=args.blocks).cuda()
+    print(f"{len(ids)} training games on {len(map_ids)} maps, left out {sum(n for m, n in per_map.items() if m not in map_ids)} on {len(per_map) - len(map_ids)}", flush=True)
+    model = physics.Physics(vocab, avocab, args.d, demean=not args.no_demean, moving_neutrals=physics_data.MOVING_NEUTRALS, blocks=args.blocks, n_maps=len(map_ids)).cuda()
     model.enc.grad_ckpt = args.ckpt
     if not args.no_compile:
         model.enc.compile_parts()
         model.teacher.compile_parts()
     print(f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('teacher')) / 1e6:.1f}M parameters", flush=True)
-    games = Games(bases, vocab, avocab)
-    sets = {"unseen_games": split["held_out_games"], "unseen_maps": split["held_out_map_games"]}
-    val_bases = {k: physics_data.base_paths(args.games, set(v) - set(EXCLUDED)) for k, v in sets.items()}
+    games = Games(bases, vocab, avocab, map_ids=map_ids)
+    val_bases = {"unseen_games": {g: b for g, b in physics_data.base_paths(args.games, set(split["held_out_games"]) - set(EXCLUDED)).items() if map_of(b) in map_ids}}
     quick = {k: fixed_windows(v, args.val_windows, args.frames) for k, v in val_bases.items()}
     full = {k: fixed_windows(v, args.eval_windows, args.frames) for k, v in {"train": bases, **val_bases}.items()}
     all_bases = {k: v for d in (bases, *val_bases.values()) for k, v in d.items()}
-    val_games = Games(all_bases, vocab, avocab, keep=2 * args.val_windows)
+    val_games = Games(all_bases, vocab, avocab, keep=2 * args.val_windows, map_ids=map_ids)
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()   # which code these weights go with
     run = args.run or f"data/worldmodel/runs/physics_{commit}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     def full_eval(at):
         t = time.time()
         for k, w in full.items():
-            r = dict(eval=k, step=at, windows=len(w), **evaluate(model, Games(all_bases, vocab, avocab, keep=8), w, args.eval_seqs, args.frames, args.workers))
+            r = dict(eval=k, step=at, windows=len(w), **evaluate(model, Games(all_bases, vocab, avocab, keep=8, map_ids=map_ids), w, args.eval_seqs, args.frames, args.workers))
             print(json.dumps(r), flush=True)
             with open(f"{run}/eval.jsonl", "a") as f:
                 f.write(json.dumps(r) + "\n")
@@ -243,7 +252,7 @@ def main():
         del ck
     if not args.measure:
         os.makedirs(run, exist_ok=True)
-        json.dump(dict(vars(args), commit=commit), open(f"{run}/config_from{start}.json" if start else f"{run}/config.json", "w"))
+        json.dump(dict(vars(args), commit=commit, map_ids=map_ids), open(f"{run}/config_from{start}.json" if start else f"{run}/config.json", "w"))
     steps = args.measure_steps if args.measure else args.steps
     t0 = time.time()
     if not args.no_compile:

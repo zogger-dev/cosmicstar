@@ -1,8 +1,11 @@
 """The physics model's training store (DESIGN_physics.md): any window of a game read straight from its Arrow views.
 
-A game is three views: p1 and p2 hold each player's own units, the observer view p0 holds the neutrals. Nothing is merged:
-each row comes from exactly one view, and players are indexed 0, 1 (neutral 2). <game>.index.npz (build_index, once per
-game) holds what a window can't work out on its own: each row's first and last frame, its death frame and its parent.
+A game is two views, p1 and p2, each with that player's own units and the neutrals as that player knows them. Players are indexed 0,
+1 (neutral 2). An own row comes from its player's view. A neutral row joins both views: it keeps one row by its type and place, since a
+neutral out of sight is a snapshot under another tag; critters go by tag and exist only while seen. <game>.index.npz (build_index, once
+per game) holds what a window can't work out on its own: each row's first and last frame, its death frame and its parent, and each
+neutral's contents as last seen, since a snapshot reports none. Contents change only in a player's view, so before they are first seen
+they are what they are when they are.
 
 A sequence is a grid, frames x rows, with a unit on the same row throughout:
 
@@ -25,24 +28,27 @@ from .tokenize import N_EFFECT_IDS, N_RAW_ABILITY_IDS, PC_KEYS, C_GROUPS, GAS_GA
 
 GAS_TYPES = (*_GAS, 1955, 1956, 1960)     # the rich gas buildings of these patches too
 
-SOURCES = (1, 2, 0)              # the views' file suffixes: player slots 1, 2, then the observer's neutrals
+VIEWS = (1, 2)                   # the views' file suffixes: player slots
+SOURCES = (1, 2, 0)              # where rows come from: each player's own, then the neutrals of both views
+MOVING_NEUTRALS = (321, 322, 335, 336, 337, 612, 659, 660, 661)   # neutral types seen moving in 30 games: critters; data, not names
 NEUTRAL = 2                      # owner index of neutral rows
 BATCH = 64                       # frames per Arrow batch (extract_states.ARROW_FRAMES)
 MARGIN = GAS_GAP_LOOPS + 1       # frames read either side of a window, to bridge gaps across its edges
 PATCH = 3                        # real cells per side each 64-level map token reads
 TOP = 64                         # map tokens per side
-C_DYNAMIC, C_STATIC = 6, 5       # map layers: (visible, seen, creep) per player; pathable, placeable, height, playable, known
+C_DYNAMIC = 6                    # map layers decoded: (visible, seen, creep) per player
+C_LIVE, C_STATIC = 10, 4         # map layers read: (visible, seen, creep, pathable, buildable) per player; height per player, playable, known
 MAX_ROWS = 4096
 SNAPSHOT = 2                     # u_display
 
 
 def base_paths(root, split_ids):
-    """Game id -> its base path (no view suffix), for ids with all three views."""
+    """Game id -> its base path (no view suffix), for ids with both views."""
     out = {}
-    for u in glob.glob(os.path.join(root, "1v1", "*", "*", "*.p0.units.arrow")):
-        base = u[:-len(".p0.units.arrow")]
+    for u in glob.glob(os.path.join(root, "1v1", "*", "*", "*.p1.units.arrow")):
+        base = u[:-len(".p1.units.arrow")]
         gid = os.path.basename(base)
-        if gid in split_ids and all(os.path.exists(f"{base}.p{s}.units.arrow") for s in SOURCES):
+        if gid in split_ids and all(os.path.exists(f"{base}.p{s}.units.arrow") for s in VIEWS):
             out[gid] = base
     return out
 
@@ -51,7 +57,7 @@ def build_index(base, replay_path=None):
     """One game's <base>.index.npz: for each view, row ids with first frame, last frame, death frame (-1: never) and parent id
     (-1: none), and frames of the game. Parents come from the replay's creator tags, so own-view ids only."""
     out = {}
-    for s in SOURCES:
+    for s in VIEWS:
         r, fr = arrow_state.open_view(f"{base}.p{s}")
         first, last = {}, {}
         for i in range(r.num_record_batches):
@@ -79,10 +85,56 @@ def build_index(base, replay_path=None):
         out[f"id{s}"], out[f"first{s}"] = ids, np.array([first[k] for k in ids.tolist()], np.int32)
         out[f"last{s}"], out[f"death{s}"], out[f"parent{s}"] = np.array([last[k] for k in ids.tolist()], np.int32), death, parent
         out["F"] = np.int32(sum(fr.get_batch(i).num_rows for i in range(fr.num_record_batches)))
+    out.update(_neutral_index(base))
     tmp = f"{base}.index.tmp.npz"
     np.savez(tmp, **out)
     os.replace(tmp, f"{base}.index.npz")
     return int(out["F"])
+
+
+def _neutral_index(base):
+    """The neutrals' rows over both views: each view's unit id -> a neutral id (nid<view>, -1: not neutral), each neutral's first, last and
+    death frame, and its contents whenever they change while seen, per neutral (nlog_*)."""
+    keys, out, rows, deaths = {}, {}, [], []
+    for s in VIEWS:
+        r, _ = arrow_state.open_view(f"{base}.p{s}")
+        d = statefile.load(f"{base}.p{s}.cst")
+        tags = d["unit_tag"]
+        nid = np.full(len(tags), -1, np.int32)
+        for i in range(r.num_record_batches):
+            u, _, fr = arrow_state.read_units(r, i)
+            k = _own_mask(u["u_owner"], 0)
+            ids, fo = u["u_id"][k], fr[k]
+            uq, at = np.unique(ids, return_index=True)
+            for v, j in zip(uq.tolist(), at.tolist()):
+                if nid[v] < 0:
+                    ty = int(u["u_type"][k][j])
+                    key = ("tag", int(tags[v])) if ty in MOVING_NEUTRALS else (ty, round(float(u["u_x"][k][j]), 1), round(float(u["u_y"][k][j]), 1))
+                    nid[v] = keys.setdefault(key, len(keys))
+            rows.append((nid[ids], fo, u["u_display"][k] != SNAPSHOT, u["u_contents"][k]))
+        ds, di = d["dead_frame_start"], d["dead_id"]
+        for f in np.nonzero(np.diff(ds))[0].tolist():
+            v = di[ds[f]:ds[f + 1]]
+            v = nid[v[(v >= 0) & (v < len(nid))]]
+            deaths += [(int(x), f) for x in v[v >= 0].tolist()]
+        out[f"nid{s}"] = nid
+    N = len(keys)
+    n, fo, seen, cont = (np.concatenate([x[i] for x in rows]) for i in range(4))
+    first, last, death = np.full(N, 2**30, np.int32), np.full(N, -1, np.int32), np.full(N, -1, np.int32)
+    np.minimum.at(first, n, fo)
+    np.maximum.at(last, n, fo)
+    for k, f in sorted(deaths, key=lambda x: -x[1]):
+        death[k] = f
+    last = np.where(death >= 0, np.minimum(last, death), last)
+    n, fo, cont = n[seen], fo[seen], cont[seen]
+    o = np.lexsort((fo, n))
+    n, fo, cont = n[o], fo[o], cont[o]
+    keep = np.ones(len(n), bool)
+    keep[1:] = (n[1:] != n[:-1]) | (cont[1:] != cont[:-1])
+    n, fo, cont = n[keep], fo[keep], cont[keep]
+    out.update(id0=np.arange(N, dtype=np.int32), first0=first, last0=last, death0=death, parent0=np.full(N, -1, np.int32),
+               nlog_start=np.searchsorted(n, np.arange(N + 1)).astype(np.int64), nlog_frame=fo.astype(np.int32), nlog_contents=cont.astype(np.float32))
+    return out
 
 
 def _parents(replay_path, unit_tag, ids):
@@ -110,14 +162,17 @@ def _own_mask(owner, s):
 
 
 class Game:
-    """One game's three views, opened lazily: batches are memory mapped, so windows of many games can be read without holding any."""
+    """One game's two views, opened lazily: batches are memory mapped, so windows of many games can be read without holding any."""
 
     def __init__(self, base, vocab):
         self.base, self.vocab = base, vocab
-        self.views = {s: arrow_state.open_view(f"{base}.p{s}") for s in SOURCES}
+        self.views = {s: arrow_state.open_view(f"{base}.p{s}") for s in VIEWS}
+        self.map_id = 0                         # the map's learned tokens, set by whoever knows the training maps
         ix = np.load(f"{base}.index.npz")
         self.F = int(ix["F"])
         self.index = {s: {k: ix[f"{k}{s}"] for k in ("id", "first", "last", "death", "parent")} for s in SOURCES}
+        self.nid = {s: ix[f"nid{s}"] for s in VIEWS}
+        self.nlog = ix["nlog_start"], ix["nlog_frame"], ix["nlog_contents"]
         self.rest = {s: statefile.load(f"{base}.p{s}.cst") for s in (1, 2)}
         d = self.rest[1]
         self.meta = json.loads(str(d["meta"]))
@@ -127,27 +182,26 @@ class Game:
         self.half = np.array([(x1 - x0) / 2, (y1 - y0) / 2], np.float32)
         self.side = float(max(x1 - x0, y1 - y0))
         self.cells = self._cell_index()
-        unpack = lambda k: np.unpackbits(d[k]).reshape(H, -1)[:, :W]
-        play = np.zeros((H, W), np.uint8)
-        play[y0:y1, x0:x1] = 1
-        static = np.stack([unpack("map_pathing_grid"), unpack("map_placement_grid"), d["map_terrain_height"].reshape(H, W), play,
-                           np.ones((H, W), np.uint8)])
-        self.static = self._patches(static)
-        self.static_grid = static[:, y0:y1, x0:x1].transpose(1, 2, 0)                 # [h, w, C_STATIC]: the playable area, at its own size
+        h_ = d["map_terrain_height"].reshape(H, W)[y0:y1, x0:x1]
+        self.static_grid = np.stack([h_, h_, np.ones_like(h_), np.ones_like(h_)], -1)      # [h, w, C_STATIC]: height per player, then playable and known: zero only where a batch pads
         self.grp = {s: (self.rest[s]["grp_start"], self.rest[s]["grp_id"]) if "grp_start" in self.rest[s].files else None for s in (1, 2)}
         self.tag_row = {s: {int(t): i for i, t in enumerate(self.rest[s]["unit_tag"].tolist())} for s in (1, 2)}
         self.acts = None
-        # any view's unit id -> a flat index over all views' own rows: tags are the same in every view, so a pointer reaches a row in another view
-        p0 = statefile.load(f"{base}.p0.cst")["unit_tag"]
-        tags = {1: self.rest[1]["unit_tag"], 2: self.rest[2]["unit_tag"], 0: p0}
+        # any view's unit id -> a flat index over all rows: tags are the same in every view, so a pointer reaches a row in another view, and a neutral's tags all reach its one row
+        tags = {s: self.rest[s]["unit_tag"] for s in VIEWS}
         self.flat_off, n, tag_flat = {}, 0, {}
-        for s in SOURCES:
+        for s in VIEWS:
             self.flat_off[s] = n
             for k, i in enumerate(self.index[s]["id"].tolist()):
                 tag_flat[int(tags[s][i])] = n + k
             n += len(self.index[s]["id"])
+        self.flat_off[0] = n
+        for s in VIEWS:
+            for i in np.nonzero(self.nid[s] >= 0)[0].tolist():
+                tag_flat[int(tags[s][i])] = n + int(self.nid[s][i])
+        n += len(self.index[0]["id"])
         self.n_flat = n
-        self.to_flat = {s: np.array([tag_flat.get(int(t), -1) for t in tags[s].tolist()], np.int64) for s in SOURCES}
+        self.to_flat = {s: np.array([tag_flat.get(int(t), -1) for t in tags[s].tolist()], np.int64) for s in VIEWS}
 
     def _cell_index(self):
         """(y, x) real cell of each of the PATCH x PATCH samples of each map token: [TOP, TOP, PATCH * PATCH]. Tokens cover a square of the
@@ -161,19 +215,16 @@ class Game:
         y = np.broadcast_to(ys[:, :, :, None], (TOP, TOP, PATCH, PATCH)).reshape(TOP, TOP, -1)
         return np.clip(y, 0, self.H - 1), np.clip(x, 0, self.W - 1)
 
-    def _patches(self, layers):
-        """[C, H, W] -> [TOP, TOP, C * PATCH * PATCH] uint8."""
-        y, x = self.cells
-        return layers[:, y, x].transpose(1, 2, 0, 3).reshape(TOP, TOP, -1)
-
-    def _read(self, s, f0, f1):
-        """View s, frames [f0, f1): its rows' columns and list columns, oldest first, already decoded and filtered to this view's rows."""
+    def _read(self, s, f0, f1, neutral=False):
+        """View s, frames [f0, f1): its own rows', or the neutrals', columns and list columns, oldest first, already decoded and filtered."""
         r, _ = self.views[s]
         out_u, out_l = [], []
         for i in range(max(0, f0 // BATCH), min(r.num_record_batches, (f1 - 1) // BATCH + 1)):
-            u, l, fr = arrow_state.read_units(r, i)
-            keep = _own_mask(u["u_owner"], s) & (fr >= f0) & (fr < f1)
-            if s:  # a player's own snapshots are not units (see the desync check): tags outside the replay's log
+            if (s, i) not in self._batches:
+                self._batches[(s, i)] = arrow_state.read_units(r, i)
+            u, l, fr = self._batches[(s, i)]
+            keep = _own_mask(u["u_owner"], 0 if neutral else s) & (fr >= f0) & (fr < f1)
+            if not neutral:  # a player's own snapshots are not units (see the desync check): tags outside the replay's log
                 keep &= u["u_display"] != SNAPSHOT
             out_u.append({k: v[keep] for k, v in u.items()} | {"frame": fr[keep]})
             out_l.append((keep, l))
@@ -182,6 +233,7 @@ class Game:
     def window(self, t0, L, swap=False):
         """L consecutive frames from frame t0, as one dict of numpy arrays: see the module docstring."""
         rows, row_of = [], {}
+        self._batches = {}                     # own rows and neutrals share a view's batches
         for s in SOURCES:
             ix = self.index[s]
             live = (ix["first"] < t0 + L) & (ix["last"] >= t0)
@@ -197,6 +249,7 @@ class Game:
         for s in SOURCES:
             self._fill(out, s, t0, L, row_of)
         self._dead_rows(out, rows, t0, L)
+        self._batches = {}
         sw = (lambda o: 1 - o if o < 2 else o) if swap else (lambda o: o)
         out["owner"] = np.array([sw({1: 0, 2: 1, 0: NEUTRAL}[s]) for s, _ in rows], np.int64).reshape(-1)
         births, parents = [], []
@@ -212,7 +265,7 @@ class Game:
         out["birth_parent"] = np.array(parents, np.int64)
         out["death_frame"] = np.array([self._death(s, k, t0, L) for s, k in rows], np.int64)
         out["map"], out["grid"] = self._map_frames(t0, L, swap)
-        out["static"], out["static_grid"], out["origin"] = self.static, self.static_grid, np.array(self.playable[:2], np.float32)
+        out["static_grid"], out["origin"], out["map_id"] = self.static_grid, np.array(self.playable[:2], np.float32), np.int64(self.map_id)
         out["center"], out["half"], out["side"] = self.center, self.half, np.float32(self.side)
         out["loops"] = t0 + 1 + np.arange(L)
         out["players"] = np.array([self.vocab.race.get(p["race"], 3) for p in self.meta["players"]], np.int64)[::-1 if swap else 1]
@@ -282,13 +335,18 @@ class Game:
         return out
 
     def _load_actions(self, avocab):
-        """The game's action tokens, once. The tags of all three views' own rows stand in for one id space."""
+        """The game's action tokens, once. The tags of both views' rows stand in for one id space; a neutral's tags all stand for its one row."""
         tags, key = [], []
-        for s in SOURCES:
-            ut = self.rest[s]["unit_tag"] if s else statefile.load(f"{self.base}.p0.cst")["unit_tag"]
+        for s in VIEWS:
+            ut = self.rest[s]["unit_tag"]
             for i in self.index[s]["id"].tolist():
                 tags.append(int(ut[i]))
                 key.append((s, i))
+        for s in VIEWS:
+            ut = self.rest[s]["unit_tag"]
+            for i in np.nonzero(self.nid[s] >= 0)[0].tolist():
+                tags.append(int(ut[i]))
+                key.append((0, int(self.nid[s][i])))
         stub = types.SimpleNamespace(meta=self.meta, unit_tag=tags, vocab=self.vocab)
         self.acts = GameActions(self.base + ".acts.npz", stub, avocab)
         self.act_key = key
@@ -334,6 +392,8 @@ class Game:
 
     def _fill(self, out, s, t0, L, row_of):
         """Writes view s's rows of the window into the grid, then bridges passengers and gas workers."""
+        if s == 0:
+            return self._fill_neutrals(out, t0, L, row_of)
         lo, hi = max(0, t0 - MARGIN), min(self.F, t0 + L + MARGIN)
         U, Ls = self._read(s, lo, hi)
         if not U:
@@ -357,6 +417,46 @@ class Game:
         if s:
             self._groups(out, s, t0, L, ids, frame, row_of)
             self._contained(out, s, t0, L, row_of, u, bags)
+
+    def _fill_neutrals(self, out, t0, L, row_of):
+        """Neutrals from both views: a snapshot first, then what a player sees over it, once. Contents as last seen."""
+        ix = self.index[0]
+        nid_row = np.full(len(ix["id"]), -1, np.int64)
+        for (s, k), r_ in row_of.items():
+            if s == 0:
+                nid_row[k] = r_
+        seen = np.zeros(out["mask"].shape, bool)
+        for visible in (False, True):
+            for s in VIEWS:
+                U, Ls = self._read(s, t0, t0 + L, neutral=True)
+                u = {k: np.concatenate([x[k] for x in U]) for k in U[0]}
+                n = self.nid[s][u["u_id"]]
+                fo, ro = u["frame"] - t0, nid_row[n]
+                d = ix["death"][n]
+                ok = (ro >= 0) & ((d < 0) | (u["frame"] <= d)) & ((u["u_display"] != SNAPSHOT) == visible) & ~seen[fo, ro]
+                src = np.nonzero(ok)[0]
+                _set(out, u, src, fo[src], ro[src], self)
+                if not visible:
+                    continue
+                seen[fo[src], ro[src]] = True
+                out["engaged_row"][fo[src], ro[src]] = self._row_of_id(s, u["u_engaged"][src])
+                off, bags = 0, []
+                for (keep, l), x in zip(Ls, U):
+                    idx = np.nonzero(keep)[0]
+                    bags.append((off, idx, l))
+                    off += len(idx)
+                self._bags(out, bags, src, fo[src], ro[src], s)
+        start, log_f, log_c = self.nlog
+        at = RAW_NUMS.index("contents")
+        frames = t0 + np.arange(L)
+        for k in np.nonzero(nid_row >= 0)[0].tolist():
+            a, b = int(start[k]), int(start[k + 1])
+            if a == b:
+                continue
+            j = np.searchsorted(log_f[a:b], frames, side="right") - 1
+            r_ = nid_row[k]
+            m = out["mask"][:, r_]
+            out["num"][m, r_, at] = log_c[a:b][np.maximum(j, 0)][m]
 
     def _row_of_id(self, s, ids):
         """View s's unit ids (-1: none) -> rows of this window (-1: no row)."""
@@ -485,11 +585,12 @@ class Game:
             out["alive"][d + 1:, r_] = False
 
     def _map_frames(self, t0, L, swap):
-        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen and creep, the next-frame targets; and [L, h, w, C_DYNAMIC], the same over the
-        playable area at its own size, the input."""
+        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen and creep, the next-frame targets; and [L, h, w, C_LIVE], the playable area at its own
+        size with each player's pathable and buildable too, the input."""
         out = np.zeros((L, TOP, TOP, C_DYNAMIC * PATCH * PATCH), np.uint8)
         x0, y0, x1, y1 = self.playable
-        grid = np.zeros((L, y1 - y0, x1 - x0, C_DYNAMIC), np.uint8)
+        grid = np.zeros((L, y1 - y0, x1 - x0, C_LIVE), np.uint8)
+        bits = lambda col, j: np.unpackbits(np.frombuffer(col[j].as_py(), np.uint8).reshape(self.H, -1), axis=1)[:, :self.W]
         y, x = self.cells
         for pi, s in enumerate((1, 2)):
             at = (1 - pi if swap else pi) * 3 * PATCH * PATCH
@@ -502,8 +603,10 @@ class Game:
                 out[f, :, :, at:at + PATCH * PATCH] = (vis == 2)[y, x]
                 out[f, :, :, at + PATCH * PATCH:at + 2 * PATCH * PATCH] = (vis > 0)[y, x]
                 out[f, :, :, at + 2 * PATCH * PATCH:at + 3 * PATCH * PATCH] = creep[y, x]
-                g = (1 - pi if swap else pi) * 3
-                grid[f, :, :, g], grid[f, :, :, g + 1], grid[f, :, :, g + 2] = (vis == 2)[y0:y1, x0:x1], (vis > 0)[y0:y1, x0:x1], creep[y0:y1, x0:x1]
+                g = (1 - pi if swap else pi) * 5
+                crop = lambda a: a[y0:y1, x0:x1]
+                grid[f, :, :, g], grid[f, :, :, g + 1], grid[f, :, :, g + 2] = crop(vis == 2), crop(vis > 0), crop(creep)
+                grid[f, :, :, g + 3], grid[f, :, :, g + 4] = crop(bits(b.column("pathable"), j)), crop(bits(b.column("buildable"), j))
         return out, grid
 
 
@@ -563,11 +666,11 @@ def collate(windows, vocab):
     for b, w in enumerate(windows):
         own[b, :len(w["owner"])] = w["owner"]
     out["owner"] = torch.from_numpy(own)
-    for k in ("center", "half", "side", "players", "ply_num", "map", "static", "origin"):
+    for k in ("center", "half", "side", "players", "ply_num", "map", "origin", "map_id"):
         out[k] = torch.from_numpy(np.stack([w[k] for w in windows]))
-    # the map at its own size, zero past its edge: the known layer tells. Sizes are multiples of 4, the tower's reduction
-    gh, gw = (int(np.ceil(max(w["grid"].shape[i] for w in windows) / 4)) * 4 for i in (1, 2))
-    grid, sgrid = np.zeros((B, F_, gh, gw, C_DYNAMIC), np.uint8), np.zeros((B, gh, gw, C_STATIC), np.uint8)
+    # the map at its own size, zero past its edge: the known layer tells. Sizes are multiples of 8, the tower's reduction
+    gh, gw = (int(np.ceil(max(w["grid"].shape[i] for w in windows) / 8)) * 8 for i in (1, 2))
+    grid, sgrid = np.zeros((B, F_, gh, gw, C_LIVE), np.uint8), np.zeros((B, gh, gw, C_STATIC), np.uint8)
     for b, w in enumerate(windows):
         h_, w_ = w["grid"].shape[1:3]
         grid[b, :, :h_, :w_], sgrid[b, :h_, :w_] = w["grid"], w["static_grid"]

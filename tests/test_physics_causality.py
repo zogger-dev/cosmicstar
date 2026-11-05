@@ -1,5 +1,7 @@
 """The one-pass model's dependencies on a real window, exactly: a frame's clean state holds no action of that frame and nothing later."""
+import glob
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -7,7 +9,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from train_physics import EXCLUDED, MOVING_NEUTRALS, Games, largest_windows  # noqa: E402
+from train_physics import EXCLUDED, Games  # noqa: E402
 
 from cosmicstar.worldmodel import physics, physics_data  # noqa: E402
 from cosmicstar.worldmodel.action_tokens import ActionVocab  # noqa: E402
@@ -18,8 +20,8 @@ L = 12
 
 def load():
     vocab, avocab = Vocab(json.load(open("data/worldmodel/frame_cache_seq/vocab.json"))), ActionVocab()
-    split = json.load(open("data/games/splits/default.json"))
-    bases = physics_data.base_paths("data/games_arrow", set(split["train"]) - set(EXCLUDED))
+    ids = {os.path.basename(p)[:-len(".index.npz")] for p in glob.glob("data/games_v3/1v1/*/*/*.index.npz")}      # any game will do: nothing is learned here
+    bases = physics_data.base_paths("data/games_v3", ids - set(EXCLUDED))
     games = Games(bases, vocab, avocab)
     b = None
     for gid in sorted(bases)[:40]:
@@ -34,7 +36,7 @@ def load():
                 break
         if b:
             break
-    return physics.Physics(vocab, avocab, 128, moving_neutrals=MOVING_NEUTRALS, blocks=3).eval(), *b
+    return physics.Physics(vocab, avocab, 128, moving_neutrals=physics_data.MOVING_NEUTRALS, blocks=3).eval(), *b
 
 
 def diff(a, c):

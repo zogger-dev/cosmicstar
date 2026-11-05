@@ -1,10 +1,9 @@
 """The physics model (DESIGN_physics.md): a single pass over a whole sequence predicts the next state at every frame, as a language
 model does. No horizon input, no motion input.
 
-    per frame        a ResNet over the map at its own size, a 16 x 16 grid of anchored queries reading its output, entities with their surroundings sampled from it,
-                     globals, effects and action tokens
+    per frame        256 learned tokens per map plus a ResNet over the live map at the anchors of a 16 x 16 grid, entities, globals, effects and action tokens
     each block       spatial, temporal, feed-forward, then this frame's actions
-      spatial        every token reads all entities in one softmax and all cells in another, added. No action of this frame: this is the clean state
+      spatial        every token reads all tokens of the frame in one softmax. No action of this frame: this is the clean state
       temporal       rows, cells and globals, each reading earlier frames' action-updated tokens; each player's actions: causal
       actions        actions read the state and each other, the state reads the actions. Carried on as a change kept apart from the state
     outputs          a residual per token, s + g(s), trained against an EMA teacher's next token with Barlow Twins, plus the raw heads
@@ -31,7 +30,7 @@ from .dense import ResBlock
 from .direct import RoPE2D
 from .encoder import mlp
 from .grid_latent import MapDecoder
-from .physics_data import C_DYNAMIC, C_STATIC, NEUTRAL, PATCH, PROD, QUEUE, RAW_NUMS, TOP
+from .physics_data import C_DYNAMIC, C_LIVE, C_STATIC, NEUTRAL, PATCH, PROD, QUEUE, RAW_NUMS, TOP
 from .tokenize import C_GROUPS, N_BUFF_IDS, N_EFFECT_IDS, N_RAW_ABILITY_IDS, PC_KEYS
 
 I = {n: i for i, n in enumerate(RAW_NUMS)}
@@ -43,7 +42,6 @@ POS_SCALE = 0.29                 # a fast unit's per-loop move, map units
 POS_BOOST = 4.0
 DISCOUNT = 0.05                  # critters' whole loss and larvae's position
 GRID = 16                        # the grid's cells per side
-SAMPLES = 25                     # points around a row read from the map
 ROPE_SHORTEST = 1 / 32           # map units: a cell is one map unit
 
 
@@ -149,15 +147,10 @@ class Block(nn.Module):
         nn.init.zeros_(self.act.o.weight)                # starts as the identity: the updated tokens start as the state
 
     def spatial(self, x, c):
-        """All tokens of a frame. Each token has one softmax per kind of token, entities and map cells, so neither can crowd out the other; the results add."""
-        n = c["E"]
+        """All tokens of a frame read each other, entities and map cells in one softmax."""
         y = self.ns(x)
-        q, k, v = self.space.query(y, c["ang"]), self.space.key(y, c["ang"]), self.space.value(y)
-        qe, qm = q[:, :, :n], q[:, :, n:]
-        ke, km, ve, vm = k[:, :, :n], k[:, :, n:], v[:, :, :n], v[:, :, n:]
-        ae = self.ent(qe, ke, ve, c["valid"]) + F.scaled_dot_product_attention(qe, km, vm)
-        am = self.ent(qm, ke, ve, c["valid"]) + F.scaled_dot_product_attention(qm, km, vm)
-        return x + self.space.out(torch.cat([ae, am], 2))
+        a = self.ent(self.space.query(y, c["ang"]), self.space.key(y, c["ang"]), self.space.value(y), c["valid"])
+        return x + self.space.out(a)
 
     def temporal(self, x, key, mask, t):
         """x, key [N, T, d], mask [N, T]: each token reads the keys at or before its frame. A token with nothing to read keeps its own frame's key: an empty softmax is NaN."""
@@ -173,20 +166,19 @@ class Block(nn.Module):
         return x + self.w3(F.silu(self.w1(y)) * self.w2(y))
 
     def actions(self, x, dl, a, c):
-        """Frames with an action: actions read the state and each other, then the state reads the actions; x + the returned dl is the updated state. dl [BF, T, d], a [BF, A, d]."""
-        fa, n = c["fa"], c["E"]
+        """Frames with an action: actions read the state and each other in one softmax, then the state reads the actions; x + the returned dl is the updated state.
+        dl [BF, T, d], a [BF, A, d]."""
+        fa = c["fa"]
         y, ya = self.na(x[fa] + dl[fa]), self.na(a[fa])
         q, k, v = self.act.query(y, c["ang"][fa]), self.act.key(y, c["ang"][fa]), self.act.value(y)
         qa, ka, va = self.act.query(ya, c["ang_a"][fa]), self.act.key(ya, c["ang_a"][fa]), self.act.value(ya)
         bias = (self.bias * torch.tensor([0.0, 1.0, 1.0], device=x.device)[:, None]).to(q.dtype)    # code 0: no pair, no bias
         am = c["act_mask"][fa]
-        ra = self.pair(qa, k[:, :, :n], v[:, :, :n], c["valid"][fa], c["code_ae"], c["rowmap"], bias) + F.scaled_dot_product_attention(qa, k[:, :, n:], v[:, :, n:]) \
-            + self.ent(qa, ka, va, am)                                                         # and each other: both players' actions of this frame
-        re = self.pair(q[:, :, :n], ka, va, am, c["code_ea"], c["rowmap"], bias)
-        rm = self.ent(q[:, :, n:], ka, va, am)
+        ra = self.pair(qa, torch.cat([k, ka], 2), torch.cat([v, va], 2), torch.cat([c["valid"][fa], am], 1), c["code_ae"], c["rowmap"], bias)
+        r = self.pair(q, ka, va, am, c["code_ea"], c["rowmap"], bias)
         a, dl = a.clone(), dl.clone()
         a[fa] = torch.where(am[..., None], a[fa] + self.act.out(ra), a[fa]).to(a.dtype)
-        dl[fa] = (dl[fa] + self.act.out(torch.cat([re, rm], 2))).to(dl.dtype)
+        dl[fa] = (dl[fa] + self.act.out(r)).to(dl.dtype)
         return dl, a
 
     def forward(self, x, dl, a, c, last):
@@ -224,35 +216,27 @@ class Block(nn.Module):
 
 
 class Tower(nn.Module):
-    """A plain ResNet over the playable area's cells at their own size: half resolution at 64 channels, quarter at 128 and then 256. Returns half and quarter."""
+    """A plain ResNet over the live map at its own size: 3 strides, doubling to the model's width at an eighth of the resolution."""
 
-    def __init__(self, c_in, blocks=2):
+    def __init__(self, c_in, d, blocks=2):
         super().__init__()
-        self.stem = nn.Conv2d(c_in, 64, 3, stride=2, padding=1)
-        self.r1 = nn.ModuleList(ResBlock(64) for _ in range(blocks))
-        self.down = nn.Conv2d(64, 128, 3, stride=2, padding=1)
-        self.r2 = nn.ModuleList(ResBlock(128) for _ in range(blocks))
-        self.widen = nn.Conv2d(128, 256, 1)
-        self.r3 = nn.ModuleList(ResBlock(256) for _ in range(blocks))
+        c = [d // 4, d // 2, d]
+        self.down = nn.ModuleList(nn.Conv2d(a, b, 3, stride=2, padding=1) for a, b in zip([c_in] + c[:-1], c))
+        self.res = nn.ModuleList(nn.ModuleList(ResBlock(k) for _ in range(blocks)) for k in c)
 
     def forward(self, x):
         one = x.new_ones(1, 1, 1, 1)
-        h = self.stem(x)
-        for b in self.r1:
-            h = b(h, one)
-        q = self.down(h)
-        for b in self.r2:
-            q = b(q, one)
-        q = self.widen(q)
-        for b in self.r3:
-            q = b(q, one)
-        return h, q
+        for down, res in zip(self.down, self.res):
+            x = down(x)
+            for b in res:
+                x = b(x, one)
+        return x
 
 
 class PhysicsEncoder(nn.Module):
-    """The whole sequence through the tower and the blocks. Returns rows, cells and globals twice, the clean state and the action-updated tokens, and the tower's features."""
+    """The whole sequence through the tower and the blocks. Returns rows, cells and globals twice, the clean state and the action-updated tokens."""
 
-    def __init__(self, vocab, avocab, d=512, blocks=6, heads=8, kv_heads=4, ff=1365):
+    def __init__(self, vocab, avocab, d=512, blocks=6, heads=8, kv_heads=4, ff=1365, n_maps=1):
         super().__init__()
         self.d = d
         self.unit = nn.Embedding(vocab.n_units, d)
@@ -282,18 +266,14 @@ class PhysicsEncoder(nn.Module):
         self.effect = nn.Embedding(N_EFFECT_IDS, d)
         self.eff_num = nn.Linear(1, d)
         # map
-        self.tower = Tower(C_DYNAMIC + C_STATIC)
-        self.terrain = mlp((C_DYNAMIC + C_STATIC + 64) * SAMPLES + 2, d)          # what surrounds a row, and its place within its cell
-        self.anchor = nn.Parameter(torch.zeros(1, GRID * GRID, d))
-        self.keys_in = nn.Linear(256, d)
-        self.cross, self.nc, self.nk = Heads(d, heads, kv_heads), nn.LayerNorm(d), nn.LayerNorm(d)
-        self.cross_attend = Attend()
+        self.tower = Tower(C_LIVE + C_STATIC, d)
+        self.map_tokens = nn.Parameter(torch.zeros(n_maps, GRID * GRID, d))       # what each place of each map is, whatever is on it now
         self.rope = RoPE2D(d // heads, lo=ROPE_SHORTEST, hi=256.0)
         self.time, self.time_in = LoopTime(), nn.Linear(LoopTime().out_dim(), d)
         self.blocks = nn.ModuleList(Block(d, heads, kv_heads, ff) for _ in range(blocks))
         self.norm_e, self.norm_c, self.norm_g = nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d)
         nn.init.normal_(self.cls, std=0.02)
-        nn.init.normal_(self.anchor, std=0.02)
+        nn.init.normal_(self.map_tokens, std=0.02)
         self.grad_ckpt = False
 
     def compile_parts(self):
@@ -332,40 +312,24 @@ class PhysicsEncoder(nn.Module):
             + self.player(b["act_player"])
         return self.a_mix(n)
 
+    def anchors(self, b):
+        """[B, S, 2] the grid cells' centers, map units from the center of the map."""
+        c = (torch.arange(GRID, device=b["mask"].device, dtype=torch.float32) + 0.5) - GRID / 2
+        return torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(1, GRID * GRID, 2) * b["side"][:, None, None] / GRID
+
     def embed_map(self, b):
-        """The tower over each frame's cells, the grid's cells reading its output, and each row's surroundings. Returns cells [BF, S, d], rows' terrain [B, F, R, d], the tower's quarter features."""
-        B, F_, R = b["mask"].shape
+        """Each frame's map tokens [BF, S, d]: the map's learned tokens + the tower over the live map, read at their anchors."""
+        B, F_ = b["mask"].shape[:2]
         dt = self.cls.dtype
         st = b["static_grid"].to(dt)
-        st = torch.cat([st[..., :2], st[..., 2:3] / 255, st[..., 3:]], -1)
-        raw = torch.cat([b["grid"].to(dt), st[:, None].expand(B, F_, -1, -1, -1)], -1).reshape(B * F_, *b["grid"].shape[2:4], C_DYNAMIC + C_STATIC).permute(0, 3, 1, 2)
-        half, quarter = self.tower(raw)
+        st = torch.cat([st[..., :2] / 255, st[..., 2:]], -1)
+        raw = torch.cat([b["grid"].to(dt), st[:, None].expand(B, F_, -1, -1, -1)], -1).reshape(B * F_, *b["grid"].shape[2:4], C_LIVE + C_STATIC).permute(0, 3, 1, 2)
+        top = self.tower(raw)
         H, W = raw.shape[2:]
-        h4, w4 = quarter.shape[2:]
-        origin = b["origin"]
-        # the grid: anchored queries over the tower's tokens, which sit at their own places
-        side = b["side"][:, None, None]
-        c = (torch.arange(GRID, device=raw.device, dtype=dt) + 0.5) - GRID / 2
-        anchors = torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(1, GRID * GRID, 2) * side / GRID     # map units from the center
-        jx, jy = (torch.arange(w4, device=raw.device, dtype=dt) + 0.5) * W / w4, (torch.arange(h4, device=raw.device, dtype=dt) + 0.5) * H / h4
-        kp = torch.stack(torch.broadcast_tensors(jx[None, :], jy[:, None]), -1).view(1, h4 * w4, 2) + (origin - b["center"])[:, None]
-        rep = lambda z: z.repeat_interleave(F_, 0)
-        known = F.avg_pool2d(b["static_grid"][..., 4:5].to(dt).permute(0, 3, 1, 2), (H // h4, W // w4)).view(B, h4 * w4) > 0
-        toks = self.keys_in(quarter.flatten(2).transpose(1, 2))
-        y = self.nk(toks)
-        a0 = self.anchor.expand(B * F_, -1, -1)
-        q = self.cross.query(self.nc(a0), self.rope.angles(rep(anchors)))
-        a = self.cross_attend(q, self.cross.key(y, self.rope.angles(rep(kp))), self.cross.value(y), rep(known))
-        cells = a0 + self.cross.out(a)
-        # each row's surroundings: 5 x 5 points a map unit apart, from the raw layers and the half resolution features
-        xy = torch.stack([b["x"], b["y"]], -1).to(dt).reshape(B * F_, R, 2)
-        off = torch.stack(torch.meshgrid(*(torch.arange(5, device=raw.device, dtype=dt) - 2,) * 2, indexing="xy"), -1).view(1, 1, SAMPLES, 2)
-        pts = xy[:, :, None] + off - rep(origin)[:, None, None]
-        grid = (pts / torch.tensor([W, H], device=raw.device, dtype=dt) * 2 - 1).view(B * F_, R, SAMPLES, 2)
-        sample = lambda f: F.grid_sample(f, grid, align_corners=False, padding_mode="border")       # [BF, C, R, SAMPLES]
-        near = torch.cat([sample(raw), sample(half)], 1).permute(0, 2, 3, 1).flatten(2)
-        terrain = self.terrain(torch.cat([near, xy - xy.floor()], -1)).view(B, F_, R, -1)
-        return cells, terrain, quarter
+        at = (self.anchors(b) + (b["center"] - b["origin"])[:, None]) / torch.tensor([W, H], device=raw.device, dtype=raw.dtype) * 2 - 1
+        at = at.repeat_interleave(F_, 0).view(B * F_, GRID, GRID, 2)
+        live = F.grid_sample(top, at.to(top.dtype), align_corners=False).flatten(2).transpose(1, 2)
+        return self.map_tokens[b["map_id"]].repeat_interleave(F_, 0) + live
 
     def forward(self, b, last_action=True):
         """last_action False skips the last block's action step, when only the clean state is wanted: the updated tokens returned are then a block old."""
@@ -377,52 +341,50 @@ class PhysicsEncoder(nn.Module):
         g0 = 3
         ckpt = self.grad_ckpt and any(p.requires_grad for p in self.parameters())
         run = (lambda f, *a: checkpoint(f, *a, use_reentrant=False)) if ckpt else (lambda f, *a: f(*a))
-        cells, terrain, skip = run(self.embed_map, b)
+        cells = run(self.embed_map, b)
         G = self.globals(b).reshape(B * F_, g0, d)
-        rows = ((self.rows(b) + terrain) * b["mask"][..., None]).reshape(B * F_, R, d)
+        rows = (self.rows(b) * b["mask"][..., None]).reshape(B * F_, R, d)
         eff = (self.effect(b["eff_type"]) + self.owner(b["eff_owner"]) + self.eff_num(b["eff_radius"][..., None])).reshape(B * F_, X, d)
         x = torch.cat([G, rows, eff, cells], 1)
         n = g0 + R + X
+        T = n + GRID * GRID
         acts = self.actions(b).reshape(B * F_, A, d)
-        valid = torch.cat([torch.ones(B, F_, g0, dtype=torch.bool, device=dev), b["mask"], b["eff_mask"]], 2).reshape(B * F_, n)
-        side = b["side"][:, None, None]
-        c0 = (torch.arange(GRID, device=dev, dtype=torch.float32) + 0.5) - GRID / 2
-        cen = torch.stack(torch.broadcast_tensors(c0[None, :], c0[:, None]), -1).view(1, GRID * GRID, 2) * side / GRID
+        valid = torch.cat([torch.ones(B, F_, g0, dtype=torch.bool, device=dev), b["mask"], b["eff_mask"], torch.ones(B, F_, GRID * GRID, dtype=torch.bool, device=dev)], 2).reshape(B * F_, T)
+        cen = self.anchors(b)
         rel = torch.stack([b["x"], b["y"]], -1) - b["center"][:, None, None]
-        pos = torch.cat([torch.zeros(B, F_, g0, 2, device=dev), rel, b["eff_xy"], cen[:, None].expand(-1, F_, -1, -1)], 2).reshape(B * F_, n + GRID * GRID, 2)
+        pos = torch.cat([torch.zeros(B, F_, g0, 2, device=dev), rel, b["eff_xy"], cen[:, None].expand(-1, F_, -1, -1)], 2).reshape(B * F_, T, 2)
         # tokens without a place sit at the origin, unrotated
         timed = torch.cat([torch.arange(g0 + R, device=dev), torch.arange(n, n + GRID * GRID, device=dev)])
         t_mask = torch.cat([torch.ones(B, F_, g0, dtype=torch.bool, device=dev), b["mask"], torch.ones(B, F_, GRID * GRID, dtype=torch.bool, device=dev)], 2).transpose(1, 2).reshape(B * len(timed), F_)
         frames = lambda T: self.time_in(self.time(torch.arange(T, device=dev)).to(x.dtype))
         act_mask = b["act_mask"].reshape(B * F_, A)
         fa = torch.nonzero(act_mask.any(1), as_tuple=True)[0]
-        c = dict(B=B, F=F_, E=n, valid=valid, ang=self.rope.angles(pos), ang_a=self.rope.angles(b["act_xy"].reshape(B * F_, A, 2)), act_mask=act_mask, timed=timed, t_mask=t_mask,
+        c = dict(B=B, F=F_, valid=valid, ang=self.rope.angles(pos), ang_a=self.rope.angles(b["act_xy"].reshape(B * F_, A, 2)), act_mask=act_mask, timed=timed, t_mask=t_mask,
                  t_frames=frames(F_), order=b["act_order"], a_frames=frames(b["act_order"].shape[2]))
         if len(fa):
             fa = fa if len(fa) > 1 else fa.repeat(2)
             c["fa"] = fa
-            c["code_ae"], c["code_ea"], c["rowmap"] = pointer_pairs(b["act_target"].reshape(B * F_, A), fa, A, n, g0)
+            c["code_ae"], c["code_ea"], c["rowmap"] = pointer_pairs(b["act_target"].reshape(B * F_, A), fa, A, T, g0)
         dl = torch.zeros_like(x)
         for i, blk in enumerate(self.blocks):
             last = (not last_action and i == len(self.blocks) - 1) or not len(fa)
             x, dl, acts = run(blk, x, dl, acts, c, last)
-        out = lambda z: dict(ent=self.norm_e(z[:, g0:g0 + R]).view(B, F_, R, d), cells=self.norm_c(z[:, n:]).view(B, F_, GRID * GRID, d), glob=self.norm_g(z[:, :g0]).view(B, F_, g0, d),
-                             skip=skip.view(B, F_, *skip.shape[1:]))
+        out = lambda z: dict(ent=self.norm_e(z[:, g0:g0 + R]).view(B, F_, R, d), cells=self.norm_c(z[:, n:]).view(B, F_, GRID * GRID, d), glob=self.norm_g(z[:, :g0]).view(B, F_, g0, d))
         return out(x), out(x + dl)
 
 
 @torch.no_grad()
 def pointer_pairs(target, fa, A, n, g0):
-    """For the frames fa with actions: code tables of action -> target row (1) and target row -> action (2), [P, A, n] and [P, n, A], and rowmap [len(fa)] -> P or -1. A table
-    always exists, so a compiled part sees one shape of call."""
+    """For the frames fa with actions, n state tokens: code tables of action -> target row (1) over the state then the actions, [P, A, n + A], and target row -> action (2),
+    [P, n, A], and rowmap [len(fa)] -> P or -1. A table always exists, so a compiled part sees one shape of call."""
     t = target[fa]
     fi, ai = torch.nonzero(t >= 0, as_tuple=True)
     if not len(fi):
-        return torch.zeros(1, A, n, dtype=torch.uint8, device=t.device), torch.zeros(1, n, A, dtype=torch.uint8, device=t.device), torch.full((len(fa),), -1, device=t.device)
+        return torch.zeros(1, A, n + A, dtype=torch.uint8, device=t.device), torch.zeros(1, n, A, dtype=torch.uint8, device=t.device), torch.full((len(fa),), -1, device=t.device)
     uq, inv = torch.unique(fi, return_inverse=True)
     rowmap = torch.full((len(fa),), -1, device=t.device)
     rowmap[uq] = torch.arange(len(uq), device=t.device)
-    ae, ea = torch.zeros(len(uq), A, n, dtype=torch.uint8, device=t.device), torch.zeros(len(uq), n, A, dtype=torch.uint8, device=t.device)
+    ae, ea = torch.zeros(len(uq), A, n + A, dtype=torch.uint8, device=t.device), torch.zeros(len(uq), n, A, dtype=torch.uint8, device=t.device)
     row = t[fi, ai] + g0
     ae[inv, ai, row] = 1
     ea[inv, row, ai] = 2
@@ -515,7 +477,6 @@ class Physics(nn.Module):
         self.head = RowHead(d, vocab.n_units, vocab.n_abilities)
         self.births = BirthHead(d, kw.get("heads", 8), self.head)
         self.map_dec = MapDecoder(d, C_DYNAMIC + N_EFFECT_IDS)
-        self.map_skip = nn.Linear(256, d)            # fine detail for the decoder: the tower's features where it reads
         self.player_next = nn.Linear(d, len(PC_KEYS))
         self.ema, self.demean = ema, demean
         self.register_buffer("critter", torch.tensor(sorted(moving_neutrals) or [-1], dtype=torch.int64), persistent=False)
@@ -744,13 +705,7 @@ class Physics(nn.Module):
         cell = (iy // r) * side + (ix // r)
         size = b["side"][:, None].expand(B, F_ - 1).reshape(-1, 1) / TOP
         off = torch.stack([(ix % r + 0.5 - r / 2) * size, (iy % r + 0.5 - r / 2) * size], -1)
-        skip = out["skip"].reshape(B * (F_ - 1), *out["skip"].shape[2:])
-        fix = lambda z: z[:, None].expand(B, F_ - 1, *z.shape[1:]).reshape(B * (F_ - 1), *z.shape[1:])
-        at = (torch.stack([ix, iy], -1) + 0.5 - TOP / 2) * size[..., None] + fix(b["center"] - b["origin"])[:, None]
-        wh = torch.tensor([b["grid"].shape[3], b["grid"].shape[2]], device=cells.device, dtype=at.dtype)
-        near = F.grid_sample(skip, (at / wh * 2 - 1)[:, :, None].to(skip.dtype), align_corners=False, padding_mode="border")[..., 0].transpose(1, 2)
-        read = torch.gather(cells, 1, cell[..., None].expand(-1, -1, cells.shape[-1])) + self.map_skip(near)
-        o = self.map_dec(read, torch.arange(read.shape[1], device=cell.device)[None].expand(read.shape[0], -1), off)
+        o = self.map_dec(cells, cell, off)
         m = b["map"][:, 1:].reshape(B * (F_ - 1), TOP * TOP, C_DYNAMIC * PATCH * PATCH)
         centre = (PATCH * PATCH) // 2
         tgt = m[..., centre::PATCH * PATCH][:, :, :C_DYNAMIC].float()
