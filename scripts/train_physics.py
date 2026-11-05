@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-from cosmicstar.worldmodel import physics, physics_data, statefile
+from cosmicstar.worldmodel import epochs, physics, physics_data, statefile
 from cosmicstar.worldmodel.action_tokens import ActionVocab
 from cosmicstar.worldmodel.vocab import Vocab
 
@@ -95,35 +95,34 @@ def warm_compile(model, games, ids, L):
     gc.freeze()         # what stays, compiled code above all, is left out of every later collection: 0.3 s a pass otherwise
 
 
-def _read_passes(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen, bucket):
-    """The reader process: passes of windows into q, as many as fit a budget of tokens, at most seqs, padded rows counted, so a pass of large windows has fewer of them.
-    bucket > 0: a pass holds windows of one size bucket, rows // bucket, so a pass pads little; buckets fill at their own rate, so passes of every size come in
-    random order. chosen: one bucket, in the order given."""
+def _read_passes(q, bases, vocab_path, map_ids, seqs, L, workers, chosen, plan_kw, start):
+    """The reader process: the passes of the epoch plan (epochs.Plan) into q, from pass `start` counted from the first epoch, so a resumed run
+    carries on where it stopped. chosen: a fixed list of (game, frame) instead, cycled seqs at a time."""
     vocab = Vocab(json.load(open(vocab_path)))
     games = Games(bases, vocab, ActionVocab(), map_ids=map_ids)
     pool = ThreadPoolExecutor(workers)
-    i, rng, holds = 0, np.random.default_rng(), collections.defaultdict(list)
-    while True:
-        if chosen:
+    if chosen:
+        i, rng = 0, np.random.default_rng()
+        while True:
             pick = [chosen[(i + k) % len(chosen)] for k in range(seqs)]
             i += seqs
-        else:
-            pick = [(ids[rng.integers(len(ids))], -1) for _ in range(seqs)]
-        for w in pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick):
-            hold = holds[w["mask"].shape[1] // bucket if bucket > 0 and not chosen else 0]
-            r = max([w["mask"].shape[1]] + [h["mask"].shape[1] for h in hold])
-            if hold and (len(hold) == seqs or (len(hold) + 1) * (r + TOKENS_PER_WINDOW) > tokens):
-                q.put(physics_data.collate(hold, vocab))
-                hold.clear()
-            hold.append(w)
+            q.put(physics_data.collate(list(pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick)), vocab))
+    plan = epochs.Plan(bases, {g: map_of(b) for g, b in bases.items()}, L, seqs=seqs, **plan_kw)
+    epoch, k = plan.locate(start)
+    while True:
+        passes = plan.passes(epoch)
+        print(json.dumps(dict(epoch=epoch, passes=len(passes), windows=sum(map(len, passes)), from_pass=k, buckets=len(plan.top))), flush=True)
+        for wins in passes[k:]:
+            q.put(physics_data.collate(list(pool.map(lambda p: games.read(p[0], p[1], L, p[2]), wins)), vocab))
+        epoch, k = epoch + 1, 0
 
 
-def batches(bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, prefetch=4, chosen=None, bucket=32):
+def batches(bases, vocab_path, map_ids, seqs, L, workers, plan_kw=None, start=0, prefetch=4, chosen=None):
     """Passes of windows from a process of their own: reading on threads here took the interpreter from the training thread, about 1.1 s of idle GPU each time 16 windows were read.
     A thread here holds passes ready, since the reader hands one over late while its own threads are reading. chosen: a fixed list of (game, frame) to cycle instead of random ones."""
     ctx = mp.get_context("spawn")
     q = ctx.Queue(2)
-    reader = ctx.Process(target=_read_passes, args=(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen, bucket), daemon=True)
+    reader = ctx.Process(target=_read_passes, args=(q, bases, vocab_path, map_ids, seqs, L, workers, chosen, plan_kw or {}, start), daemon=True)
     reader.start()
     ready = queue.Queue(prefetch)
 
@@ -205,7 +204,10 @@ def main():
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
     ap.add_argument("--tokens", type=int, default=3900, help="budget of a pass: windows x (most rows + 259)")
-    ap.add_argument("--bucket", type=int, default=32, help="a pass holds windows whose row counts fall in one bucket of this width, so it pads little (0: any sizes)")
+    ap.add_argument("--bucket", type=int, default=32, help="a pass holds windows whose row counts fall in one bucket of this width, so it pads little")
+    ap.add_argument("--min_bucket_games", type=int, default=40, help="the thin ends of the size range join their neighbours until a bucket has windows from this many games")
+    ap.add_argument("--stride", type=int, default=14, help="an epoch starts a window every this many frames of each game; this many epochs start one at every frame")
+    ap.add_argument("--seed", type=int, default=0, help="the epoch plan's seed: offsets, order and swaps")
     ap.add_argument("--eval_seqs", type=int, default=4)
     ap.add_argument("--frames", type=int, default=56)
     ap.add_argument("--accum", type=int, default=2)
@@ -281,7 +283,9 @@ def main():
     if args.measure and not args.typical:
         chosen, info = largest_windows(bases, args.frames, args.seqs)
         print("largest", [(i[0], i[1], i[2]) for i in info], flush=True)
-    data = batches(bases, ids, args.vocab, map_ids, args.seqs, args.frames, args.workers, args.tokens, chosen=chosen, bucket=args.bucket)
+    plan_kw = dict(seed=args.seed, stride=args.stride, width=args.bucket, min_games=args.min_bucket_games, tokens=args.tokens, per_window=TOKENS_PER_WINDOW,
+                   accum=args.accum)
+    data = batches(bases, args.vocab, map_ids, args.seqs, args.frames, args.workers, plan_kw, start * args.accum, chosen=chosen)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
     if ck:
@@ -297,19 +301,25 @@ def main():
     for step in range(start, steps):
         logs = collections.Counter()
         data_s = 0.0
-        for _ in range(args.accum if not args.measure else 1):
-            t = time.time()
-            b = next(data)
-            data_s += time.time() - t
+        # an update's passes, weighted by their windows: each loss term is a mean over its pass, so without weights a pass of 3 large windows would
+        # count as much as one of 8 small ones; weighted, every window counts the same whichever pass it is in. All windows have the same frames,
+        # so counting each frame's prediction as a sample gives the same weights
+        t = time.time()
+        passes = [next(data) for _ in range(args.accum if not args.measure else 1)]
+        data_s += time.time() - t
+        sizes = [b["mask"].shape[0] for b in passes]
+        for b, size in zip(passes, sizes):
+            w = size / sum(sizes)
             b = {k: v.cuda(non_blocking=True) for k, v in b.items()}
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss, lg = model(b)
-            (loss / (args.accum if not args.measure else 1)).backward()
+            (loss * w).backward()
             del loss
             gc.collect()      # a pass's checkpoints sit in a reference cycle: uncollected, they take GBs from the next pass
             for k, v in lg.items():
-                logs[k] += float(v)
-        n = args.accum if not args.measure else 1
+                logs[k] += float(v) * w
+        del passes
+        n = 1                 # logs are already the update's weighted means
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         for g in opt.param_groups:
             g["lr"] = args.lr * min(1.0, (step + 1) / args.warmup)

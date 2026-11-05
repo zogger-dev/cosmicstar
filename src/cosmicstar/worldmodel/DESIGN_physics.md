@@ -354,6 +354,24 @@ Only attention compiles: compiling the convs and MLPs too fails at 40 frames and
 checkpoint's recomputation, so calls keep one shape: at least 2 rows, always a pair table. Attention is already local (4 x 4 windows); the 64 level's cost is its
 count, 4,096 tokens in each of 336 frames per pass, about 1.4M, so a conv-only 64 level is still only an experiment.
 
+**Epochs (2026-11-05, `epochs.py`):** every pass is planned ahead from a seed, so a run's data order is reproducible and resumes exactly
+(pass `step x accum`). Training and validation use one patch (`--patch`, default 5.0.14), since the model has no rules input and two patches'
+numbers would blend.
+- An epoch starts a window every `--stride` (14) frames of each game, from an offset of the game's own; offsets permute per game, so 14 epochs
+  start a window at every frame exactly once and nothing repeats before. The model sees no absolute time, so the stride is invisible to it, and
+  a frame sits at 4 depths of its window per epoch. 5.0.14: 341,705 windows, 62,088 passes, about 35 hours an epoch.
+- A window's rows (units alive in any of its frames) come from each game's index without reading it (0.4 s for all games, exact). Buckets of 32
+  rows, the thin ends merged until each has windows from 40 games: 15 buckets, a pass 3 to 8 windows within the 3,900-token budget. 97% of
+  entity slots are live, against 70% with random passes: 51.5k live rows/s against 42.1k.
+- Spread through an epoch: each bucket's passes evenly, the passes of an update from different buckets, each game's windows evenly through its
+  bucket's passes and never twice in a pass, distinct maps where the bucket allows, and from a game the window whose kind (third of the game,
+  effects or not) was seen longest ago. The player swap is drawn per window from the seed.
+- Each pass's loss counts by its windows (`windows / windows in the update`): every loss term is a mean over its pass, so unweighted a pass of
+  3 large windows would count as much as one of 8 small ones. All windows have the same frames, so counting each frame's prediction as a
+  sample gives the same weights.
+- To watch: Barlow standardizes over the pass, and a pass now holds windows of one size (mostly one stage of the game). If its loss differs by
+  bucket, standardize with running statistics instead.
+
 Lattice tokens were most of the old cost: the old encoder used 26 GB for 48 frames. Entity-count batch caps are
 pinned for later.
 
