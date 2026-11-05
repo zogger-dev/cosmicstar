@@ -744,36 +744,34 @@ def collate(windows, vocab):
         np.add.at(count[b], w["birth_frame"] - 1, 1)
     out["birth_count"] = torch.from_numpy(count)
     out["birth_b"], out["birth_f"], out["birth_r"], out["birth_p"] = (torch.tensor(x, dtype=torch.int64) for x in (bb, ff, rr, pp))
-    # actions, per frame
-    A = max(2, max((np.bincount(w["actions"]["frame"], minlength=1).max() if len(w["actions"]["frame"]) else 0) for w in windows))
+    # actions: each frame has K slots per player, player 0's then player 1's, in the order given; a player's timeline is its slots frame after frame
+    K = 1
+    for w in windows:
+        if len(w["actions"]["frame"]):
+            K = max(K, int(np.bincount(w["actions"]["frame"] * 2 + w["actions"]["player"].astype(np.int64)).max()))
+    A = 2 * K
     shape = (B, F_, A)
     amask = np.zeros(shape, bool)
     keys = dict(kind=np.int64, family=np.int64, button=np.int64, tkind=np.int64, group=np.int64, gop=np.int64, remove=np.int64, subgroup=np.int64, player=np.int64)
     ac = {k: np.zeros(shape, t) for k, t in keys.items()}
     anum, axy = np.zeros(shape + (windows[0]["actions"]["num"].shape[1],), np.float32), np.zeros(shape + (2,), np.float32)
     placed, target = np.zeros(shape, bool), np.full(shape, -1, np.int64)
-    orders = [[[], []] for _ in windows]
     for b, w in enumerate(windows):
         a = w["actions"]
-        seen = np.zeros(F_, np.int64)
+        seen = np.zeros((F_, 2), np.int64)
         for i, f in enumerate(a["frame"].tolist()):
-            s = seen[f]
-            seen[f] += 1
+            p = int(a["player"][i])
+            s = p * K + seen[f, p]
+            seen[f, p] += 1
             amask[b, f, s] = True
             for k in keys:
                 ac[k][b, f, s] = a[k][i]
             anum[b, f, s], axy[b, f, s], placed[b, f, s] = a["num"][i], a["xy"][i], a["placed"][i]
             target[b, f, s] = a["target"][i]
-            orders[b][int(a["player"][i])].append(f * A + s)
-    N = max(2, max(max(len(o[0]), len(o[1])) for o in orders))
-    order = np.full((B, 2, N), -1, np.int64)
-    for b, o in enumerate(orders):
-        for p in (0, 1):
-            order[b, p, :len(o[p])] = o[p]
     for k in keys:
         out[f"act_{k}"] = torch.from_numpy(ac[k])
-    out["act_mask"], out["act_num"], out["act_xy"], out["act_placed"], out["act_target"], out["act_order"] = (
-        torch.from_numpy(x) for x in (amask, anum, axy, placed, target, order))
+    out["act_mask"], out["act_num"], out["act_xy"], out["act_placed"], out["act_target"] = (
+        torch.from_numpy(x) for x in (amask, anum, axy, placed, target))
     au = [(b * F_ + w["autocast"][:, 0]) * R + w["autocast"][:, 1] for b, w in enumerate(windows)]
     av = np.concatenate([w["autocast"] for w in windows])
     out["auto_at"], out["auto_fam"], out["auto_but"], out["auto_on"] = torch.from_numpy(np.concatenate(au).astype(np.int64)), *(torch.from_numpy(av[:, k]) for k in (2, 3, 4))

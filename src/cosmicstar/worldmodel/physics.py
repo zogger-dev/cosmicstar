@@ -198,19 +198,15 @@ class Block(nn.Module):
         return x, dl, a
 
     def _act_timeline(self, a, c):
-        """Each player's action tokens over the window, causal, in time order. Tokens live per frame; a timeline needs one row per player."""
-        order, B, F_, d = c["order"], c["B"], c["F"], a.shape[-1]
-        if not (order >= 0).any():
+        """Each player's action tokens over the window, causal, in time order: its own slots of each frame, frame after frame, so a timeline is a reshape.
+        a [BF, 2K, d]: player 0's K slots, then player 1's."""
+        B, F_, d = c["B"], c["F"], a.shape[-1]
+        K, m = a.shape[1] // 2, c["a_mask"]
+        if not m.any():
             return a
-        Nn, A = order.shape[2], a.shape[1]
-        flat = a.view(B, F_ * A, d)
-        m = order >= 0
-        seq = torch.gather(flat[:, None].expand(-1, 2, -1, -1), 2, order.clamp(min=0)[..., None].expand(-1, -1, -1, d)).reshape(B * 2, Nn, d)
-        y = self.ff(self.temporal(seq, seq, m.reshape(B * 2, Nn), c["a_frames"])).view(B, 2, Nn, d)
-        out = flat.clone()
-        bi, pi, ni = torch.nonzero(m, as_tuple=True)
-        out[bi, order[bi, pi, ni]] = y[bi, pi, ni].to(out.dtype)
-        return out.view(B * F_, A, d)
+        seq = a.view(B, F_, 2, K, d).transpose(1, 2).reshape(B * 2, F_ * K, d)
+        y = torch.where(m[..., None], self.ff(self.temporal(seq, seq, m, c["a_frames"])), seq)
+        return y.view(B, 2, F_, K, d).transpose(1, 2).reshape(B * F_, 2 * K, d).to(a.dtype)
 
 
 class Tower(nn.Module):
@@ -357,7 +353,8 @@ class PhysicsEncoder(nn.Module):
         act_mask = b["act_mask"].reshape(B * F_, A)
         fa = torch.nonzero(act_mask.any(1), as_tuple=True)[0]
         c = dict(B=B, F=F_, valid=valid, ang=self.rope.angles(pos), ang_a=self.rope.angles(b["act_xy"].reshape(B * F_, A, 2)), act_mask=act_mask, t_mask=t_mask,
-                 t_frames=frames(F_), order=b["act_order"], a_frames=frames(b["act_order"].shape[2]))
+                 t_frames=frames(F_), a_mask=b["act_mask"].view(B, F_, 2, A // 2).transpose(1, 2).reshape(B * 2, F_ * (A // 2)),
+                 a_frames=frames(F_).repeat_interleave(A // 2, 0))
         if len(fa):
             fa = fa if len(fa) > 1 else fa.repeat(2)
             c["fa"] = fa
