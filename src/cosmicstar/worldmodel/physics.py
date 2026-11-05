@@ -5,7 +5,8 @@ model does. No horizon input, no motion input.
     each block       spatial, temporal, feed-forward, then this frame's actions
       spatial        every token reads all tokens of the frame in one softmax. No action of this frame: this is the clean state
       temporal       rows, cells and globals, each reading earlier frames' action-updated tokens; each player's actions: causal
-      actions        actions read the state and each other, the state reads the actions. Carried on as a change kept apart from the state
+      actions        actions read the state (both players' tokens), not each other: a player's own earlier actions come through its timeline;
+                     the state reads the actions. Carried on as a change kept apart from the state
     outputs          a residual per token, s + g(s), trained against an EMA teacher's next token with Barlow Twins, plus the raw heads
 
 At inference, frame by frame: state at t -> action predictor -> actions at t -> updated tokens -> t + 1. Training runs the same dependencies in one pass with the
@@ -166,7 +167,8 @@ class Block(nn.Module):
         return x + self.w3(F.silu(self.w1(y)) * self.w2(y))
 
     def actions(self, x, dl, a, c):
-        """Frames with an action: actions read the state and each other in one softmax, then the state reads the actions; x + the returned dl is the updated state.
+        """Frames with an action: actions read the state, not each other (a player's own earlier actions reach it through its causal timeline, and the two players'
+        actions of one frame are simultaneous), then the state reads the actions; x + the returned dl is the updated state.
         dl [BF, T, d], a [BF, A, d]."""
         fa = c["fa"]
         y, ya = self.na(x[fa] + dl[fa]), self.na(a[fa])
@@ -174,7 +176,7 @@ class Block(nn.Module):
         qa, ka, va = self.act.query(ya, c["ang_a"][fa]), self.act.key(ya, c["ang_a"][fa]), self.act.value(ya)
         bias = (self.bias * torch.tensor([0.0, 1.0, 1.0], device=x.device)[:, None]).to(q.dtype)    # code 0: no pair, no bias
         am = c["act_mask"][fa]
-        ra = self.pair(qa, torch.cat([k, ka], 2), torch.cat([v, va], 2), torch.cat([c["valid"][fa], am], 1), c["code_ae"], c["rowmap"], bias)
+        ra = self.pair(qa, k, v, c["valid"][fa], c["code_ae"], c["rowmap"], bias)
         r = self.pair(q, ka, va, am, c["code_ea"], c["rowmap"], bias)
         a, dl = a.clone(), dl.clone()
         a[fa] = torch.where(am[..., None], a[fa] + self.act.out(ra), a[fa]).to(a.dtype)
@@ -369,16 +371,16 @@ class PhysicsEncoder(nn.Module):
 
 @torch.no_grad()
 def pointer_pairs(target, fa, A, n, g0):
-    """For the frames fa with actions, n state tokens: code tables of action -> target row (1) over the state then the actions, [P, A, n + A], and target row -> action (2),
+    """For the frames fa with actions, n state tokens: code tables of action -> target row (1) over the state, [P, A, n], and target row -> action (2),
     [P, n, A], and rowmap [len(fa)] -> P or -1. A table always exists, so a compiled part sees one shape of call."""
     t = target[fa]
     fi, ai = torch.nonzero(t >= 0, as_tuple=True)
     if not len(fi):
-        return torch.zeros(1, A, n + A, dtype=torch.uint8, device=t.device), torch.zeros(1, n, A, dtype=torch.uint8, device=t.device), torch.full((len(fa),), -1, device=t.device)
+        return torch.zeros(1, A, n, dtype=torch.uint8, device=t.device), torch.zeros(1, n, A, dtype=torch.uint8, device=t.device), torch.full((len(fa),), -1, device=t.device)
     uq, inv = torch.unique(fi, return_inverse=True)
     rowmap = torch.full((len(fa),), -1, device=t.device)
     rowmap[uq] = torch.arange(len(uq), device=t.device)
-    ae, ea = torch.zeros(len(uq), A, n + A, dtype=torch.uint8, device=t.device), torch.zeros(len(uq), n, A, dtype=torch.uint8, device=t.device)
+    ae, ea = torch.zeros(len(uq), A, n, dtype=torch.uint8, device=t.device), torch.zeros(len(uq), n, A, dtype=torch.uint8, device=t.device)
     row = t[fi, ai] + g0
     ae[inv, ai, row] = 1
     ea[inv, row, ai] = 2
