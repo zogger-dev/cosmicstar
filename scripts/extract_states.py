@@ -656,7 +656,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
                 opts.feature_layer.minimap_resolution.x = opts.feature_layer.minimap_resolution.y = 16
             req = sc_pb.RequestStartReplay(
                 # observer: fog off, everything; a player: that player's view, fog on (module doc)
-                replay_data=data, observed_player_id=perspective, disable_fog=(perspective == 0 or bool(os.environ.get("COSMICSTAR_FOG_OFF"))), options=opts)
+                replay_data=data, observed_player_id=perspective, disable_fog=perspective == 0, options=opts)
             if not current:
                 # the map passed in, not looked up by handle: by handle the older engine sometimes
                 # tries to validate / download the dependency through Battle.net, fails without a
