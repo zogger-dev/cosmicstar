@@ -651,15 +651,19 @@ def _set(out, u, src, fo, ro, game):
 
 
 QUEUE, PROD = 8, 8               # order and production slots with targets (physics.RowHead)
+CODE = 64                        # a row's identity code: random per window, so it means nothing but which row, and pointers can be read by matching it
 FORCED = 16                      # map tokens under effects always among each frame's decoded sample
 
 
-def collate(windows, vocab):
-    """Windows of the same length -> one batch of tensors: grids [B, F, R, ...], lists flat by (B * F + f) * R + r."""
+def collate(windows, vocab, rng=None):
+    """Windows of the same length -> one batch of tensors: grids [B, F, R, ...], lists flat by (B * F + f) * R + r. rng: for the rows' identity codes."""
     import torch
     B, F_ = len(windows), windows[0]["mask"].shape[0]
     R = max(w["mask"].shape[1] for w in windows)
     out = {}
+    rng = rng or np.random.default_rng()
+    code = rng.standard_normal((B, R, CODE)).astype(np.float32)
+    out["row_code"] = torch.from_numpy(code / np.linalg.norm(code, axis=-1, keepdims=True))      # unit length: matching codes score 1, others about 1/8
     for k in ("mask", "alive", "inside", "parent_row", "engaged_row", "type", "x", "y", "num", "groups"):
         a0 = windows[0][k]
         fill = True if k == "alive" else -1 if k in ("parent_row", "engaged_row") else 0
@@ -711,6 +715,8 @@ def collate(windows, vocab):
     else:
         feat = np.zeros((0, 4), np.float32)
     out["ord_at"], out["ord_abil"], out["ord_feat"] = torch.from_numpy(at.astype(np.int64)), torch.from_numpy(ab), torch.from_numpy(feat)
+    out["ord_slot"] = torch.from_numpy(np.minimum(wh[:, 2], QUEUE - 1).astype(np.int64))                  # 0: what the unit is doing now
+    out["ord_trow"] = torch.from_numpy(v[:, 3].astype(np.int64) if len(v) else np.zeros(0, np.int64))     # the target's row in this window, -1: none
     at, wh, v = cat("prod")
     ab = vocab.ability_index(v[:, 0].astype(np.int64)).astype(np.int64) if len(v) else np.zeros(0, np.int64)
     feat = np.stack([v[:, 1], wh[:, 2] / 5], 1).astype(np.float32) if len(v) else np.zeros((0, 2), np.float32)
@@ -720,6 +726,7 @@ def collate(windows, vocab):
         slot_abil[bb[q], wh[q, 0], wh[q, 1], QUEUE + wh[q, 2]] = ab[q]
         slot_reg[bb[q], wh[q, 0], wh[q, 1], QUEUE + wh[q, 2], 3] = v[q, 1]
     out["prod_at"], out["prod_abil"], out["prod_feat"] = torch.from_numpy(at.astype(np.int64)), torch.from_numpy(ab), torch.from_numpy(feat)
+    out["prod_slot"] = torch.from_numpy(np.minimum(wh[:, 2], PROD - 1).astype(np.int64))
     at, wh, v = cat("buff")
     out["buff_at"], out["buff_id"] = torch.from_numpy(at.astype(np.int64)), torch.from_numpy(np.clip(v[:, 0], 0, 511).astype(np.int64) if len(v) else np.zeros(0, np.int64))
     at, wh, v = cat("rally")

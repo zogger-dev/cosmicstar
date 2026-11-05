@@ -13,7 +13,11 @@ At inference, frame by frame: state at t -> action predictor -> actions at t -> 
 real actions: a clean state at t holds no action from t, and the target is the teacher's clean state at t + 1.
 
 An action points at its target through a learned bias on the attention score of that pair, one per direction. Nothing is copied
-from the target, so an entity knows nothing about being targeted until attention tells it."""
+from the target, so an entity knows nothing about being targeted until attention tells it.
+
+A state's own pointers (engaged target, container, each order's target) are inputs by identity: each row has a random code, fresh per window, and
+a row carries the codes of the rows it points at. A code means nothing but which row, so the network reads a pointer by matching codes, and
+the pointer head can keep a target by matching it. Orders and production carry their place in the queue."""
 
 import copy
 import math
@@ -31,7 +35,7 @@ from .dense import ResBlock
 from .direct import RoPE2D
 from .encoder import mlp
 from .grid_latent import MapDecoder
-from .physics_data import C_DYNAMIC, C_LIVE, C_STATIC, NEUTRAL, PATCH, PROD, QUEUE, RAW_NUMS, TOP
+from .physics_data import C_DYNAMIC, C_LIVE, C_STATIC, CODE, NEUTRAL, PATCH, PROD, QUEUE, RAW_NUMS, TOP
 from .tokenize import C_GROUPS, N_BUFF_IDS, N_EFFECT_IDS, N_RAW_ABILITY_IDS, PC_KEYS
 
 I = {n: i for i, n in enumerate(RAW_NUMS)}
@@ -242,6 +246,9 @@ class PhysicsEncoder(nn.Module):
         self.groups = nn.Linear(C_GROUPS, d)
         self.buff = nn.Embedding(N_BUFF_IDS, d)
         self.bag_in = nn.ModuleDict(dict(ord=mlp(4, d), prod=mlp(2, d), rally=mlp(3, d)))
+        self.bag_slot = nn.ModuleDict(dict(ord=nn.Embedding(QUEUE, d), prod=nn.Embedding(PROD, d)))     # which place in the queue: 0 is now
+        # pointers as inputs: each row's random identity code, and the codes of the rows it points at, each kind through its own map
+        self.code_in = nn.ModuleDict({k: nn.Linear(CODE, d, bias=False) for k in ("self", "engaged", "container", "order")})
         self.raw_ability = nn.Embedding(N_RAW_ABILITY_IDS, d)
         self.auto_on = nn.Embedding(2, d)
         self.race = nn.Embedding(4, d)
@@ -287,9 +294,22 @@ class PhysicsEncoder(nn.Module):
         return (out / cnt).view(B, F_, R, -1)
 
     def rows(self, b):
-        ids = self.unit(b["type"].long()) + self.owner(b["owner"])[:, None] + self.num_in(row_numbers(b)) + self.groups(b["groups"].to(b["num"].dtype))
-        ids = ids + self._bag("ord", b, self.ability(b["ord_abil"]) + self.bag_in["ord"](b["ord_feat"]))
-        ids = ids + self._bag("prod", b, self.ability(b["prod_abil"]) + self.bag_in["prod"](b["prod_feat"]))
+        B, F_, R = b["mask"].shape
+        code = b["row_code"]                                                       # [B, R, CODE]
+        dt = b["num"].dtype
+
+        def pointed(bi, row):
+            """The code of the row pointed at, zeros where row < 0 (no target)."""
+            return torch.where((row >= 0)[..., None], code[bi, row.clamp(min=0)], 0).to(dt)
+
+        bb = torch.arange(B, device=code.device)[:, None, None]
+        ids = self.unit(b["type"].long()) + self.owner(b["owner"])[:, None] + self.num_in(row_numbers(b)) + self.groups(b["groups"].to(dt))
+        ids = ids + self.code_in["self"](code.to(dt))[:, None] + self.code_in["engaged"](pointed(bb, b["engaged_row"].long())) \
+            + self.code_in["container"](pointed(bb, b["parent_row"].long()))
+        o_b = b["ord_at"] // (F_ * R)
+        ids = ids + self._bag("ord", b, self.ability(b["ord_abil"]) + self.bag_in["ord"](b["ord_feat"]) + self.bag_slot["ord"](b["ord_slot"])
+                              + self.code_in["order"](pointed(o_b, b["ord_trow"])))
+        ids = ids + self._bag("prod", b, self.ability(b["prod_abil"]) + self.bag_in["prod"](b["prod_feat"]) + self.bag_slot["prod"](b["prod_slot"]))
         ids = ids + self._bag("buff", b, self.buff(b["buff_id"]))
         ids = ids + self._bag("rally", b, self.bag_in["rally"](b["rally_feat"]))
         ids = ids + self._bag("ab", b, self.raw_ability(b["ab_id"]))
@@ -570,7 +590,10 @@ class Physics(nn.Module):
         died = (~b["alive"][bi, fi + 1, ri]).float()
         pw = (len(died) - died.sum()).clamp(min=1) / died.sum().clamp(min=1)
         logs["alive"] = F.binary_cross_entropy_with_logits(o["alive"].float(), died, pos_weight=pw.clamp(max=100.0), reduction="none").mul(whole).sum() / whole.sum()
+        self._ptr_stats = None
         logs["queues"], logs["abilities"], logs["pointers"] = self._sampled(p, b, bi, fi, ri)
+        if self._ptr_stats is not None:
+            logs["ptr_acc"], logs["ptr_copy"] = self._ptr_stats
         # buffs, control groups and small presence bits: every scored token. Rare positives are the point, so report them too
         key = (bi * F_ + fi + 1) * R + ri
         buffs_t = torch.zeros(len(bi), N_BUFF_IDS, device=p.device, dtype=o["buffs"].float().dtype)
@@ -639,6 +662,9 @@ class Physics(nn.Module):
         logits = logits.masked_fill(~live[:, None], -1e4).float()
         has = (tgt >= 0) & live.gather(1, tgt.clamp(min=0))
         pointers = F.cross_entropy(logits[has], tgt[has]) if has.any() else p.sum() * 0
+        with torch.no_grad():         # accuracy, and the baseline of keeping this frame's pointer: the same kind and slot, a frame earlier
+            now = torch.cat([b["engaged_row"].reshape(-1)[at2 - R][:, None], b["parent_row"].reshape(-1)[at2 - R][:, None], b["ord_row"].reshape(-1, QUEUE)[at2 - R]], 1).long()
+            self._ptr_stats = ((logits.argmax(-1) == tgt)[has].float().mean(), (now == tgt)[has].float().mean()) if has.any() else None
         return queues, abilities, pointers
 
     def birth_losses(self, out, b):
