@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-from cosmicstar.worldmodel import physics, physics_data
+from cosmicstar.worldmodel import physics, physics_data, statefile
 from cosmicstar.worldmodel.action_tokens import ActionVocab
 from cosmicstar.worldmodel.vocab import Vocab
 
@@ -38,6 +38,17 @@ EXCLUDED = ("982fc2368b80adb3", "1ff02cd0dd2751fa", "c50626c6c77288c6", "5bf221d
 def map_of(base):
     """A game's map: its folder in the games tree, the map's hash."""
     return os.path.basename(os.path.dirname(base))
+
+
+def patch_of(base):
+    """A game's patch, e.g. 5.0.14, from its replay's metadata."""
+    return json.loads(str(statefile.load(f"{base}.p1.cst")["meta"])).get("game_version")
+
+
+def of_patch(bases, patch):
+    """The games of one patch (patch empty: all). Rules change between patches and the model has no rules input yet, so training mixing two
+    patches would learn a blend of both: Ghost life, Spire cost and the like."""
+    return {g: b for g, b in bases.items() if not patch or patch_of(b) == patch}
 
 
 class Games:
@@ -190,6 +201,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", default="data/games_v3")
     ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
+    ap.add_argument("--patch", default="5.0.14", help="train and validate on one patch's games (empty: every patch)")
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
     ap.add_argument("--tokens", type=int, default=3900, help="budget of a pass: windows x (most rows + 259)")
@@ -225,13 +237,13 @@ def main():
     vocab, avocab = Vocab(json.load(open(args.vocab))), ActionVocab()
     split = json.load(open(args.split))
     train_ids = set(split["train"]) - set(EXCLUDED)
-    bases = physics_data.base_paths(args.games, train_ids)
+    bases = of_patch(physics_data.base_paths(args.games, train_ids), args.patch)
     # a learned table per map: only maps with games enough to learn one
     per_map = collections.Counter(map_of(b) for b in bases.values())
     map_ids = {m: i for i, m in enumerate(sorted(m for m, n in per_map.items() if n >= args.min_map_games))}
     bases = {g: b for g, b in bases.items() if map_of(b) in map_ids}
     ids = sorted(bases)
-    print(f"{len(ids)} training games on {len(map_ids)} maps, left out {sum(n for m, n in per_map.items() if m not in map_ids)} on {len(per_map) - len(map_ids)}", flush=True)
+    print(f"{len(ids)} training games of patch {args.patch or 'any'} on {len(map_ids)} maps, left out {sum(n for m, n in per_map.items() if m not in map_ids)} on {len(per_map) - len(map_ids)}", flush=True)
     model = physics.Physics(vocab, avocab, args.d, demean=not args.no_demean, moving_neutrals=physics_data.MOVING_NEUTRALS, blocks=args.blocks, n_maps=len(map_ids)).cuda()
     model.enc.grad_ckpt = args.ckpt
     if not args.no_compile:
@@ -239,7 +251,7 @@ def main():
         model.teacher.compile_parts()
     print(f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('teacher')) / 1e6:.1f}M parameters", flush=True)
     games = Games(bases, vocab, avocab, map_ids=map_ids)
-    val_bases = {"unseen_games": {g: b for g, b in physics_data.base_paths(args.games, set(split["held_out_games"]) - set(EXCLUDED)).items() if map_of(b) in map_ids}}
+    val_bases = {"unseen_games": {g: b for g, b in of_patch(physics_data.base_paths(args.games, set(split["held_out_games"]) - set(EXCLUDED)), args.patch).items() if map_of(b) in map_ids}}
     quick = {k: fixed_windows(v, args.val_windows, args.frames) for k, v in val_bases.items()}
     full = {k: fixed_windows(v, args.eval_windows, args.frames) for k, v in {"train": bases, **val_bases}.items()}
     all_bases = {k: v for d in (bases, *val_bases.values()) for k, v in d.items()}
