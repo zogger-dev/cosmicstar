@@ -35,17 +35,17 @@ Tokens predict their own future by row. Only births need query slots and Hungari
 
 This replaces the pyramid and windows described under Architecture and Memory below; those parts are history. Actions, heads and targets stand, except as noted here.
 
-- **Sizes.** d = 512, 12 blocks (24 attention layers), 8 query heads over 4 key and value heads, SwiGLU feed-forward of 1365. Queries and keys normalized with a learned scale. 74.8M parameters.
+- **Sizes.** d = 512, 6 blocks of 5 attention layers (state spatial, state temporal, action history, actions reading, state reading actions), 8 query heads over 4 key and value heads, SwiGLU feed-forward of 1365. Queries and keys normalized with a learned scale. 74.8M parameters.
 - **Tower.** A plain ResNet over the playable area at its own size and aspect ratio: half resolution at 64 channels, quarter at 128 and 256. Nothing local after it.
 - **Grid.** 256 learned queries anchored at the centers of a 16 x 16 grid over the square of the longest side read the tower's quarter-resolution tokens once per frame, each at its own place. Masked past the map's edge.
 - **Entities' surroundings.** `grid_sample` at 25 points a map unit apart around each row, from the raw 11 layers and the half-resolution features, plus the row's fraction within its cell. Once per frame.
 - **Spatial.** Every token (globals, rows, effects, cells) has one softmax over entities and one over cells, on shared projections, added, so neither kind crowds out the other. No action of the frame is present.
 - **Temporal.** Rows, cells and globals: a query at t reads earlier frames' action-updated tokens, with a key at t taken from t - 1's update, so a clean state at t holds nothing of t's actions. Rows read only frames they exist in. Effects have no timeline. Plain masked SDPA: every timeline has few keys.
-- **Actions.** After the feed-forward, frames with actions only: actions read the state, the state reads the actions, with the pointer bias on the pair. The result goes to a running change kept apart from the state, starting at zero.
+- **Actions.** After the feed-forward, frames with actions only: actions read the state and all of the frame's actions, both players', the state reads the actions, with the pointer bias on the pair. The result goes to a running change kept apart from the state, starting at zero.
 - **Positions.** RoPE at wavelengths from 1/32 of a map unit to 256. Tokens without a place sit at the origin.
 - **Attention kernels.** FlexAttention for anything over entities (a mask per frame), Flash where nothing is masked, masked SDPA for timelines. Flash takes no `attn_mask`.
 - **Map decoder.** Reads the sampled cell's token plus the tower's quarter-resolution features at that point.
-- **Batches.** A pass holds as many windows as fit a budget of 3,000 tokens (windows x (most rows + 259)), at most 16. Measured 8.6 MB per token with gradient checkpointing, and 2.7 s per pass. Memory: checkpoints saved per block 9 GB, teacher 3 GB, residual and Barlow 3.5 GB, raw heads 3.4 GB on the 2 largest windows. Loss per pass is unweighted by rows: whether to weight it is open.
+- **Batches.** A pass holds as many windows as fit a budget of 3,900 tokens (windows x (most rows + 259)), at most 16: 4 to 5 typical windows, 3 to 4 of the largest, 24.5 GB at most and 3 s a pass. That holds given two things: a garbage collection after each backward, since a pass's checkpoints sit in a reference cycle and take GBs from the next pass, and compiling on two small windows at the start, since compiling holds several GB until the next collection. `gc.freeze()` after that keeps the collection to 0.03 s. Loss per pass is unweighted by rows: whether to weight it is open.
 
 `tests/test_physics_causality.py` proves the dependencies exactly on a real window: changing an action leaves clean states through its frame unchanged and updated states before it; changing a row, the map or a player's numbers leaves earlier frames unchanged; an absent row changes nothing else.
 

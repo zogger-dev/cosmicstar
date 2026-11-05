@@ -6,7 +6,7 @@ model does. No horizon input, no motion input.
     each block       spatial, temporal, feed-forward, then this frame's actions
       spatial        every token reads all entities in one softmax and all cells in another, added. No action of this frame: this is the clean state
       temporal       rows, cells and globals, each reading earlier frames' action-updated tokens; each player's actions: causal
-      actions        actions read the state, the state reads the actions. Carried on as a change kept apart from the state
+      actions        actions read the state and each other, the state reads the actions. Carried on as a change kept apart from the state
     outputs          a residual per token, s + g(s), trained against an EMA teacher's next token with Barlow Twins, plus the raw heads
 
 At inference, frame by frame: state at t -> action predictor -> actions at t -> updated tokens -> t + 1. Training runs the same dependencies in one pass with the
@@ -173,14 +173,15 @@ class Block(nn.Module):
         return x + self.w3(F.silu(self.w1(y)) * self.w2(y))
 
     def actions(self, x, dl, a, c):
-        """Frames with an action: actions read the state, then the state reads the actions; x + the returned dl is the updated state. dl [BF, T, d], a [BF, A, d]."""
+        """Frames with an action: actions read the state and each other, then the state reads the actions; x + the returned dl is the updated state. dl [BF, T, d], a [BF, A, d]."""
         fa, n = c["fa"], c["E"]
         y, ya = self.na(x[fa] + dl[fa]), self.na(a[fa])
         q, k, v = self.act.query(y, c["ang"][fa]), self.act.key(y, c["ang"][fa]), self.act.value(y)
         qa, ka, va = self.act.query(ya, c["ang_a"][fa]), self.act.key(ya, c["ang_a"][fa]), self.act.value(ya)
         bias = (self.bias * torch.tensor([0.0, 1.0, 1.0], device=x.device)[:, None]).to(q.dtype)    # code 0: no pair, no bias
-        ra = self.pair(qa, k[:, :, :n], v[:, :, :n], c["valid"][fa], c["code_ae"], c["rowmap"], bias) + F.scaled_dot_product_attention(qa, k[:, :, n:], v[:, :, n:])
         am = c["act_mask"][fa]
+        ra = self.pair(qa, k[:, :, :n], v[:, :, :n], c["valid"][fa], c["code_ae"], c["rowmap"], bias) + F.scaled_dot_product_attention(qa, k[:, :, n:], v[:, :, n:]) \
+            + self.ent(qa, ka, va, am)                                                         # and each other: both players' actions of this frame
         re = self.pair(q[:, :, :n], ka, va, am, c["code_ea"], c["rowmap"], bias)
         rm = self.ent(q[:, :, n:], ka, va, am)
         a, dl = a.clone(), dl.clone()
@@ -251,7 +252,7 @@ class Tower(nn.Module):
 class PhysicsEncoder(nn.Module):
     """The whole sequence through the tower and the blocks. Returns rows, cells and globals twice, the clean state and the action-updated tokens, and the tower's features."""
 
-    def __init__(self, vocab, avocab, d=512, blocks=12, heads=8, kv_heads=4, ff=1365):
+    def __init__(self, vocab, avocab, d=512, blocks=6, heads=8, kv_heads=4, ff=1365):
         super().__init__()
         self.d = d
         self.unit = nn.Embedding(vocab.n_units, d)
@@ -574,6 +575,7 @@ class Physics(nn.Module):
         logs["player"] = pn
         loss = lat + self.aux_weight * (raw + brth + mp + pn)
         logs["loss"] = loss
+        self._rows = None                              # it would hold this pass's graph on the model until the next
         return loss, logs
 
     def raw_losses(self, p, s, b, sc, bi, fi, ri):

@@ -9,6 +9,7 @@ Quick validation every --val_every updates goes to the log. The full evaluation 
 """
 import argparse
 import collections
+import gc
 import glob
 import json
 import os
@@ -59,6 +60,22 @@ class Games:
         g = self.get(gid)
         t0 = min(t0, g.F - L - 1) if t0 >= 0 else np.random.randint(0, max(1, g.F - L))
         return g.window(t0, L, swap=swap)
+
+
+def warm_compile(model, games, ids, L):
+    """Compile on two windows. Compiling holds several GB until the next collection, and a full pass has no room for that. No optimizer step: this changes no weights."""
+    rng = np.random.default_rng()
+    b = physics_data.collate([games.read(ids[rng.integers(len(ids))], -1, L, False) for _ in range(2)], games.vocab)
+    b = {k: v.cuda() for k, v in b.items()}
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        loss, _ = model(b)
+    loss.backward()
+    model.zero_grad(set_to_none=True)
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        model(b)
+    del b, loss
+    gc.collect()
+    gc.freeze()         # what stays, compiled code above all, is left out of every later collection: 0.3 s a pass otherwise
 
 
 def batches(games, ids, seqs, L, workers, tokens, prefetch=2, chosen=None):
@@ -146,7 +163,7 @@ def main():
     ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
-    ap.add_argument("--tokens", type=int, default=3000, help="budget of a pass: windows x (most rows + 259)")
+    ap.add_argument("--tokens", type=int, default=3900, help="budget of a pass: windows x (most rows + 259)")
     ap.add_argument("--eval_seqs", type=int, default=4)
     ap.add_argument("--frames", type=int, default=56)
     ap.add_argument("--accum", type=int, default=2)
@@ -161,7 +178,7 @@ def main():
     ap.add_argument("--measure", action="store_true")
     ap.add_argument("--measure_steps", type=int, default=4)
     ap.add_argument("--typical", action="store_true", help="--measure on random windows instead of the largest")
-    ap.add_argument("--blocks", type=int, default=12, help="spatial-temporal blocks")
+    ap.add_argument("--blocks", type=int, default=6, help="spatial-temporal blocks")
     ap.add_argument("--run", default="")
     ap.add_argument("--gpu_gb", type=float, default=29.0, help="most GPU memory PyTorch may hold, cache included, so the desktop keeps the rest")
     ap.add_argument("--save_every", type=int, default=500, help="checkpoint and full evaluation, in updates")
@@ -229,6 +246,8 @@ def main():
         json.dump(dict(vars(args), commit=commit), open(f"{run}/config_from{start}.json" if start else f"{run}/config.json", "w"))
     steps = args.measure_steps if args.measure else args.steps
     t0 = time.time()
+    if not args.no_compile:
+        warm_compile(model, games, ids, args.frames)
     for step in range(start, steps):
         logs = collections.Counter()
         data_s = 0.0
@@ -240,6 +259,8 @@ def main():
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss, lg = model(b)
             (loss / (args.accum if not args.measure else 1)).backward()
+            del loss
+            gc.collect()      # a pass's checkpoints sit in a reference cycle: uncollected, they take GBs from the next pass
             for k, v in lg.items():
                 logs[k] += float(v)
         n = args.accum if not args.measure else 1
