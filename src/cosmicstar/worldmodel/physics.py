@@ -184,14 +184,12 @@ class Block(nn.Module):
     def forward(self, x, dl, a, c, last):
         B, F_, d = c["B"], c["F"], x.shape[-1]
         x = self.spatial(x, c)
-        # timelines: earlier frames' tokens as the last block's actions left them
-        tl, n_t = c["timed"], len(c["timed"])
-        by_row = lambda z: z[:, tl].view(B, F_, n_t, d).transpose(1, 2).reshape(B * n_t, F_, d)
-        xr, up, mask = by_row(x), by_row(x + dl), c["t_mask"]
+        # timelines: earlier frames' tokens as the last block's actions left them. Effects have none: masked, they come out as they went in
+        T = x.shape[1]
+        by_token = lambda z: z.view(B, F_, T, d).transpose(1, 2).reshape(B * T, F_, d)
+        xr, up, mask = by_token(x), by_token(x + dl), c["t_mask"]
         key = torch.cat([xr[:, :1], torch.where(mask[:, :-1, None], up[:, :-1], xr[:, 1:])], 1)
-        tr = self.temporal(xr, key, mask, c["t_frames"]).view(B, n_t, F_, d).transpose(1, 2).reshape(B * F_, n_t, d)
-        x = x.clone()
-        x[:, tl] = tr.to(x.dtype)
+        x = self.temporal(xr, key, mask, c["t_frames"]).view(B, T, F_, d).transpose(1, 2).reshape(B * F_, T, d).to(x.dtype)
         x = self.ff(x)
         if last:
             return x, dl, a
@@ -354,12 +352,11 @@ class PhysicsEncoder(nn.Module):
         rel = torch.stack([b["x"], b["y"]], -1) - b["center"][:, None, None]
         pos = torch.cat([torch.zeros(B, F_, g0, 2, device=dev), rel, b["eff_xy"], cen[:, None].expand(-1, F_, -1, -1)], 2).reshape(B * F_, T, 2)
         # tokens without a place sit at the origin, unrotated
-        timed = torch.cat([torch.arange(g0 + R, device=dev), torch.arange(n, n + GRID * GRID, device=dev)])
-        t_mask = torch.cat([torch.ones(B, F_, g0, dtype=torch.bool, device=dev), b["mask"], torch.ones(B, F_, GRID * GRID, dtype=torch.bool, device=dev)], 2).transpose(1, 2).reshape(B * len(timed), F_)
+        t_mask = torch.cat([torch.ones(B, F_, g0, dtype=torch.bool, device=dev), b["mask"], torch.zeros_like(b["eff_mask"]), torch.ones(B, F_, GRID * GRID, dtype=torch.bool, device=dev)], 2).transpose(1, 2).reshape(B * T, F_)
         frames = lambda T: self.time_in(self.time(torch.arange(T, device=dev)).to(x.dtype))
         act_mask = b["act_mask"].reshape(B * F_, A)
         fa = torch.nonzero(act_mask.any(1), as_tuple=True)[0]
-        c = dict(B=B, F=F_, valid=valid, ang=self.rope.angles(pos), ang_a=self.rope.angles(b["act_xy"].reshape(B * F_, A, 2)), act_mask=act_mask, timed=timed, t_mask=t_mask,
+        c = dict(B=B, F=F_, valid=valid, ang=self.rope.angles(pos), ang_a=self.rope.angles(b["act_xy"].reshape(B * F_, A, 2)), act_mask=act_mask, t_mask=t_mask,
                  t_frames=frames(F_), order=b["act_order"], a_frames=frames(b["act_order"].shape[2]))
         if len(fa):
             fa = fa if len(fa) > 1 else fa.repeat(2)
