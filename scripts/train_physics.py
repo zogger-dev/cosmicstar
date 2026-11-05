@@ -84,12 +84,14 @@ def warm_compile(model, games, ids, L):
     gc.freeze()         # what stays, compiled code above all, is left out of every later collection: 0.3 s a pass otherwise
 
 
-def _read_passes(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen):
-    """The reader process: passes of windows into q, as many as fit a budget of tokens, at most seqs, padded rows counted, so a pass of large windows has fewer of them."""
+def _read_passes(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen, bucket):
+    """The reader process: passes of windows into q, as many as fit a budget of tokens, at most seqs, padded rows counted, so a pass of large windows has fewer of them.
+    bucket > 0: a pass holds windows of one size bucket, rows // bucket, so a pass pads little; buckets fill at their own rate, so passes of every size come in
+    random order. chosen: one bucket, in the order given."""
     vocab = Vocab(json.load(open(vocab_path)))
     games = Games(bases, vocab, ActionVocab(), map_ids=map_ids)
     pool = ThreadPoolExecutor(workers)
-    i, rng, hold = 0, np.random.default_rng(), []
+    i, rng, holds = 0, np.random.default_rng(), collections.defaultdict(list)
     while True:
         if chosen:
             pick = [chosen[(i + k) % len(chosen)] for k in range(seqs)]
@@ -97,6 +99,7 @@ def _read_passes(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, c
         else:
             pick = [(ids[rng.integers(len(ids))], -1) for _ in range(seqs)]
         for w in pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick):
+            hold = holds[w["mask"].shape[1] // bucket if bucket > 0 and not chosen else 0]
             r = max([w["mask"].shape[1]] + [h["mask"].shape[1] for h in hold])
             if hold and (len(hold) == seqs or (len(hold) + 1) * (r + TOKENS_PER_WINDOW) > tokens):
                 q.put(physics_data.collate(hold, vocab))
@@ -104,12 +107,12 @@ def _read_passes(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, c
             hold.append(w)
 
 
-def batches(bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, prefetch=4, chosen=None):
+def batches(bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, prefetch=4, chosen=None, bucket=32):
     """Passes of windows from a process of their own: reading on threads here took the interpreter from the training thread, about 1.1 s of idle GPU each time 16 windows were read.
     A thread here holds passes ready, since the reader hands one over late while its own threads are reading. chosen: a fixed list of (game, frame) to cycle instead of random ones."""
     ctx = mp.get_context("spawn")
     q = ctx.Queue(2)
-    reader = ctx.Process(target=_read_passes, args=(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen), daemon=True)
+    reader = ctx.Process(target=_read_passes, args=(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen, bucket), daemon=True)
     reader.start()
     ready = queue.Queue(prefetch)
 
@@ -190,6 +193,7 @@ def main():
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
     ap.add_argument("--tokens", type=int, default=3900, help="budget of a pass: windows x (most rows + 259)")
+    ap.add_argument("--bucket", type=int, default=32, help="a pass holds windows whose row counts fall in one bucket of this width, so it pads little (0: any sizes)")
     ap.add_argument("--eval_seqs", type=int, default=4)
     ap.add_argument("--frames", type=int, default=56)
     ap.add_argument("--accum", type=int, default=2)
@@ -265,7 +269,7 @@ def main():
     if args.measure and not args.typical:
         chosen, info = largest_windows(bases, args.frames, args.seqs)
         print("largest", [(i[0], i[1], i[2]) for i in info], flush=True)
-    data = batches(bases, ids, args.vocab, map_ids, args.seqs, args.frames, args.workers, args.tokens, chosen=chosen)
+    data = batches(bases, ids, args.vocab, map_ids, args.seqs, args.frames, args.workers, args.tokens, chosen=chosen, bucket=args.bucket)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
     if ck:

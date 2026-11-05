@@ -18,6 +18,7 @@ Targets are the same columns one frame later. Births are rows whose first frame 
 import glob
 import json
 import os
+import threading
 import types
 
 import numpy as np
@@ -166,6 +167,7 @@ class Game:
 
     def __init__(self, base, vocab):
         self.base, self.vocab = base, vocab
+        self._window_lock = threading.Lock()
         self.views = {s: arrow_state.open_view(f"{base}.p{s}") for s in VIEWS}
         self.map_id = 0                         # the map's learned tokens, set by whoever knows the training maps
         ix = np.load(f"{base}.index.npz")
@@ -231,7 +233,12 @@ class Game:
         return out_u, out_l
 
     def window(self, t0, L, swap=False):
-        """L consecutive frames from frame t0, as one dict of numpy arrays: see the module docstring."""
+        """L consecutive frames from frame t0, as one dict of numpy arrays: see the module docstring. One window at a time per game: a window keeps its
+        row map and batches on the game, and two threads reading the same game would map one window's targets with the other's rows."""
+        with self._window_lock:
+            return self._window(t0, L, swap)
+
+    def _window(self, t0, L, swap):
         rows, row_of = [], {}
         self._batches = {}                     # own rows and neutrals share a view's batches
         for s in SOURCES:
