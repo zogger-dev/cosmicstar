@@ -62,6 +62,9 @@ passengers or effects, so a player's own units come from that player's view. Eac
     vis[F, H, W]             the player's visibility map per frame (0 never seen, 1 fogged,
                              2 visible; the engine's own map_state)
     creep[F, H, W]           creep as that player knows it
+    pathable[F, H, W / 8]    the player's pathing per frame, bit packed like map_pathing_grid: changes with buildings and
+                             rocks, as that player last saw them (the minimap feature layer, flipped to map_state's rows)
+    buildable[F, H, W / 8]   the same for placement
     u_display, u_cloak       the engine's display_type (1 visible, 2 snapshot, 3 hidden) and
                              cloak state per unit, as reported (also in observer files)
     cmd_*                    every command the engine executed for this player, with its
@@ -211,7 +214,7 @@ CMD_DTYPES = dict(  # player views: the engine's executed commands (recipients: 
 # Unit flags packed into u_flags (F_SELECTED: the observed player's selection, player views only).
 F_FLYING, F_BURROWED, F_CLOAKED, F_HALLUC, F_SNAPSHOT, F_POWERED, F_SELECTED = 1, 2, 4, 8, 16, 32, 64
 F2_ACTIVE, F2_BLIP, F2_ONSCREEN = 1, 2, 4  # u_flags2: is_active (a structure doing something), radar blip, on the player's screen
-LAYOUT = 2  # meta["layout"]: 2 = everything the raw API reports (rally, score, player_common, abilities, ...)
+LAYOUT = 3  # meta["layout"]: 2 = everything the raw API reports (rally, score, player_common, abilities, ...); 3 = and per-frame pathable, buildable
 
 PLAYER_STATS = {  # tracker PlayerStats field -> output name (food is fixed point /4096)
     "m_scoreValueMineralsCurrent": "minerals",
@@ -558,7 +561,7 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
     eff = {k: TypedList(E_DTYPES[k]) for k in E_DTYPES}  # per-frame effects, one row per effect position
     dead = TypedList(np.int32)
     frame_loop, frame_start, eff_start, dead_start = [], [0], [0], [0]
-    vis, creep = [], []  # player views only
+    vis, creep, pathable, buildable = [], [], [], []  # player views only
     # layout 2: the observed player's block per frame (player_common, score details, camera; the
     # observer's are the engine's placeholders), and the raw player block's ragged tables
     pc = collections.defaultdict(lambda: TypedList(np.float32))   # pc_<field>[F]
@@ -582,9 +585,11 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
         xy = np.asarray(cam, np.float32).reshape(-1, 2)
         columns.update(cam_x=xy[:, 0], cam_y=xy[:, 1])
         cam.clear()
-        sink.write_frames(columns, dict(vis=vis, creep=creep) if vis else {})
+        sink.write_frames(columns, dict(vis=vis, creep=creep, pathable=pathable, buildable=buildable) if vis else {})
         vis.clear()
         creep.clear()
+        pathable.clear()
+        buildable.clear()
         flushed[0] = f1
 
     def take_player(obs, raw):
@@ -648,12 +653,12 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
         try:
             opts = sc_pb.InterfaceOptions(raw=True, score=True, show_cloaked=True, show_burrowed_shadows=True,
                                           show_placeholders=False, raw_affects_selection=False)
-            if perspective and ui:
-                # ui_data (control groups, selection panel) is only filled with the feature layer
-                # on; the smallest one costs nothing measurable (3000 loops: 4.4 s vs 4.1 s raw-only)
+            if perspective:
+                # the minimap at the map's own size: pathable and buildable per frame, as this player knows them. The
+                # smallest screen, since no screen layer is kept. ui_data (control groups, selection panel) needs the layer on too.
                 opts.feature_layer.width = 24
                 opts.feature_layer.resolution.x = opts.feature_layer.resolution.y = 16
-                opts.feature_layer.minimap_resolution.x = opts.feature_layer.minimap_resolution.y = 16
+                opts.feature_layer.minimap_resolution.x, opts.feature_layer.minimap_resolution.y = info["map_cells"]
             req = sc_pb.RequestStartReplay(
                 # observer: fog off, everything; a player: that player's view, fog on (module doc)
                 replay_data=data, observed_player_id=perspective, disable_fog=perspective == 0, options=opts)
@@ -689,6 +694,8 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
         sr = gi.start_raw
         info["playable"] = [sr.playable_area.p0.x, sr.playable_area.p0.y, sr.playable_area.p1.x, sr.playable_area.p1.y]
         info["map_size"] = [sr.map_size.x, sr.map_size.y]
+        if perspective and info["map_cells"] != info["map_size"]:
+            raise RuntimeError(f"the replay says the map is {info['map_cells']}, the engine {info['map_size']}")
         info["start_locations"] = [[pt.x, pt.y] for pt in sr.start_locations]  # the possible enemy bases
         grids = {}
         for name in ("pathing_grid", "placement_grid", "terrain_height"):
@@ -834,6 +841,9 @@ def extract(path, out_path, step, until, perspective=0, substep=0, ui=False, abi
             if perspective:
                 vis.append(np.frombuffer(raw.map_state.visibility.data, np.uint8).copy())
                 creep.append(np.frombuffer(raw.map_state.creep.data, np.uint8).copy())
+                mm = o.observation.feature_layer_data.minimap_renders
+                pathable.append(np.frombuffer(mm.pathable.data, np.uint8).reshape(sr.map_size.y, -1)[::-1].copy())    # the minimap's rows run the other way
+                buildable.append(np.frombuffer(mm.buildable.data, np.uint8).reshape(sr.map_size.y, -1)[::-1].copy())
                 take_actions(o.actions, len(frame_loop) - 1)
                 take_selection(raw.units, loop)
             if arrow and len(frame_loop) - flushed[0] >= ARROW_FRAMES:

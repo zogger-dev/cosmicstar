@@ -124,8 +124,11 @@ def replay_info(path):
     mods = [x[8:].hex() for x in handles[:-1]]
     players = [dict(slot=i + 1, name=_s(p["m_name"]), race=_s(p["m_race"]), team=p["m_teamId"], result=p["m_result"],
                     mmr=None) for i, p in enumerate(det["m_playerList"])]
+    map_cells = None
     try:  # MMR lives with the lobby user; players and users meet through the working-set slot
         init = proto.decode_replay_initdata(a.read_file("replay.initData"))["m_syncLobbyState"]
+        gd = init["m_gameDescription"]
+        map_cells = [gd["m_mapSizeX"], gd["m_mapSizeY"]]
         users = init["m_userInitialData"]
         slot_user = {sl["m_workingSetSlotId"]: sl["m_userId"] for sl in init["m_lobbyState"]["m_slots"]
                      if sl.get("m_userId") is not None}
@@ -143,7 +146,7 @@ def replay_info(path):
                 # The header's exact loop count (metadata "Duration" is in normal-speed seconds
                 # of 16 loops, not real seconds)
                 duration_loops=int(header["m_elapsedGameLoops"]), players=players,
-                time_utc=filetime_iso(det.get("m_timeUTC")), format=game_format(players))
+                time_utc=filetime_iso(det.get("m_timeUTC")), format=game_format(players), map_cells=map_cells)
 
 
 def replay_sidecar(info, gid, rel_path, source):
