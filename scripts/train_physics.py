@@ -25,6 +25,7 @@ os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 
 from cosmicstar.worldmodel import physics, physics_data
 from cosmicstar.worldmodel.action_tokens import ActionVocab
@@ -83,30 +84,50 @@ def warm_compile(model, games, ids, L):
     gc.freeze()         # what stays, compiled code above all, is left out of every later collection: 0.3 s a pass otherwise
 
 
-def batches(games, ids, seqs, L, workers, tokens, prefetch=2, chosen=None):
-    """Passes of windows, read ahead on threads: as many as fit a budget of tokens, at most seqs, padded rows counted, so a pass of large windows has fewer of them.
-    chosen: a fixed list of (game, frame) to cycle instead of random ones."""
+def _read_passes(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen):
+    """The reader process: passes of windows into q, as many as fit a budget of tokens, at most seqs, padded rows counted, so a pass of large windows has fewer of them."""
+    vocab = Vocab(json.load(open(vocab_path)))
+    games = Games(bases, vocab, ActionVocab(), map_ids=map_ids)
     pool = ThreadPoolExecutor(workers)
-    q = queue.Queue(prefetch)
-
-    def fill():
-        i, rng, hold = 0, np.random.default_rng(), []
-        while True:
-            if chosen:
-                pick = [chosen[(i + k) % len(chosen)] for k in range(seqs)]
-                i += seqs
-            else:
-                pick = [(ids[rng.integers(len(ids))], -1) for _ in range(seqs)]
-            for w in pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick):
-                r = max([w["mask"].shape[1]] + [h["mask"].shape[1] for h in hold])
-                if hold and (len(hold) == seqs or (len(hold) + 1) * (r + TOKENS_PER_WINDOW) > tokens):
-                    q.put(physics_data.collate(hold, games.vocab))
-                    hold.clear()
-                hold.append(w)
-
-    threading.Thread(target=fill, daemon=True).start()
+    i, rng, hold = 0, np.random.default_rng(), []
     while True:
-        yield q.get()
+        if chosen:
+            pick = [chosen[(i + k) % len(chosen)] for k in range(seqs)]
+            i += seqs
+        else:
+            pick = [(ids[rng.integers(len(ids))], -1) for _ in range(seqs)]
+        for w in pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick):
+            r = max([w["mask"].shape[1]] + [h["mask"].shape[1] for h in hold])
+            if hold and (len(hold) == seqs or (len(hold) + 1) * (r + TOKENS_PER_WINDOW) > tokens):
+                q.put(physics_data.collate(hold, vocab))
+                hold.clear()
+            hold.append(w)
+
+
+def batches(bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, prefetch=4, chosen=None):
+    """Passes of windows from a process of their own: reading on threads here took the interpreter from the training thread, about 1.1 s of idle GPU each time 16 windows were read.
+    A thread here holds passes ready, since the reader hands one over late while its own threads are reading. chosen: a fixed list of (game, frame) to cycle instead of random ones."""
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue(2)
+    reader = ctx.Process(target=_read_passes, args=(q, bases, ids, vocab_path, map_ids, seqs, L, workers, tokens, chosen), daemon=True)
+    reader.start()
+    ready = queue.Queue(prefetch)
+
+    def pull():
+        while True:
+            try:
+                ready.put(q.get(timeout=5))
+            except queue.Empty:
+                if not reader.is_alive():
+                    ready.put(RuntimeError(f"the reader process died, exit code {reader.exitcode}"))
+                    return
+
+    threading.Thread(target=pull, daemon=True).start()
+    while True:
+        b = ready.get()
+        if isinstance(b, Exception):
+            raise b
+        yield b
 
 
 def largest_windows(bases, L, n):
@@ -244,7 +265,7 @@ def main():
     if args.measure and not args.typical:
         chosen, info = largest_windows(bases, args.frames, args.seqs)
         print("largest", [(i[0], i[1], i[2]) for i in info], flush=True)
-    data = batches(games, ids, args.seqs, args.frames, args.workers, args.tokens, chosen=chosen)
+    data = batches(bases, ids, args.vocab, map_ids, args.seqs, args.frames, args.workers, args.tokens, chosen=chosen)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
     if ck:
