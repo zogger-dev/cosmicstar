@@ -218,7 +218,7 @@ class Block(nn.Module):
 class Tower(nn.Module):
     """A plain ResNet over the live map at its own size: 3 strides, doubling to the model's width at an eighth of the resolution."""
 
-    def __init__(self, c_in, d, blocks=2):
+    def __init__(self, c_in, d, blocks=1):
         super().__init__()
         c = [d // 4, d // 2, d]
         self.down = nn.ModuleList(nn.Conv2d(a, b, 3, stride=2, padding=1) for a, b in zip([c_in] + c[:-1], c))
