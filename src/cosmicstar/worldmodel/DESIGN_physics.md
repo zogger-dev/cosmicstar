@@ -421,3 +421,5 @@ prediction as a residual, with Barlow Twins and a raw auxiliary head that decays
 plus observer neutrals, with no merge; point predictions; no entity crop by default; 56-frame sequences; births by
 count plus queries with Hungarian matching; an alive/dead field on each row; `_gas_gaps` for workers in gas; critters kept as tokens;
 map pool unchanged for now.
+
+Future optimization, not worth doing yet: compute the rotary positions' cos and sin once per forward and share them across blocks, instead of in every query and key. Same math; probably a few percent of a pass.
