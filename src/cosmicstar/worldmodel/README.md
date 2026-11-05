@@ -449,7 +449,7 @@ the encoder can learn them from the data; the table would make them explicit.
 - **SC2ReSet** (Zenodo, doi 10.5281/zenodo.5575796, v2.0.0 March 2025): 71 tournament replay
   archives 2016–2024, 4.5 GB, licence "Other (Non-Commercial)" under Blizzard's EULA; the
   companion SC2EGSet (parsed game states) is CC BY 4.0. Mostly pre-5.0.14 patches.
-- **Blizzard replay packs** (s2client-proto README): only 3.16.1 packs remain listed; Linux
+- **Blizzard replay packs** (s2client-proto README; much more via the replay API, see [REPLAY_CORPUS_blizzard.md](REPLAY_CORPUS_blizzard.md)): only 3.16.1 packs remain listed; Linux
   headless builds exist for 3.16–4.10 only. Not usable with current-patch models.
 
 ### Downloaded tournament packs (2026-10-23)
