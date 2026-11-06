@@ -263,6 +263,7 @@ class Game:
         self.nid = {s: ix[f"nid{s}"] for s in VIEWS}
         self.nlog = ix["nlog_start"], ix["nlog_frame"], ix["nlog_contents"]
         self.rest = {s: statefile.load(f"{base}.p{s}.cst") for s in (1, 2)}
+        self._eff_age = {}  # view -> effect_ages, made when first read
         d = self.rest[1]
         self.meta = json.loads(str(d["meta"]))
         W, H = self.W, self.H = self.meta["map_size"]
@@ -453,7 +454,7 @@ class Game:
 
     def _effects(self, t0, L, swap):
         """Both player views' effects, side by side with no merging, since each view has
-        only some: (frame, type, owner index, x, y, radius)."""
+        only some: (frame, type, owner index, x, y, radius, age in loops)."""
         rows = []
         for s in (1, 2):
             d = self.rest[s]
@@ -462,6 +463,9 @@ class Game:
             if a == b:
                 continue
             fr = np.searchsorted(st, np.arange(a, b), side="right") - 1 - t0
+            if s not in self._eff_age:
+                self._eff_age[s] = effect_ages(d)
+            age = self._eff_age[s][a:b]
             own = d["e_owner"][a:b].astype(np.int64)
             own = np.where(
                 own == 1,
@@ -477,6 +481,7 @@ class Game:
                         d["e_x"][a:b] - self.center[0],
                         d["e_y"][a:b] - self.center[1],
                         d["e_radius"][a:b],
+                        age,
                     ],
                     1,
                 )
@@ -484,7 +489,7 @@ class Game:
         return (
             np.concatenate(rows).astype(np.float32)
             if rows
-            else np.zeros((0, 6), np.float32)
+            else np.zeros((0, 7), np.float32)
         )
 
     def _players(self, t0, L, swap):
@@ -834,19 +839,22 @@ class Game:
         return None
 
     def _dead_rows(self, out, rows, t0, L):
-        """After a death a row keeps its last values with hit points and shields 0, and
-        isn't alive."""
+        """From its death frame, the first it is gone in, a row keeps its last values with
+        hit points and shields 0, and isn't alive. A row still present at its death
+        frame is dead from the next. Frames it was out of sight in before stay absent.
+        """
         for r_, (s, k) in enumerate(rows):
             d = self._death(s, k, t0, L)
             died_before = 0 <= self.index[s]["death"][k] < t0
-            if died_before:
-                continue
-            if d < 0 or d + 1 >= L:
+            if died_before or d < 0:
                 continue
             live = np.nonzero(out["mask"][: d + 1, r_])[0]
             if not len(live):
                 continue
             f0 = int(live[-1])
+            d0 = max(d, f0 + 1)
+            if d0 >= L:
+                continue
             for key in (
                 "x",
                 "y",
@@ -859,11 +867,11 @@ class Game:
                 "engaged_row",
             ):
                 if key in out:
-                    out[key][d + 1 :, r_] = out[key][f0, r_]
-            out["num"][d + 1 :, r_, 0] = 0
-            out["num"][d + 1 :, r_, 1] = 0
-            out["mask"][d + 1 :, r_] = True
-            out["alive"][d + 1 :, r_] = False
+                    out[key][d0:, r_] = out[key][f0, r_]
+            out["num"][d0:, r_, 0] = 0
+            out["num"][d0:, r_, 1] = 0
+            out["mask"][d0:, r_] = True
+            out["alive"][d0:, r_] = False
 
     def _map_frames(self, t0, L, swap):
         """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen
@@ -984,6 +992,54 @@ QUEUE, PROD = 8, 8  # order and production slots with targets (physics.RowHead)
 # a row's identity code: random per window, so it means nothing but which row, and
 # pointers can be read by matching it
 CODE = 64
+
+
+def effect_ages(d, near=1.5):
+    """Each effect entry of a view's .cst -> loops since that effect began, counted over
+    the whole game, so one already running when a window opens keeps its age. Effects
+    have no id: an entry continues the previous frame's entry of the same type, owner
+    and place, or else, for ones that move (guardian shield, the colossus beam), the
+    nearest unmatched one of the same type and owner within `near` map units. It starts
+    when seen first: an effect cast out of this view's sight is as old as its sighting.
+    """
+    st, T, O = d["e_frame_start"], d["e_type"], d["e_owner"]
+    X, Y = d["e_x"].astype(np.float64), d["e_y"].astype(np.float64)
+    age = np.zeros(len(T), np.int32)
+    prev = []  # (type, owner, x, y, age) of the last frame
+    for f in range(len(st) - 1):
+        a, b = int(st[f]), int(st[f + 1])
+        if a == b:
+            prev = []
+            continue
+        exact = {}
+        for j, p in enumerate(prev):
+            exact.setdefault(p[:4], []).append(j)
+        used, cur, loose = set(), [], []
+        for i in range(a, b):
+            k = (int(T[i]), int(O[i]), X[i], Y[i])
+            js = exact.get(k)
+            if js:
+                j = js.pop()
+                used.add(j)
+                age[i] = prev[j][4] + 1
+            else:
+                loose.append(i)
+        for i in loose:
+            best, bd = -1, near
+            for j, p in enumerate(prev):
+                if j in used or p[0] != T[i] or p[1] != O[i]:
+                    continue
+                dd = abs(p[2] - X[i]) + abs(p[3] - Y[i])
+                if dd <= bd:
+                    best, bd = j, dd
+            if best >= 0:
+                used.add(best)
+                age[i] = prev[best][4] + 1
+        cur = [(int(T[i]), int(O[i]), X[i], Y[i], int(age[i])) for i in range(a, b)]
+        prev = cur
+    return age
+
+
 FORCED = 16  # map tokens under effects always among each frame's decoded sample
 
 
@@ -1282,6 +1338,7 @@ def collate(windows, vocab, rng=None):
         np.full((B, F_, X), NEUTRAL, np.int64),
     )
     exy, erad = np.zeros((B, F_, X, 2), np.float32), np.zeros((B, F_, X), np.float32)
+    eage = np.zeros((B, F_, X), np.float32)
     force = np.full((B, F_ - 1, FORCED), -1, np.int64)
     cover = []
     for b, w in enumerate(windows):
@@ -1289,7 +1346,7 @@ def collate(windows, vocab, rng=None):
         size = float(w["side"]) / TOP
         centers = (np.arange(TOP) + 0.5) * size - float(w["side"]) / 2
         n_forced = np.zeros(F_, np.int64)
-        for f, ty, o, x, y, r in w["effects"].tolist():
+        for f, ty, o, x, y, r, age in w["effects"].tolist():
             f, ty, o = int(f), int(ty), int(o)
             i = seen[f]
             seen[f] += 1
@@ -1299,7 +1356,8 @@ def collate(windows, vocab, rng=None):
                 eown[b, f, i],
                 exy[b, f, i],
                 erad[b, f, i],
-            ) = (True, ty, o, (x, y), r / 8)
+                eage[b, f, i],
+            ) = (True, ty, o, (x, y), r / 8, age)
             if f == 0:
                 continue
             reach = max(r, size / 2)
@@ -1321,7 +1379,8 @@ def collate(windows, vocab, rng=None):
         out["eff_owner"],
         out["eff_xy"],
         out["eff_radius"],
-    ) = (torch.from_numpy(x) for x in (emask, etype, eown, exy, erad))
+        out["eff_age"],
+    ) = (torch.from_numpy(x) for x in (emask, etype, eown, exy, erad, eage))
     out["eff_force"] = torch.from_numpy(force)
     out["eff_cover"] = torch.tensor(cover, dtype=torch.int64).reshape(-1, 3)
     return out

@@ -67,6 +67,7 @@ I = {n: i for i, n in enumerate(RAW_NUMS)}
 C_PLY = 13  # player numbers: PC_KEYS and the camera's x, y, known
 # place on the map: sin and cos of x and y at wavelengths from 4 to 256 map units
 MAP_WAVES = 6
+EFF_WAVES = 6  # an effect's age: sin and cos at wavelengths from 4 to 1024 loops
 # embedded numbers per row, see row_numbers
 ROW_NUMS = len(RAW_NUMS) + 8 + 4 * MAP_WAVES
 N_FLAGS = 16  # flags, flags2 bits
@@ -122,6 +123,25 @@ class RoPE1D(nn.Module):
     def angles(self, loops):
         """loops [..., F] -> [..., F, dh / 2] rotation angles."""
         return loops[..., None].float() * self.omega
+
+
+def effect_numbers(b):
+    """[B, F, X, 2 + 2 * EFF_WAVES]: radius, and age in loops as log and as sin and cos
+    at wavelengths from 4 to 1024 loops, so a delay such as a storm's ticks or a bile's
+    landing reads exactly at any age."""
+    age = b["eff_age"].float() if "eff_age" in b else torch.zeros_like(b["eff_radius"])
+    w = (
+        2
+        * math.pi
+        / torch.logspace(
+            math.log10(4.0), math.log10(1024.0), EFF_WAVES, device=age.device
+        )
+    )
+    a = age[..., None] * w
+    return torch.cat(
+        [b["eff_radius"][..., None], torch.log1p(age)[..., None] / 8, a.sin(), a.cos()],
+        -1,
+    ).to(b["eff_radius"].dtype)
 
 
 def row_numbers(b):
@@ -505,7 +525,7 @@ class PhysicsEncoder(nn.Module):
         self.a_mix = mlp(d, d)
         # effects: no ids, so tokens of the frame they're in, without a timeline
         self.effect = nn.Embedding(N_EFFECT_IDS, d)
-        self.eff_num = nn.Linear(1, d)
+        self.eff_num = nn.Linear(2 + 2 * EFF_WAVES, d)
         # map
         self.tower = Tower(C_LIVE + C_STATIC, d)
         self.map_tokens = nn.Parameter(
@@ -684,7 +704,7 @@ class PhysicsEncoder(nn.Module):
         eff = (
             self.effect(b["eff_type"])
             + self.owner(b["eff_owner"])
-            + self.eff_num(b["eff_radius"][..., None])
+            + self.eff_num(effect_numbers(b))
         ).reshape(B * F_, X, d)
         x = torch.cat([G, rows, eff, cells], 1)
         n = g0 + R + X
@@ -1083,6 +1103,9 @@ class Physics(nn.Module):
         reg_t = torch.stack(
             [(n[bi, fi + 1, ri, I[k]] - n[bi, fi, ri, I[k]]) / dv for k, dv in REG], -1
         )
+        # facing is an angle: a turn across 0 is a small change, not 2 pi
+        j = [k for k, _ in REG].index("facing")
+        reg_t[:, j] = torch.remainder(reg_t[:, j] + math.pi, 2 * math.pi) - math.pi
         lr = F.smooth_l1_loss(o["reg"][:, 2:].float(), reg_t, reduction="none").mean(-1)
         logs["reg"] = (lr * whole).sum() / whole.sum()
         logs["type"] = (
