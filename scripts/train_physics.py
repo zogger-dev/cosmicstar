@@ -358,6 +358,13 @@ def main():
     ap.add_argument("--frames", type=int, default=56)
     ap.add_argument("--accum", type=int, default=2)
     ap.add_argument("--steps", type=int, default=40000)
+    ap.add_argument(
+        "--hours",
+        type=float,
+        default=0.0,
+        help="stop when this long has passed since launch, with a checkpoint and the"
+        " full evaluation; 0: run all --steps",
+    )
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument(
         "--warmup", type=int, default=500, help="updates of a linear rise to --lr"
@@ -426,6 +433,7 @@ def main():
         help="the full evaluation of --resume, then exit",
     )
     args = ap.parse_args()
+    t_start = time.time()  # --hours counts from here
 
     if torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(
@@ -658,12 +666,18 @@ def main():
                 json.dumps(dict(val_s=round(time.time() - t, 1), step=step + 1)),
                 flush=True,
             )
-        if (step + 1) % args.save_every == 0:
+        out_of_time = bool(args.hours) and (
+            time.time() - t_start > args.hours * 3600 - 300
+        )  # 5 minutes kept for the last checkpoint and its evaluation
+        if (step + 1) % args.save_every == 0 or out_of_time:
             torch.save(
                 dict(model=model.state_dict(), opt=opt.state_dict(), step=step + 1),
                 f"{run}/model_step{step + 1}.pt",
             )
             full_eval(step + 1)
+        if out_of_time:
+            print(json.dumps(dict(stopped=step + 1, hours=args.hours)), flush=True)
+            break
 
 
 if __name__ == "__main__":
