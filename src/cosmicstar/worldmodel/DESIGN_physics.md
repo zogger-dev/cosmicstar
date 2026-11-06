@@ -440,4 +440,4 @@ plus observer neutrals, with no merge; point predictions; no entity crop by defa
 count plus queries with Hungarian matching; an alive/dead field on each row; `_gas_gaps` for workers in gas; critters kept as tokens;
 map pool unchanged for now.
 
-Future optimization, not worth doing yet: compute the rotary positions' cos and sin once per forward and share them across blocks, instead of in every query and key. Same math; probably a few percent of a pass.
+Rotary cos and sin are computed once per forward and shared by every block (2026-11-05, done once time became rotary too): bit-identical, 5.58 to 5.41 s an update, about 3%.

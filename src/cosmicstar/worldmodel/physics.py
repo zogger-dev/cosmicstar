@@ -51,6 +51,20 @@ ROPE_SHORTEST = 1 / 32           # map units: a cell is one map unit
 TIME_SHORTEST, TIME_LONGEST = 3.0, 672.0   # game loops: 3 tells gaps of 1, 2 and 3 apart (1 and 2 alias); 672 is 30 s at 22.4 loops a second
 
 
+def cos_sin(ang):
+    """Rotation angles [..., dh / 2] -> cosines and sines [..., dh / 2, 2], once per pass and shared by every layer that rotates by them, in the dtype
+    the layers compute in (bfloat16 under autocast): computed per call they cost about 5% of an update."""
+    dt = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else ang.dtype
+    return torch.stack([ang.cos(), ang.sin()], -1).to(dt)
+
+
+def rotate(x, cs):
+    """x [B, H, T, dh], cs [B, T, dh / 2, 2] from cos_sin."""
+    c, s = cs[..., 0][:, None].to(x.dtype), cs[..., 1][:, None].to(x.dtype)
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    return torch.stack([x1 * c - x2 * s, x1 * s + x2 * c], -1).flatten(-2)
+
+
 class RoPE1D(nn.Module):
     """Rotary positions over time, in game loops: each head's pairs rotate at wavelengths from lo to hi (geometric), so a query and a key
     score by how many loops apart they are, whatever the step between frames."""
@@ -134,15 +148,15 @@ class Heads(nn.Module):
         B, T = x.shape[:2]
         return layer(x).view(B, T, self.KV, self.dh).repeat_interleave(self.H // self.KV, 2).transpose(1, 2)
 
-    def query(self, x, ang=None):
+    def query(self, x, cs=None):
         B, T = x.shape[:2]
         q = self.q(x).view(B, T, self.H, self.dh).transpose(1, 2)
-        q = RoPE2D.rotate(q, ang) if ang is not None else q
+        q = rotate(q, cs) if cs is not None else q
         return F.normalize(q, dim=-1) * self.scale.exp().to(q.dtype) * math.sqrt(self.dh)
 
-    def key(self, x, ang=None):
+    def key(self, x, cs=None):
         k = self._kv(x, self.k)
-        k = RoPE2D.rotate(k, ang) if ang is not None else k
+        k = rotate(k, cs) if cs is not None else k
         return F.normalize(k, dim=-1)
 
     def value(self, x):
@@ -186,7 +200,8 @@ class Block(nn.Module):
         return x + self.space.out(a)
 
     def temporal(self, x, key, mask, ang, heads, norm):
-        """x, key [N, T, d], mask [N, T], ang [N, T, dh / 2] each frame's rotation by its game loop: each token reads the keys at or before its frame.
+        """x, key [N, T, d], mask [N, T], ang [N, T, dh / 2, 2] the cosines and sines of each frame's rotation by its game loop: each token reads the keys at
+        or before its frame.
         A token with nothing to read keeps its own frame's key: an empty softmax is NaN."""
         N, T, d = x.shape
         y, ky = norm(x), norm(key)
@@ -400,11 +415,14 @@ class PhysicsEncoder(nn.Module):
         loops = b["loops"] - b["loops"][:, :1] if "loops" in b else torch.arange(F_, device=dev)[None].expand(B, -1)
         t_ang = self.rope_t.angles(loops)                                                      # [B, F, dh / 2]
         K, h2 = A // 2, t_ang.shape[-1]
+        t_cs = cos_sin(t_ang)                                                                  # [B, F, dh / 2, 2]
         act_mask = b["act_mask"].reshape(B * F_, A)
         fa = torch.nonzero(act_mask.any(1), as_tuple=True)[0]
-        c = dict(B=B, F=F_, valid=valid, ang=self.rope.angles(pos), ang_a=self.rope.angles(b["act_xy"].reshape(B * F_, A, 2)), act_mask=act_mask, t_mask=t_mask,
-                 t_ang=t_ang[:, None].expand(B, T, F_, h2).reshape(B * T, F_, h2), a_mask=b["act_mask"].view(B, F_, 2, K).transpose(1, 2).reshape(B * 2, F_ * K),
-                 a_ang=t_ang.repeat_interleave(K, 1)[:, None].expand(B, 2, F_ * K, h2).reshape(B * 2, F_ * K, h2))
+        # every rotation as cosines and sines, once: 6 blocks of spatial, temporal and action layers all rotate by these
+        c = dict(B=B, F=F_, valid=valid, ang=cos_sin(self.rope.angles(pos)), ang_a=cos_sin(self.rope.angles(b["act_xy"].reshape(B * F_, A, 2))), act_mask=act_mask,
+                 t_mask=t_mask, t_ang=t_cs[:, None].expand(B, T, F_, h2, 2).reshape(B * T, F_, h2, 2),
+                 a_mask=b["act_mask"].view(B, F_, 2, K).transpose(1, 2).reshape(B * 2, F_ * K),
+                 a_ang=t_cs.repeat_interleave(K, 1)[:, None].expand(B, 2, F_ * K, h2, 2).reshape(B * 2, F_ * K, h2, 2))
         if len(fa):
             fa = fa if len(fa) > 1 else fa.repeat(2)
             c["fa"] = fa
