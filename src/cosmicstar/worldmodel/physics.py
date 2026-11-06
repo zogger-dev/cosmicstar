@@ -30,21 +30,12 @@ and production carry their place in the queue.
 import copy
 import math
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 from torch.nn.attention.flex_attention import flex_attention
 
-from .action_tokens import (
-    C_ACTION,
-    N_ACT_KINDS,
-    N_GROUP_OPS,
-    N_GROUPS,
-    N_REMOVE,
-    N_SUBGROUPS,
-)
 from .dense import ResBlock
 from .direct import RoPE2D
 from .encoder import mlp
@@ -53,24 +44,16 @@ from .physics_data import (
     C_DYNAMIC,
     C_LIVE,
     C_STATIC,
-    CODE,
     NEUTRAL,
     PATCH,
     PROD,
     QUEUE,
-    RAW_NUMS,
     TOP,
 )
 from .tokenize import C_GROUPS, N_BUFF_IDS, N_EFFECT_IDS, N_RAW_ABILITY_IDS, PC_KEYS
 
-I = {n: i for i, n in enumerate(RAW_NUMS)}
-C_PLY = 14  # player numbers: PC_KEYS, the camera's x, y, known, and supply left
-# place on the map: sin and cos of x and y at wavelengths from 4 to 256 map units
-MAP_WAVES = 6
-N_FLAGS = 16  # flags, flags2 bits
-EFF_WAVES = 6  # an effect's age: sin and cos at wavelengths from 4 to 1024 loops
-# embedded numbers per row, see row_numbers
-ROW_NUMS = len(RAW_NUMS) + 8 + 4 * MAP_WAVES + N_FLAGS
+from .entity_encoder import N_FLAGS, ActionEncoder, EntityEncoder, I
+
 MAX_BIRTHS, MARGIN = 64, 2  # birth count classes; extra queries per frame
 POS_SCALE = 0.29  # a fast unit's per-loop move, map units
 POS_BOOST = 4.0
@@ -124,85 +107,6 @@ class RoPE1D(nn.Module):
     def angles(self, loops):
         """loops [..., F] -> [..., F, dh / 2] rotation angles."""
         return loops[..., None].float() * self.omega
-
-
-def left_to_go(feat, j):
-    """feat with its progress column j as 1 - progress: bfloat16 resolves values near 0
-    finely and near 1 to 0.004, and completion is the moment that matters."""
-    return torch.cat([feat[:, :j], 1 - feat[:, j : j + 1], feat[:, j + 1 :]], 1)
-
-
-def effect_numbers(b):
-    """[B, F, X, 2 + 2 * EFF_WAVES]: radius, and age in loops as log and as sin and cos
-    at wavelengths from 4 to 1024 loops, so a delay such as a storm's ticks or a bile's
-    landing reads exactly at any age."""
-    age = b["eff_age"].float() if "eff_age" in b else torch.zeros_like(b["eff_radius"])
-    w = (
-        2
-        * math.pi
-        / torch.logspace(
-            math.log10(4.0), math.log10(1024.0), EFF_WAVES, device=age.device
-        )
-    )
-    a = age[..., None] * w
-    return torch.cat(
-        [b["eff_radius"][..., None], torch.log1p(age)[..., None] / 8, a.sin(), a.cos()],
-        -1,
-    ).to(b["eff_radius"].dtype)
-
-
-def row_numbers(b):
-    """[B, F, R, ROW_NUMS] scaled numbers of the rows."""
-    n = b["num"]
-    g = lambda k: n[..., I[k]]
-    hpm, shm, bm = g("hp_max"), g("shield_max"), g("buff_max")
-    log = lambda x, s=8.0: torch.log1p(x.clamp(min=0)) / s
-    out = [
-        (g("hp") / hpm.clamp(min=1)) * (hpm > 0),
-        (g("shield") / shm.clamp(min=1)) * (shm > 0),
-        g("energy") / 200,
-        log(hpm),
-        log(shm),
-        1 - g("build"),  # left to go: bfloat16 is fine near 0, where completion is
-        log(g("contents")),
-        g("harvesters") / 16,
-        g("ideal_harvesters") / 16,
-        g("facing").sin(),
-        g("facing").cos(),
-        g("radius") / 4,
-        g("weapon_cooldown").clamp(min=0) / 32,
-        g("cargo_used") / 8,
-        g("cargo_max") / 8,
-        (g("buff_remain") / bm.clamp(min=1)) * (bm > 0),
-        log(bm),
-        g("detect_range") / 12,
-        g("radar_range") / 32,
-        g("atk_up") / 3,
-        g("arm_up") / 3,
-        g("shd_up") / 3,
-        g("add_on") >= 0,
-        g("engaged") >= 0,
-        g("z") / 16,
-    ]
-    out += [(g("display") == k) for k in (1, 2, 3)] + [
-        (g("cloak") == k) for k in (0, 1, 2, 3)
-    ]
-    out += [b["inside"] == 1, b["inside"] == 2, ~b["alive"], b["parent_row"] >= 0]
-    # flags, flags2: hallucinated, powered, burrowed, selected and the rest, as bits
-    bits = g("flags").long() | (g("flags2").long() << 8)
-    out += list(
-        ((bits[..., None] >> torch.arange(N_FLAGS, device=n.device)) & 1).unbind(-1)
-    )
-    # where on the map, in map units: map knowledge (ramps, chokes) is tied to place
-    w = (
-        2
-        * math.pi
-        / torch.logspace(math.log10(4.0), math.log10(256.0), MAP_WAVES, device=n.device)
-    )
-    for k in ("x", "y"):
-        a = b[k][..., None].float() * w
-        out += list(a.sin().unbind(-1)) + list(a.cos().unbind(-1))
-    return torch.stack([x.to(n.dtype) for x in out], -1)
 
 
 def attend_pairs(q, k, v, mask, causal=False, code=None, rowmap=None, bias=None):
@@ -493,53 +397,8 @@ class PhysicsEncoder(nn.Module):
     ):
         super().__init__()
         self.d = d
-        self.unit = nn.Embedding(vocab.n_units, d)
-        self.ability = nn.Embedding(vocab.n_abilities, d)
-        self.owner = nn.Embedding(3, d)
-        self.num_in = mlp(ROW_NUMS, d)
-        self.groups = nn.Linear(C_GROUPS, d)
-        self.buff = nn.Embedding(N_BUFF_IDS, d)
-        self.bag_in = nn.ModuleDict(
-            dict(ord=mlp(4, d), prod=mlp(2, d), rally=mlp(3, d))
-        )
-        self.bag_slot = nn.ModuleDict(
-            dict(ord=nn.Embedding(QUEUE, d), prod=nn.Embedding(PROD, d))
-        )  # which place in the queue: 0 is now
-        # pointers as inputs: each row's random identity code, and the codes of the rows
-        # it points at, each kind through its own map
-        self.code_in = nn.ModuleDict(
-            {
-                k: nn.Linear(CODE, d, bias=False)
-                for k in ("self", "engaged", "container", "order")
-            }
-        )
-        self.raw_ability = nn.Embedding(N_RAW_ABILITY_IDS, d)
-        self.auto_on = nn.Embedding(2, d)
-        self.race = nn.Embedding(4, d)
-        self.ply_in = mlp(C_PLY, d)
-        self.player = nn.Embedding(2, d)
-        self.cls = nn.Parameter(torch.zeros(1, d))
-        self.view_in = nn.Linear(
-            2, d
-        )  # which players a sample's state is seen by: [1, 1] for physics
-        self.map_wh = nn.Linear(2, d)
-        # actions
-        self.a_kind, self.a_family = nn.Embedding(N_ACT_KINDS, d), nn.Embedding(
-            avocab.n_families, d, padding_idx=0
-        )
-        self.a_button, self.a_tkind = nn.Embedding(
-            avocab.n_buttons, d, padding_idx=0
-        ), nn.Embedding(4, d)
-        self.a_group, self.a_gop = nn.Embedding(
-            N_GROUPS, d, padding_idx=0
-        ), nn.Embedding(N_GROUP_OPS, d, padding_idx=0)
-        self.a_remove = nn.Embedding(N_REMOVE, d, padding_idx=0)
-        self.a_subgroup = nn.Embedding(N_SUBGROUPS, d, padding_idx=0)
-        self.a_num = mlp(C_ACTION, d)
-        self.a_mix = mlp(d, d)
-        # effects: no ids, so tokens of the frame they're in, without a timeline
-        self.effect = nn.Embedding(N_EFFECT_IDS, d)
-        self.eff_num = nn.Linear(2 + 2 * EFF_WAVES, d)
+        self.acts = ActionEncoder(avocab, d)
+        self.entities = EntityEncoder(vocab, d, self.acts)
         # map
         self.tower = Tower(C_LIVE + C_STATIC, d)
         self.map_tokens = nn.Parameter(
@@ -555,7 +414,6 @@ class PhysicsEncoder(nn.Module):
             nn.LayerNorm(d),
             nn.LayerNorm(d),
         )
-        nn.init.normal_(self.cls, std=0.02)
         nn.init.normal_(self.map_tokens, std=0.02)
         self.grad_ckpt = False
 
@@ -566,97 +424,6 @@ class PhysicsEncoder(nn.Module):
         for m in self.modules():
             if type(m).__name__ in ("Attend", "PairAttend"):
                 m.compile(dynamic=True)
-
-    def _bag(self, name, b, emb):
-        """Mean of a list-valued state per token: [B * F * R] flat index, embedded
-        items."""
-        where, B, F_, R = b[f"{name}_at"], *b["mask"].shape
-        out = emb.new_zeros(B * F_ * R, emb.shape[-1]).index_add(0, where, emb)
-        cnt = (
-            torch.bincount(where, minlength=B * F_ * R)
-            .clamp(min=1)[:, None]
-            .to(emb.dtype)
-        )
-        return (out / cnt).view(B, F_, R, -1)
-
-    def rows(self, b):
-        B, F_, R = b["mask"].shape
-        code = b["row_code"]  # [B, R, CODE]
-        dt = b["num"].dtype
-
-        def pointed(bi, row):
-            """The code of the row pointed at, zeros where row < 0 (no target)."""
-            return torch.where((row >= 0)[..., None], code[bi, row.clamp(min=0)], 0).to(
-                dt
-            )
-
-        bb = torch.arange(B, device=code.device)[:, None, None]
-        ids = (
-            self.unit(b["type"].long())
-            + self.owner(b["owner"])[:, None]
-            + self.num_in(row_numbers(b))
-            + self.groups(b["groups"].to(dt))
-        )
-        ids = (
-            ids
-            + self.code_in["self"](code.to(dt))[:, None]
-            + self.code_in["engaged"](pointed(bb, b["engaged_row"].long()))
-            + self.code_in["container"](pointed(bb, b["parent_row"].long()))
-        )
-        o_b = b["ord_at"] // (F_ * R)
-        ids = ids + self._bag(
-            "ord",
-            b,
-            self.ability(b["ord_abil"])
-            + self.bag_in["ord"](left_to_go(b["ord_feat"], 3))
-            + self.bag_slot["ord"](b["ord_slot"])
-            + self.code_in["order"](pointed(o_b, b["ord_trow"])),
-        )
-        ids = ids + self._bag(
-            "prod",
-            b,
-            self.ability(b["prod_abil"])
-            + self.bag_in["prod"](left_to_go(b["prod_feat"], 0))
-            + self.bag_slot["prod"](b["prod_slot"]),
-        )
-        ids = ids + self._bag("buff", b, self.buff(b["buff_id"]))
-        ids = ids + self._bag("rally", b, self.bag_in["rally"](b["rally_feat"]))
-        ids = ids + self._bag("ab", b, self.raw_ability(b["ab_id"]))
-        ids = ids + self._bag(
-            "auto",
-            b,
-            self.a_family(b["auto_fam"])
-            + self.a_button(b["auto_but"])
-            + self.auto_on(b["auto_on"]),
-        )
-        return ids
-
-    def globals(self, b):
-        B, F_ = b["mask"].shape[:2]
-        p = (
-            self.ply_in(b["ply_num"])
-            + self.race(b["players"])[:, None]
-            + self.player.weight[None, None]
-        )
-        c = (self.cls + self.view_in(b["view"]) + self.map_wh(b["half"] / 100))[
-            :, None
-        ].expand(B, F_, -1)
-        return torch.cat([c[:, :, None], p], 2)  # [B, F, 3, d]
-
-    def actions(self, b):
-        n = (
-            self.a_kind(b["act_kind"])
-            + self.a_family(b["act_family"])
-            + self.a_button(b["act_button"])
-            + self.a_tkind(b["act_tkind"])
-            + self.a_group(b["act_group"])
-            + self.a_gop(b["act_gop"])
-            + self.a_remove(b["act_remove"])
-            + self.a_subgroup(b["act_subgroup"])
-            + self.a_num(b["act_num"])
-            + self.player(b["act_player"])
-        )
-        return self.a_mix(n)
 
     def anchors(self, b):
         """[B, S, 2] the grid cells' centers, map units from the center of the map."""
@@ -675,7 +442,7 @@ class PhysicsEncoder(nn.Module):
         """Each frame's map tokens [BF, S, d]: the map's learned tokens + the tower over
         the live map, read at their anchors."""
         B, F_ = b["mask"].shape[:2]
-        dt = self.cls.dtype
+        dt = self.map_tokens.dtype
         st = b["static_grid"].to(dt)
         st = torch.cat([st[..., :2] / 255, st[..., 2:]], -1)
         raw = (
@@ -713,17 +480,14 @@ class PhysicsEncoder(nn.Module):
             else (lambda f, *a: f(*a))
         )
         cells = run(self.embed_map, b)
-        G = self.globals(b).reshape(B * F_, g0, d)
-        rows = (self.rows(b) * b["mask"][..., None]).reshape(B * F_, R, d)
-        eff = (
-            self.effect(b["eff_type"])
-            + self.owner(b["eff_owner"])
-            + self.eff_num(effect_numbers(b))
-        ).reshape(B * F_, X, d)
+        G, rows, eff = self.entities(b)
+        G = G.reshape(B * F_, g0, d)
+        rows = (rows * b["mask"][..., None]).reshape(B * F_, R, d)
+        eff = eff.reshape(B * F_, X, d)
         x = torch.cat([G, rows, eff, cells], 1)
         n = g0 + R + X
         T = n + GRID * GRID
-        acts = self.actions(b).reshape(B * F_, A, d)
+        acts = self.acts(b).reshape(B * F_, A, d)
         valid = torch.cat(
             [
                 torch.ones(B, F_, g0, dtype=torch.bool, device=dev),

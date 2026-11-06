@@ -31,7 +31,13 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-from cosmicstar.worldmodel import epochs, physics, physics_data, statefile
+from cosmicstar.worldmodel import (
+    entity_encoder,
+    epochs,
+    physics,
+    physics_data,
+    statefile,
+)
 from cosmicstar.worldmodel.action_tokens import ActionVocab
 from cosmicstar.worldmodel.vocab import Vocab
 
@@ -556,6 +562,21 @@ def main():
     start, ck = 0, None
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
+        old_sd = ck["model"]
+        ck["model"] = entity_encoder.upgrade_state(old_sd)
+        if ck["model"].keys() != old_sd.keys():  # saved before the entity encoders
+            buffers = {n for n, _ in model.named_buffers()}
+            ck["opt"] = entity_encoder.upgrade_optimizer(
+                ck["opt"],
+                [
+                    k
+                    for k in old_sd
+                    if not k.startswith("teacher.")
+                    and entity_encoder.upgrade_state({k: 0}).keys() - buffers
+                ],
+                model,
+            )
+        del old_sd
         model.load_state_dict(ck["model"])
         start = ck["step"]
     if args.eval_only:
