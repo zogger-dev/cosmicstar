@@ -687,6 +687,7 @@ def collate(windows, vocab, rng=None):
         grid[b, :, :h_, :w_], sgrid[b, :h_, :w_] = w["grid"], w["static_grid"]
     out["grid"], out["static_grid"] = torch.from_numpy(grid), torch.from_numpy(sgrid)
     out["view"] = torch.ones(B, 2)
+    out["loops"] = torch.from_numpy(np.stack([np.asarray(w["loops"], np.int64) for w in windows]))      # [B, F]: each frame's game loop
     flat = lambda b, wh: (b * F_ + wh[:, 0]) * R + wh[:, 1]
     bags = {k: ([], []) for k in ("ord", "prod", "buff", "rally", "ab")}
     ord_row = np.full((B, F_, R, QUEUE), -1, np.int32)

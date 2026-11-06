@@ -30,7 +30,6 @@ from scipy.optimize import linear_sum_assignment
 from torch import nn
 from torch.nn.attention.flex_attention import flex_attention
 
-from .action_encoder import LoopTime
 from .action_tokens import C_ACTION, N_ACT_KINDS, N_GROUP_OPS, N_GROUPS, N_REMOVE, N_SUBGROUPS
 from .dense import ResBlock
 from .direct import RoPE2D
@@ -49,6 +48,20 @@ POS_BOOST = 4.0
 DISCOUNT = 0.05                  # critters' whole loss and larvae's position
 GRID = 16                        # the grid's cells per side
 ROPE_SHORTEST = 1 / 32           # map units: a cell is one map unit
+TIME_SHORTEST, TIME_LONGEST = 3.0, 672.0   # game loops: 3 tells gaps of 1, 2 and 3 apart (1 and 2 alias); 672 is 30 s at 22.4 loops a second
+
+
+class RoPE1D(nn.Module):
+    """Rotary positions over time, in game loops: each head's pairs rotate at wavelengths from lo to hi (geometric), so a query and a key
+    score by how many loops apart they are, whatever the step between frames."""
+
+    def __init__(self, dh, lo=TIME_SHORTEST, hi=TIME_LONGEST):
+        super().__init__()
+        self.register_buffer("omega", 2 * math.pi / torch.logspace(math.log10(lo), math.log10(hi), dh // 2), persistent=False)
+
+    def angles(self, loops):
+        """loops [..., F] -> [..., F, dh / 2] rotation angles."""
+        return loops[..., None].float() * self.omega
 
 
 def row_numbers(b):
@@ -172,13 +185,14 @@ class Block(nn.Module):
         a = self.ent(self.space.query(y, c["ang"]), self.space.key(y, c["ang"]), self.space.value(y), c["valid"])
         return x + self.space.out(a)
 
-    def temporal(self, x, key, mask, t, heads, norm):
-        """x, key [N, T, d], mask [N, T]: each token reads the keys at or before its frame. A token with nothing to read keeps its own frame's key: an empty softmax is NaN."""
+    def temporal(self, x, key, mask, ang, heads, norm):
+        """x, key [N, T, d], mask [N, T], ang [N, T, dh / 2] each frame's rotation by its game loop: each token reads the keys at or before its frame.
+        A token with nothing to read keeps its own frame's key: an empty softmax is NaN."""
         N, T, d = x.shape
-        y, ky = norm(x) + t, norm(key) + t
+        y, ky = norm(x), norm(key)
         tri = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
         allow = (tri[None] & mask[:, None]) | torch.eye(T, dtype=torch.bool, device=x.device)[None]
-        a = F.scaled_dot_product_attention(heads.query(y), heads.key(ky), heads.value(ky), attn_mask=allow[:, None])
+        a = F.scaled_dot_product_attention(heads.query(y, ang), heads.key(ky, ang), heads.value(ky), attn_mask=allow[:, None])
         return torch.where(mask[..., None], x + heads.out(a), x)
 
     def actions(self, x, dl, a, c):
@@ -206,7 +220,7 @@ class Block(nn.Module):
         by_token = lambda z: z.view(B, F_, T, d).transpose(1, 2).reshape(B * T, F_, d)
         xr, up, mask = by_token(x), by_token(x + dl), c["t_mask"]
         key = torch.cat([xr[:, :1], torch.where(mask[:, :-1, None], up[:, :-1], xr[:, 1:])], 1)
-        x = self.temporal(xr, key, mask, c["t_frames"], self.time, self.nt).view(B, T, F_, d).transpose(1, 2).reshape(B * F_, T, d).to(x.dtype)
+        x = self.temporal(xr, key, mask, c["t_ang"], self.time, self.nt).view(B, T, F_, d).transpose(1, 2).reshape(B * F_, T, d).to(x.dtype)
         x = self.ff_time(x)
         if last:
             return x, dl, a
@@ -222,7 +236,7 @@ class Block(nn.Module):
         if not m.any():
             return a
         seq = a.view(B, F_, 2, K, d).transpose(1, 2).reshape(B * 2, F_ * K, d)
-        y = torch.where(m[..., None], self.ff_act(self.temporal(seq, seq, m, c["a_frames"], self.act_time, self.nat)), seq)
+        y = torch.where(m[..., None], self.ff_act(self.temporal(seq, seq, m, c["a_ang"], self.act_time, self.nat)), seq)
         return y.view(B, 2, F_, K, d).transpose(1, 2).reshape(B * F_, 2 * K, d).to(a.dtype)
 
 
@@ -283,7 +297,7 @@ class PhysicsEncoder(nn.Module):
         self.tower = Tower(C_LIVE + C_STATIC, d)
         self.map_tokens = nn.Parameter(torch.zeros(n_maps, GRID * GRID, d))       # what each place of each map is, whatever is on it now
         self.rope = RoPE2D(d // heads, lo=ROPE_SHORTEST, hi=256.0)
-        self.time, self.time_in = LoopTime(), nn.Linear(LoopTime().out_dim(), d)
+        self.rope_t = RoPE1D(d // heads)
         self.blocks = nn.ModuleList(Block(d, heads, kv_heads, ff) for _ in range(blocks))
         self.norm_e, self.norm_c, self.norm_g = nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d)
         nn.init.normal_(self.cls, std=0.02)
@@ -382,12 +396,15 @@ class PhysicsEncoder(nn.Module):
         pos = torch.cat([torch.zeros(B, F_, g0, 2, device=dev), rel, b["eff_xy"], cen[:, None].expand(-1, F_, -1, -1)], 2).reshape(B * F_, T, 2)
         # tokens without a place sit at the origin, unrotated
         t_mask = torch.cat([torch.ones(B, F_, g0, dtype=torch.bool, device=dev), b["mask"], torch.zeros_like(b["eff_mask"]), torch.ones(B, F_, GRID * GRID, dtype=torch.bool, device=dev)], 2).transpose(1, 2).reshape(B * T, F_)
-        frames = lambda T: self.time_in(self.time(torch.arange(T, device=dev)).to(x.dtype))
+        # time: each frame's game loop from the window's first; without loops (older batches), a loop a frame
+        loops = b["loops"] - b["loops"][:, :1] if "loops" in b else torch.arange(F_, device=dev)[None].expand(B, -1)
+        t_ang = self.rope_t.angles(loops)                                                      # [B, F, dh / 2]
+        K, h2 = A // 2, t_ang.shape[-1]
         act_mask = b["act_mask"].reshape(B * F_, A)
         fa = torch.nonzero(act_mask.any(1), as_tuple=True)[0]
         c = dict(B=B, F=F_, valid=valid, ang=self.rope.angles(pos), ang_a=self.rope.angles(b["act_xy"].reshape(B * F_, A, 2)), act_mask=act_mask, t_mask=t_mask,
-                 t_frames=frames(F_), a_mask=b["act_mask"].view(B, F_, 2, A // 2).transpose(1, 2).reshape(B * 2, F_ * (A // 2)),
-                 a_frames=frames(F_).repeat_interleave(A // 2, 0))
+                 t_ang=t_ang[:, None].expand(B, T, F_, h2).reshape(B * T, F_, h2), a_mask=b["act_mask"].view(B, F_, 2, K).transpose(1, 2).reshape(B * 2, F_ * K),
+                 a_ang=t_ang.repeat_interleave(K, 1)[:, None].expand(B, 2, F_ * K, h2).reshape(B * 2, F_ * K, h2))
         if len(fa):
             fa = fa if len(fa) > 1 else fa.repeat(2)
             c["fa"] = fa
