@@ -107,6 +107,22 @@ def main():
         and dc[t + 1] > tol
     )
 
+    # a selection at t pointing at a unit it adds: the same as an action
+    c = {k: v.clone() for k, v in b.items()}
+    slot = int(c["act_mask"][0, t].nonzero()[0, 0])
+    row = int(c["mask"][0, t].nonzero()[-1, 0])
+    c["act_sel"] = torch.tensor([[t, slot, row]])
+    a, u = enc(c)
+    dc, du = diff(clean, a), diff(upd, u)
+    print(
+        "change a selection clean",
+        [f"{x:.0e}" for x in dc.tolist()],
+        "\n                 updated",
+        [f"{x:.0e}" for x in du.tolist()],
+        flush=True,
+    )
+    assert dc[: t + 1].max() < tol and du[:t].max() < tol and du[t] > tol
+
     # a row's state, the map and a global at t: nothing earlier
     for name, change in (
         ("row", lambda c: c["num"][0, t].__iadd__(1.0)),

@@ -76,6 +76,7 @@ POS_SCALE = 0.29  # a fast unit's per-loop move, map units
 POS_BOOST = 4.0
 DISCOUNT = 0.05  # critters' whole loss and larvae's position
 GRID = 16  # the grid's cells per side
+N_CODES = 5  # pair codes of the action pointers, see pointer_pairs
 ROPE_SHORTEST = 1 / 32  # map units: a cell is one map unit
 # game loops: 3 tells gaps of 1, 2 and 3 apart (1 and 2 alias); 672 is 30 s at 22.4
 # loops a second
@@ -195,7 +196,7 @@ def row_numbers(b):
 
 def attend_pairs(q, k, v, mask, causal=False, code=None, rowmap=None, bias=None):
     """One softmax per query over the keys mask [B, K] allows. causal: only keys at or
-    before the query. code [P, Q, K] and rowmap [B] add bias [3, H] to a pair's score.
+    before the query. code [P, Q, K] and rowmap [B] add bias [N_CODES, H] to a pair's score.
     FlexAttention when training; without gradient SDPA, since FlexAttention's
     no-gradient path fails to compile (quad_latent.attend).
     """
@@ -331,7 +332,9 @@ class Block(nn.Module):
             FeedForward(d, ff),
         )
         self.ent, self.pair = Attend(), PairAttend()
-        self.bias = nn.Parameter(torch.zeros(3, heads))
+        # a pair's score bias by code: none, action -> its target, target -> action,
+        # selection -> a unit it adds, that unit -> the selection
+        self.bias = nn.Parameter(torch.zeros(N_CODES, heads))
         nn.init.zeros_(
             self.act.o.weight
         )  # starts as the identity: the updated tokens start as the state
@@ -388,7 +391,7 @@ class Block(nn.Module):
             self.act.key(ya, c["ang_a"][fa]),
             self.act.value(ya, c["ang_a"][fa]),
         )
-        bias = (self.bias * torch.tensor([0.0, 1.0, 1.0], device=x.device)[:, None]).to(
+        bias = (self.bias * (torch.arange(N_CODES, device=x.device) > 0)[:, None]).to(
             q.dtype
         )  # code 0: no pair, no bias
         am = c["act_mask"][fa]
@@ -791,7 +794,12 @@ class PhysicsEncoder(nn.Module):
             fa = fa if len(fa) > 1 else fa.repeat(2)
             c["fa"] = fa
             c["code_ae"], c["code_ea"], c["rowmap"] = pointer_pairs(
-                b["act_target"].reshape(B * F_, A), fa, A, T, g0
+                b["act_target"].reshape(B * F_, A),
+                fa,
+                A,
+                T,
+                g0,
+                b.get("act_sel"),
             )
         dl = torch.zeros_like(x)
         for i, blk in enumerate(self.blocks):
@@ -802,18 +810,29 @@ class PhysicsEncoder(nn.Module):
             cells=self.norm_c(z[:, n:]).view(B, F_, GRID * GRID, d),
             glob=self.norm_g(z[:, :g0]).view(B, F_, g0, d),
         )
-        return out(x), out(x + dl)
+        upd = out(x + dl)
+        upd["act"] = acts.view(B, F_, A, d)
+        return out(x), upd
 
 
 @torch.no_grad()
-def pointer_pairs(target, fa, A, n, g0):
-    """For the frames fa with actions, n state tokens: code tables of action -> target
-    row (1) over the state, [P, A, n], and target row -> action (2), [P, n, A], and
-    rowmap [len(fa)] -> P or -1. A table always exists, so a compiled part sees one
-    shape of call.
+def pointer_pairs(target, fa, A, n, g0, sel=None):
+    """For the frames fa with actions, n state tokens: code tables over the state of
+    action -> target row (1) or -> a row a selection adds (3), [P, A, n], and the
+    reverse, target row -> action (2) or added row -> selection (4), [P, n, A], and
+    rowmap [len(fa)] -> P or -1. sel [N, 3]: (frame, action slot, row). A table always
+    exists, so a compiled part sees one shape of call.
     """
     t = target[fa]
     fi, ai = torch.nonzero(t >= 0, as_tuple=True)
+    row, code = t[fi, ai] + g0, torch.ones_like(fi)
+    if sel is not None and len(sel):
+        sel = sel.to(t.device)
+        si, pi = torch.nonzero(sel[:, :1] == fa[None], as_tuple=True)
+        fi = torch.cat([fi, pi])
+        ai = torch.cat([ai, sel[si, 1]])
+        row = torch.cat([row, sel[si, 2] + g0])
+        code = torch.cat([code, torch.full_like(pi, 3)])
     if not len(fi):
         return (
             torch.zeros(1, A, n, dtype=torch.uint8, device=t.device),
@@ -826,9 +845,8 @@ def pointer_pairs(target, fa, A, n, g0):
     ae, ea = torch.zeros(
         len(uq), A, n, dtype=torch.uint8, device=t.device
     ), torch.zeros(len(uq), n, A, dtype=torch.uint8, device=t.device)
-    row = t[fi, ai] + g0
-    ae[inv, ai, row] = 1
-    ea[inv, row, ai] = 2
+    ae[inv, ai, row] = code.to(torch.uint8)
+    ea[inv, row, ai] = (code + 1).to(torch.uint8)
     return ae, ea, rowmap
 
 
@@ -983,6 +1001,8 @@ class Physics(nn.Module):
         self.births = BirthHead(d, kw.get("heads", 8), self.head)
         self.map_dec = MapDecoder(d, C_DYNAMIC + N_EFFECT_IDS)
         self.player_next = nn.Linear(d, len(PC_KEYS))
+        # a command's recipients: its token against each row of its frame
+        self.recip_q, self.recip_k = nn.Linear(d, d), nn.Linear(d, d)
         self.ema, self.demean = ema, demean
         self.register_buffer(
             "critter",
@@ -1025,7 +1045,7 @@ class Physics(nn.Module):
         return (on + lam * off) / zp.shape[1], c.detach()
 
     def forward(self, b):
-        _, out = self.enc(b)
+        clean, out = self.enc(b)
         with torch.no_grad():
             tgt, _ = self.teacher(b, last_action=False)
         B, F_, R = b["mask"].shape
@@ -1062,9 +1082,50 @@ class Physics(nn.Module):
             (b["ply_num"][:, 1:] - b["ply_num"][:, :-1])[..., : len(PC_KEYS)] * 100,
         )
         logs["player"] = pn
-        loss = lat + self.aux_weight * (raw + brth + mp + pn)
+        rc, rlogs = self.recipient_loss(clean, out["act"], b)
+        logs.update(rlogs)
+        loss = lat + self.aux_weight * (raw + brth + mp + pn + rc)
         logs["loss"] = loss
         self._rows = None  # it would hold this pass's graph on the model until the next
+        return loss, logs
+
+    def recipient_loss(self, clean, act, b):
+        """Which units carry out each command, the engine's own list: each command
+        token's query against every live row of its frame's clean state, one binary
+        logit per row; positives and negatives each averaged, then the two halves. Also
+        the F1 of logit > 0, against the F1 of taking the acting player's selected
+        rows."""
+        pr = b.get("act_recip")
+        zero = act.sum() * 0
+        if pr is None or not len(pr):
+            return zero, {}
+        B, F_, A, d = act.shape
+        R = b["mask"].shape[2]
+        pr = pr.to(act.device)
+        uq, inv = torch.unique(pr[:, 0] * A + pr[:, 1], return_inverse=True)
+        fb, sl = uq // A, uq % A
+        q = self.recip_q(act.reshape(B * F_, A, d)[fb, sl])
+        k = self.recip_k(clean["ent"].reshape(B * F_, R, d)[fb])
+        logit = torch.einsum("ud,urd->ur", q, k).float() / math.sqrt(d)
+        valid = (b["mask"] & b["alive"]).reshape(B * F_, R)[fb].float()
+        tgt = torch.zeros_like(logit)
+        tgt[inv, pr[:, 2]] = 1.0
+        tgt = tgt * valid
+        bce = F.binary_cross_entropy_with_logits(logit, tgt, reduction="none")
+        pos = (bce * tgt).sum(1) / tgt.sum(1).clamp(min=1)
+        neg = (bce * (valid - tgt)).sum(1) / (valid - tgt).sum(1).clamp(min=1)
+        loss = 0.5 * (pos + neg).mean()
+        with torch.no_grad():
+            f1 = lambda p_: (2 * (p_ * tgt).sum() / (p_.sum() + tgt.sum()).clamp(min=1))
+            who = b["act_player"].reshape(B * F_, A)[fb, sl]
+            own = b["owner"].repeat_interleave(F_, 0)[fb] == who[:, None]
+            sel = (b["groups"][..., 10] > 0).reshape(B * F_, R)[fb] & own
+            logs = dict(
+                recip=loss,
+                recip_f1=f1((logit > 0).float() * valid),
+                recip_sel_f1=f1(sel.float() * valid),
+            )
+        logs["recip"] = loss
         return loss, logs
 
     def raw_losses(self, p, s, b, sc, bi, fi, ri):

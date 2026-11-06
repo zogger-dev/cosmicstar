@@ -29,7 +29,7 @@ import types
 
 import numpy as np
 
-from . import arrow_state, statefile
+from . import arrow_state, command_join, statefile
 from .action_tokens import GameActions
 from .tokenize import (
     N_EFFECT_IDS,
@@ -541,6 +541,21 @@ class Game:
         stub = types.SimpleNamespace(meta=self.meta, unit_tag=tags, vocab=self.vocab)
         self.acts = GameActions(self.base + ".acts.npz", stub, avocab)
         self.act_key = key
+        # the engine's executed commands, joined to tokens: token -> the units that
+        # carried it out, as row keys (view, unit id). Each player's from its own view
+        self.recip = {}
+        for s in (1, 2):
+            pov = self.rest[s]
+            if "cmd_loop" not in pov.files:
+                continue
+            ev, _ = command_join.match(self.acts.raw, s, pov)
+            cs, cu = pov["cmd_start"], pov["cmd_unit"]
+            for c in np.nonzero(ev >= 0)[0].tolist():
+                t = int(self.acts.tok_of_raw[ev[c]])
+                if t >= 0 and cs[c + 1] > cs[c]:
+                    self.recip.setdefault(t, set()).update(
+                        (s, int(u)) for u in cu[cs[c] : cs[c + 1]].tolist()
+                    )
         # autocast: the observation never shows it, so each toggle's state is remembered
         # per unit: (loop, on, family, button, unit ids) per view
         table = avocab.ruleset_table(self.meta)
@@ -578,6 +593,19 @@ class Game:
         xy = np.nan_to_num(xy)
         for i in np.nonzero(uid >= 0)[0].tolist():
             target[i] = row_of.get(self.act_key[int(uid[i])], -1)
+        # a selection's added units, and a command's recipients: (token, row) pairs
+        sel, recip = [], []
+        a0, a1 = tk["sel_start"][idx], self.acts.sel_end[idx]
+        for i in np.nonzero(a1 > a0)[0].tolist():
+            for u in self.acts.sel_uid[a0[i] : a1[i]].tolist():
+                r_ = row_of.get(self.act_key[u], -1) if u >= 0 else -1
+                if r_ >= 0:
+                    sel.append((i, r_))
+        for i, t in enumerate(idx.tolist()):
+            for key in self.recip.get(t, ()):
+                r_ = row_of.get(key, -1)
+                if r_ >= 0:
+                    recip.append((i, r_))
         flip = lambda p: (2 - p if swap else p - 1)
         num = np.stack(
             [
@@ -611,6 +639,8 @@ class Game:
             xy=np.where(placed[:, None], xy - self.center, 0).astype(np.float32),
             placed=placed,
             target=target,
+            sel=np.array(sel, np.int64).reshape(-1, 2),
+            recip=np.array(recip, np.int64).reshape(-1, 2),
         )  # no place: the center, like the globals
 
     def _death(self, s, k, t0, L):
@@ -1287,12 +1317,15 @@ def collate(windows, vocab, rng=None):
         shape + (windows[0]["actions"]["num"].shape[1],), np.float32
     ), np.zeros(shape + (2,), np.float32)
     placed, target = np.zeros(shape, bool), np.full(shape, -1, np.int64)
+    sel_pairs, recip_pairs = [], []
     for b, w in enumerate(windows):
         a = w["actions"]
         seen = np.zeros((F_, 2), np.int64)
+        slot = np.zeros(len(a["frame"]), np.int64)
         for i, f in enumerate(a["frame"].tolist()):
             p = int(a["player"][i])
             s = p * K + seen[f, p]
+            slot[i] = s
             seen[f, p] += 1
             amask[b, f, s] = True
             for k in keys:
@@ -1303,6 +1336,13 @@ def collate(windows, vocab, rng=None):
                 a["placed"][i],
             )
             target[b, f, s] = a["target"][i]
+        # (frame of the batch, slot, row)
+        fr = a["frame"].astype(np.int64)
+        for k_, dst in (("sel", sel_pairs), ("recip", recip_pairs)):
+            pr = a.get(k_, np.zeros((0, 2), np.int64))
+            if len(pr):
+                i_ = pr[:, 0]
+                dst.append(np.stack([b * F_ + fr[i_], slot[i_], pr[:, 1]], 1))
     for k in keys:
         out[f"act_{k}"] = torch.from_numpy(ac[k])
     (
@@ -1312,6 +1352,10 @@ def collate(windows, vocab, rng=None):
         out["act_placed"],
         out["act_target"],
     ) = (torch.from_numpy(x) for x in (amask, anum, axy, placed, target))
+    for k_, pr in (("act_sel", sel_pairs), ("act_recip", recip_pairs)):
+        out[k_] = torch.from_numpy(
+            np.concatenate(pr) if pr else np.zeros((0, 3), np.int64)
+        )
     au = [
         (b * F_ + w["autocast"][:, 0]) * R + w["autocast"][:, 1]
         for b, w in enumerate(windows)

@@ -210,6 +210,9 @@ class GameActions:
             return out
 
         kind, loop, player = d["kind"], d["loop"], d["player"]
+        # the token each raw command row went into (a held hotkey's presses share one),
+        # to join the engine's executed commands and their recipients to tokens
+        tok_of_raw = np.full(len(kind), -1, np.int64)
         add_start = np.append(d["add_start"], len(d["add_tag"]))
         rem_start = np.append(d["rem_start"], len(d["rem_pos"]))
         for i in range(len(kind)):
@@ -264,7 +267,9 @@ class GameActions:
                         **last_cmd.get(p, dict(family=FAM_UNK)),
                     )
                 press_loop[p] = L
-            elif k == ra.SELECT:
+            if k in (ra.CMD, ra.CMD_POINT, ra.CMD_UNIT, ra.REPEAT):
+                tok_of_raw[i] = last_tok.get(p, -1)
+            if k == ra.SELECT:
                 tags = d["add_tag"][add_start[i] : add_start[i + 1]]
                 n_rem = rem_start[i + 1] - rem_start[i]
                 add(
@@ -349,6 +354,20 @@ class GameActions:
             np.int64
         )  # token i owns [start, end)
         self.n_raw = len(kind)
+        self.tok_of_raw = tok_of_raw
+        self.raw = {
+            k: d[k]
+            for k in (
+                "kind",
+                "loop",
+                "player",
+                "target",
+                "tx",
+                "ty",
+                "target_tag",
+                "abil_link",
+            )
+        }  # what command_join.match reads
 
     def __len__(self):
         return len(self.tok["kind"])
