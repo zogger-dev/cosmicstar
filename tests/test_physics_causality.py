@@ -1,4 +1,5 @@
 """The one-pass model's dependencies on a real window, exactly: a frame's clean state holds no action of that frame and nothing later."""
+
 import glob
 import json
 import os
@@ -19,8 +20,14 @@ L = 12
 
 
 def load():
-    vocab, avocab = Vocab(json.load(open("data/worldmodel/frame_cache_seq/vocab.json"))), ActionVocab()
-    ids = {os.path.basename(p)[:-len(".index.npz")] for p in glob.glob("data/games_v3/1v1/*/*/*.index.npz")}      # any game will do: nothing is learned here
+    vocab, avocab = (
+        Vocab(json.load(open("data/worldmodel/frame_cache_seq/vocab.json"))),
+        ActionVocab(),
+    )
+    ids = {
+        os.path.basename(p)[: -len(".index.npz")]
+        for p in glob.glob("data/games_v3/1v1/*/*/*.index.npz")
+    }  # any game will do: nothing is learned here
     bases = physics_data.base_paths("data/games_v3", ids - set(EXCLUDED))
     games = Games(bases, vocab, avocab)
     b = None
@@ -36,12 +43,19 @@ def load():
                 break
         if b:
             break
-    return physics.Physics(vocab, avocab, 128, moving_neutrals=physics_data.MOVING_NEUTRALS, blocks=3).eval(), *b
+    return (
+        physics.Physics(
+            vocab, avocab, 128, moving_neutrals=physics_data.MOVING_NEUTRALS, blocks=3
+        ).eval(),
+        *b,
+    )
 
 
 def diff(a, c):
     """Largest change per frame across rows, cells and globals."""
-    return torch.stack([(a[k] - c[k]).flatten(2).abs().amax(2) for k in ("ent", "cells", "glob")]).amax(0)[0]
+    return torch.stack(
+        [(a[k] - c[k]).flatten(2).abs().amax(2) for k in ("ent", "cells", "glob")]
+    ).amax(0)[0]
 
 
 @torch.no_grad()
@@ -50,10 +64,24 @@ def main():
     model, b, t = load()
     enc = model.enc
     for blk in enc.blocks:
-        torch.nn.init.normal_(blk.act.o.weight, std=0.02)     # it starts at zero, the identity: actions would show no effect at all
+        torch.nn.init.normal_(
+            blk.act.o.weight, std=0.02
+        )  # it starts at zero, the identity: actions would show no effect at all
         torch.nn.init.normal_(blk.bias, std=0.5)
     clean, upd = enc(b)
-    print("frames", L, "action frame", t, "rows", b["mask"].shape[2], "grid", b["grid"].shape[2:4], "finite", all(torch.isfinite(v).all() for v in (*clean.values(), *upd.values())), flush=True)
+    print(
+        "frames",
+        L,
+        "action frame",
+        t,
+        "rows",
+        b["mask"].shape[2],
+        "grid",
+        b["grid"].shape[2:4],
+        "finite",
+        all(torch.isfinite(v).all() for v in (*clean.values(), *upd.values())),
+        flush=True,
+    )
     tol = 1e-5
 
     # an action at frame t, its numbers and its target: not the clean state at t or before, not updated before t; updated at t; clean afterwards
@@ -63,11 +91,26 @@ def main():
     c["act_target"][0, t][m & (c["act_target"][0, t] >= 0)] = 0
     a, u = enc(c)
     dc, du = diff(clean, a), diff(upd, u)
-    print("change an action   clean", [f"{x:.0e}" for x in dc.tolist()], "\n                 updated", [f"{x:.0e}" for x in du.tolist()], flush=True)
-    assert dc[:t + 1].max() < tol and du[:t].max() < tol and du[t] > tol and dc[t + 1] > tol
+    print(
+        "change an action   clean",
+        [f"{x:.0e}" for x in dc.tolist()],
+        "\n                 updated",
+        [f"{x:.0e}" for x in du.tolist()],
+        flush=True,
+    )
+    assert (
+        dc[: t + 1].max() < tol
+        and du[:t].max() < tol
+        and du[t] > tol
+        and dc[t + 1] > tol
+    )
 
     # a row's state, the map and a global at t: nothing earlier
-    for name, change in (("row", lambda c: c["num"][0, t].__iadd__(1.0)), ("map", lambda c: c["grid"][0, t].__ixor__(torch.tensor(1, dtype=torch.uint8))), ("player", lambda c: c["ply_num"][0, t].__iadd__(1.0))):
+    for name, change in (
+        ("row", lambda c: c["num"][0, t].__iadd__(1.0)),
+        ("map", lambda c: c["grid"][0, t].__ixor__(torch.tensor(1, dtype=torch.uint8))),
+        ("player", lambda c: c["ply_num"][0, t].__iadd__(1.0)),
+    ):
         c = {k: v.clone() for k, v in b.items()}
         change(c)
         a, u = enc(c)
@@ -84,7 +127,9 @@ def main():
         a, u = enc(c)
         real = {k: (clean[k], a[k]) for k in ("cells", "glob")}
         change = max((p - n).abs().max() for p, n in real.values())
-        change = max(change, ((clean["ent"] - a["ent"]).abs().amax(-1) * b["mask"]).max())   # its own output is unused
+        change = max(
+            change, ((clean["ent"] - a["ent"]).abs().amax(-1) * b["mask"]).max()
+        )  # its own output is unused
         print("change an absent row, others", f"{change:.0e}", flush=True)
         assert change < tol
     print("no leaks")

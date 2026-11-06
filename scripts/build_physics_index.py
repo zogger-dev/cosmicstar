@@ -3,6 +3,7 @@ frames, death frames and parents. Skips games that already have one and games mi
 
     python scripts/build_physics_index.py --games data/games_v3 --workers 12
 """
+
 import argparse
 import glob
 import os
@@ -26,8 +27,18 @@ ap.add_argument("--workers", type=int, default=12)
 ARGS = ap.parse_args()
 
 if __name__ == "__main__":
-    bases = [u[:-len(".p1.units.arrow")] for u in sorted(glob.glob(os.path.join(ARGS.games, "1v1", "*", "*", "*.p1.units.arrow")))]
-    bases = [b for b in bases if not os.path.exists(b + ".index.npz") and all(os.path.exists(f"{b}.p{s}.units.arrow") for s in physics_data.VIEWS)]
+    bases = [
+        u[: -len(".p1.units.arrow")]
+        for u in sorted(
+            glob.glob(os.path.join(ARGS.games, "1v1", "*", "*", "*.p1.units.arrow"))
+        )
+    ]
+    bases = [
+        b
+        for b in bases
+        if not os.path.exists(b + ".index.npz")
+        and all(os.path.exists(f"{b}.p{s}.units.arrow") for s in physics_data.VIEWS)
+    ]
     print(len(bases), "games to index", flush=True)
     done = failed = 0
     with Pool(ARGS.workers) as pool:

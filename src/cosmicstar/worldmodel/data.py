@@ -1,5 +1,6 @@
 """Shared pieces of the training scripts: game-loop rate, the in-memory game pool, a batch
 prefetcher and a device helper."""
+
 import os
 import queue
 import threading
@@ -77,12 +78,15 @@ class GamePool:
             self.games[slot] = (new, self.load(self.paths[new]))
 
     def draw(self, n):
-        return [self.games[i][1] for i in self.rng.choice(len(self.games), n, replace=False)]
+        return [
+            self.games[i][1] for i in self.rng.choice(len(self.games), n, replace=False)
+        ]
 
 
 class Prefetch:
     """Builds batches on a background thread, `depth` ahead: make() -> batch. The GPU works on
-    one batch while the next ones are drawn, collated and copied. Exceptions surface in get()."""
+    one batch while the next ones are drawn, collated and copied. Exceptions surface in get().
+    """
 
     def __init__(self, make, depth=2):
         self.make, self.q, self.stop = make, queue.Queue(depth), False
@@ -107,4 +111,7 @@ class Prefetch:
 
 
 def to(b, dev):
-    return {k: (x.to(dev, non_blocking=True) if hasattr(x, "to") else x) for k, x in b.items()}
+    return {
+        k: (x.to(dev, non_blocking=True) if hasattr(x, "to") else x)
+        for k, x in b.items()
+    }

@@ -7,6 +7,7 @@ Each worker holds one game at a time plus its compressed windows (measure before
 
     python scripts/build_frame_cache.py --out data/worldmodel/frame_cache --per_game 80 --workers 4
 """
+
 import argparse
 import ctypes
 import gc
@@ -36,7 +37,8 @@ def _init(vocab_path):
 
 def _release():
     """Free the finished game now: a GameSet's views reference each other, so without this it lives until
-    the cycle collector happens to run and the next game loads on top of it; then hand freed arenas back."""
+    the cycle collector happens to run and the next game loads on top of it; then hand freed arenas back.
+    """
     gc.collect()
     ctypes.CDLL("libc.so.6").malloc_trim(0)
 
@@ -52,8 +54,9 @@ def build_one(job):
 def _build_one(job):
     import train_direct as td
     from cosmicstar.worldmodel.action_tokens import ActionVocab
+
     path, out_path, per_game, length, seed = job
-    gid = os.path.basename(out_path)[:-len(".fcache")]
+    gid = os.path.basename(out_path)[: -len(".fcache")]
     t0 = time.time()
     try:
         gs = td.GameSet(path, None, _V, ActionVocab())
@@ -61,17 +64,30 @@ def _build_one(job):
             return gid, "not a 1v1 with both views"
         n = min(len(gs.obs.g), *(len(x.g) for x in gs.views))
         rng = np.random.RandomState(seed)
-        oms = [x.g.owner_map("player", me_slot=x.viewer) for x in gs.views] + [gs.obs.g.owner_map("observer")]
+        oms = [x.g.owner_map("player", me_slot=x.viewer) for x in gs.views] + [
+            gs.obs.g.owner_map("observer")
+        ]
         games = list(gs.views) + [gs.obs]
         starts = fc.choose_starts(n, per_game, length, rng)
 
         def windows():  # one at a time: write_game compresses each and drops its frames
             for t0 in starts:
                 ts = range(int(t0), int(t0) + length)
-                yield int(t0), [int(gs.obs.g.loops[t]) for t in ts], [[g.g.frame(t, om) for g, om in zip(games, oms)] for t in ts]
+                yield int(t0), [int(gs.obs.g.loops[t]) for t in ts], [
+                    [g.g.frame(t, om) for g, om in zip(games, oms)] for t in ts
+                ]
 
-        written = fc.write_game(out_path, windows(), dict(game=gid, frames=int(n), step=int(gs.obs.g.step), map=gs.obs.g.meta.get("map"),
-                                                          slots=[x.viewer for x in gs.views]))
+        written = fc.write_game(
+            out_path,
+            windows(),
+            dict(
+                game=gid,
+                frames=int(n),
+                step=int(gs.obs.g.step),
+                map=gs.obs.g.meta.get("map"),
+                slots=[x.viewer for x in gs.views],
+            ),
+        )
         return gid, written, time.time() - t0
     except Exception as e:  # report and go on: one bad game shouldn't stop the cache
         return gid, f"{type(e).__name__}: {e}"
@@ -80,13 +96,24 @@ def _build_one(job):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", default=corpus.GAMES)
-    ap.add_argument("--splits", default=os.path.join(corpus.GAMES, "splits", "default.json"))
+    ap.add_argument(
+        "--splits", default=os.path.join(corpus.GAMES, "splits", "default.json")
+    )
     ap.add_argument("--out", default="data/worldmodel/frame_cache")
     ap.add_argument("--per_game", type=int, default=300, help="windows per game")
-    ap.add_argument("--window", type=int, default=15, help="consecutive frames per window, each in 3 views (15: a "
-                    "moment and the 14 frames after it, 2.5 s at the 4-loop frame step; 1: single moments)")
+    ap.add_argument(
+        "--window",
+        type=int,
+        default=15,
+        help="consecutive frames per window, each in 3 views (15: a "
+        "moment and the 14 frames after it, 2.5 s at the 4-loop frame step; 1: single moments)",
+    )
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--vocab", default="", help="an existing vocab.json (default: built from 60 training games)")
+    ap.add_argument(
+        "--vocab",
+        default="",
+        help="an existing vocab.json (default: built from 60 training games)",
+    )
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     split = json.load(open(args.splits))
@@ -108,11 +135,23 @@ def main():
                 continue
             out = os.path.join(args.out, s, f"{g}.fcache")
             if not os.path.exists(out):
-                jobs.append((views[g][0], out, args.per_game, args.window, args.seed * 100003 + zlib.crc32(g.encode()) % 100003))
-    print(f"{len(jobs)} games to build, {args.workers} workers, {args.per_game} windows of {args.window} frames each -> {args.out}",
-          flush=True)
+                jobs.append(
+                    (
+                        views[g][0],
+                        out,
+                        args.per_game,
+                        args.window,
+                        args.seed * 100003 + zlib.crc32(g.encode()) % 100003,
+                    )
+                )
+    print(
+        f"{len(jobs)} games to build, {args.workers} workers, {args.per_game} windows of {args.window} frames each -> {args.out}",
+        flush=True,
+    )
     t0, done, moments = time.time(), 0, 0
-    with mp.get_context("spawn").Pool(args.workers, initializer=_init, initargs=(vpath,), maxtasksperchild=8) as pool:
+    with mp.get_context("spawn").Pool(
+        args.workers, initializer=_init, initargs=(vpath,), maxtasksperchild=8
+    ) as pool:
         for r in pool.imap_unordered(build_one, jobs):
             done += 1
             if isinstance(r[1], int):
@@ -121,8 +160,11 @@ def main():
                 print(f"skipped {r[0]}: {r[1]}", flush=True)
             if done % 20 == 0 or done == len(jobs):
                 el = time.time() - t0
-                print(f"{done}/{len(jobs)} games, {moments} windows ({3 * args.window * moments} view-frames), {el:.0f}s, "
-                      f"~{el / done * (len(jobs) - done):.0f}s left", flush=True)
+                print(
+                    f"{done}/{len(jobs)} games, {moments} windows ({3 * args.window * moments} view-frames), {el:.0f}s, "
+                    f"~{el / done * (len(jobs) - done):.0f}s left",
+                    flush=True,
+                )
     print("done", flush=True)
 
 

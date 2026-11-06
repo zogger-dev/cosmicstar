@@ -10,6 +10,7 @@ This writes them to <out>/<build>/<mod>/GameData/<file>.xml, mirroring the stora
     python scripts/extract_gamedata.py                 # every installed build
     python scripts/extract_gamedata.py --builds 98310 --list   # just list what matches
 """
+
 import argparse
 import os
 import sys
@@ -32,27 +33,51 @@ def build_key(install, build):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--builds", default="", help="comma-separated base builds (default: every installed one)")
-    ap.add_argument("--mask", default=r"mods\*gamedata\*.xml", help="CascLib name mask (names are lower-case, backslashes)")
-    ap.add_argument("--mods", default="core,liberty,swarm,void,voidmulti",
-                    help="comma-separated mod names to keep (the ladder dependency chain, in load order); empty = all")
+    ap.add_argument(
+        "--builds",
+        default="",
+        help="comma-separated base builds (default: every installed one)",
+    )
+    ap.add_argument(
+        "--mask",
+        default=r"mods\*gamedata\*.xml",
+        help="CascLib name mask (names are lower-case, backslashes)",
+    )
+    ap.add_argument(
+        "--mods",
+        default="core,liberty,swarm,void,voidmulti",
+        help="comma-separated mod names to keep (the ladder dependency chain, in load order); empty = all",
+    )
     ap.add_argument("--out", default="data/worldmodel/gamedata")
     ap.add_argument("--list", action="store_true", help="list matching files and exit")
     args = ap.parse_args()
-    builds = [int(b) for b in args.builds.split(",") if b] or sorted(wine_run_config.installed_builds())
+    builds = [int(b) for b in args.builds.split(",") if b] or sorted(
+        wine_run_config.installed_builds()
+    )
     for build in builds:
         install = wine_run_config.install_for_build(build)
         key = build_key(install, build)
         if key is None:
-            print(f"build {build}: not in {install}/.build.info, skipped (install it with cosmicstar.envs.tact first)", flush=True)
+            print(
+                f"build {build}: not in {install}/.build.info, skipped (install it with cosmicstar.envs.tact first)",
+                flush=True,
+            )
             continue
         print(f"build {build}: {install} (build key {key})", flush=True)
         with Storage(install, build_key=key) as st:
             names = st.find(args.mask)
             if args.mods:
-                keep = {m.strip().lower() + ".sc2mod" for m in args.mods.split(",") if m.strip()}
+                keep = {
+                    m.strip().lower() + ".sc2mod"
+                    for m in args.mods.split(",")
+                    if m.strip()
+                }
                 names = [n for n in names if n.split("\\")[1] in keep]
-            print(f"  {len(names)} files match {args.mask}" + (f" in mods {args.mods}" if args.mods else ""), flush=True)
+            print(
+                f"  {len(names)} files match {args.mask}"
+                + (f" in mods {args.mods}" if args.mods else ""),
+                flush=True,
+            )
             for n in names[:5] + (["..."] if len(names) > 5 else []):
                 print("   ", n)
             if args.list:
@@ -66,7 +91,10 @@ def main():
                 with open(dst, "wb") as f:
                     f.write(data)
                 n_bytes += len(data)
-            print(f"  wrote {len(names)} files, {n_bytes / 1e6:.1f} MB -> {os.path.join(args.out, str(build))}", flush=True)
+            print(
+                f"  wrote {len(names)} files, {n_bytes / 1e6:.1f} MB -> {os.path.join(args.out, str(build))}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

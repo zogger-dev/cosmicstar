@@ -34,10 +34,14 @@ class PassiveDynamics(nn.Module):
 
     def __init__(self, d, depth, heads, mlp_ratio=4.0):
         super().__init__()
-        self.rope = RoPE2D(d // heads)  # rotate() only: the angles come from the encoder
+        self.rope = RoPE2D(
+            d // heads
+        )  # rotate() only: the angles come from the encoder
         self.time = LoopTime()
         self.hor_in = mlp(self.time.out_dim(), d)
-        self.layers = nn.ModuleList([Block(d, heads, self.rope, mlp_ratio) for _ in range(depth)])
+        self.layers = nn.ModuleList(
+            [Block(d, heads, self.rope, mlp_ratio) for _ in range(depth)]
+        )
         self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d))
         nn.init.zeros_(self.out[-1].weight)
         nn.init.zeros_(self.out[-1].bias)
@@ -64,7 +68,9 @@ class ActionBlock(nn.Module):
         H = self.heads
         q = self.q(self.nq(x)).view(B, T, H, d // H).transpose(1, 2)
         k, v = self.kv(self.nkv(mem)).view(B, -1, 2, H, d // H).permute(2, 0, 3, 1, 4)
-        a = F.scaled_dot_product_attention(q, k, v, attn_mask=mem_mask[:, None, None, :])
+        a = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mem_mask[:, None, None, :]
+        )
         x = x + self.o(a.transpose(1, 2).reshape(B, T, d))
         return x + self.ff(self.n2(x))
 
@@ -81,8 +87,16 @@ class ActionDynamics(nn.Module):
         self.hor_in = mlp(self.time.out_dim(), d)
         self.self_attn = rope is not None
         self.rope = rope
-        self.layers = nn.ModuleList([Block(d, heads, rope, mlp_ratio, cross=True) if rope is not None
-                                     else ActionBlock(d, heads, mlp_ratio) for _ in range(depth)])
+        self.layers = nn.ModuleList(
+            [
+                (
+                    Block(d, heads, rope, mlp_ratio, cross=True)
+                    if rope is not None
+                    else ActionBlock(d, heads, mlp_ratio)
+                )
+                for _ in range(depth)
+            ]
+        )
         self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d))
         nn.init.zeros_(self.out[-1].weight)
         nn.init.zeros_(self.out[-1].bias)
@@ -90,11 +104,16 @@ class ActionDynamics(nn.Module):
     def forward(self, x, hor_loops, mem, mem_mask, mask=None, ang=None):
         x = x + self.hor_in(self.time(hor_loops))[:, None].to(x.dtype)
         for layer in self.layers:
-            x = layer(x, mask, ang, mem, mem_mask) if self.self_attn else layer(x, mem, mem_mask)
+            x = (
+                layer(x, mask, ang, mem, mem_mask)
+                if self.self_attn
+                else layer(x, mem, mem_mask)
+            )
         return self.out(x)
 
 
 # ------------------------------------------------------------------ masked statistics
+
 
 def _moments(x, w):
     """x [..., d], w [...] (0/1 weights) -> (mean [d], centered x, n)."""
@@ -155,7 +174,11 @@ def vicreg_pair(a, b, w, w_cov=0.04, queue=None):
     variance / covariance statistics only (a memory bank, as in MoCo)."""
     wf = w.float()
     mse = (((a.float() - b.float()) ** 2).mean(-1) * wf).sum() / wf.sum().clamp(min=1)
-    a2, b2, w2 = a.reshape(-1, a.shape[-1]).float(), b.reshape(-1, b.shape[-1]).float(), w.reshape(-1)
+    a2, b2, w2 = (
+        a.reshape(-1, a.shape[-1]).float(),
+        b.reshape(-1, b.shape[-1]).float(),
+        w.reshape(-1),
+    )
     if queue:
         a2 = torch.cat([q[0].float() for q in queue] + [a2])
         b2 = torch.cat([q[1].float() for q in queue] + [b2])
@@ -174,7 +197,9 @@ def ema_update(target, online, tau):
         bt.copy_(bo)
 
 
-N_RAW_DELTA = 2 + 49  # position (fraction of the playable area, ent_xy) + the entity numbers (tokenize.ENTITY_NUMS)
+N_RAW_DELTA = (
+    2 + 49
+)  # position (fraction of the playable area, ent_xy) + the entity numbers (tokenize.ENTITY_NUMS)
 
 
 class DeltaInverse(nn.Module):
@@ -192,11 +217,10 @@ class DeltaInverse(nn.Module):
         super().__init__()
         self.time = LoopTime()
         self.body = mlp(d + self.time.out_dim(), d)
-        self.flags = nn.Linear(d, 3)        # moved, touched, order changed
+        self.flags = nn.Linear(d, 3)  # moved, touched, order changed
         self.order = nn.Linear(d, n_orders)
-        self.proj = nn.Linear(d, 64)                 # the latent change, for the Barlow Twins pairing
-        self.raw_in = mlp(N_RAW_DELTA, 64)           # the raw feature change, its other side
-
+        self.proj = nn.Linear(d, 64)  # the latent change, for the Barlow Twins pairing
+        self.raw_in = mlp(N_RAW_DELTA, 64)  # the raw feature change, its other side
 
     def forward(self, delta, hor_loops):
         """delta [B, N, d], hor_loops [B] -> (flag logits [B, N, 3], order logits [B, N, n_orders],

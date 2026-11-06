@@ -23,10 +23,23 @@ class InverseModel(nn.Module):
         self.query = nn.Parameter(torch.zeros(1, 1, d))
         self.player = nn.Embedding(max_players, d)
         self.time = LoopTime()
-        self.hor = mlp(self.time.out_dim(), d)  # how far apart the two frames are (variable horizons)
-        self.layers = nn.ModuleList([nn.ModuleDict(dict(
-            nq=nn.LayerNorm(d), nkv=nn.LayerNorm(d), attn=nn.MultiheadAttention(d, heads, batch_first=True),
-            nf=nn.LayerNorm(d), ff=mlp(d, d, int(d * mlp_ratio)))) for _ in range(depth)])
+        self.hor = mlp(
+            self.time.out_dim(), d
+        )  # how far apart the two frames are (variable horizons)
+        self.layers = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    dict(
+                        nq=nn.LayerNorm(d),
+                        nkv=nn.LayerNorm(d),
+                        attn=nn.MultiheadAttention(d, heads, batch_first=True),
+                        nf=nn.LayerNorm(d),
+                        ff=mlp(d, d, int(d * mlp_ratio)),
+                    )
+                )
+                for _ in range(depth)
+            ]
+        )
         self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d_z))
         for p in (self.before, self.after, self.query):
             nn.init.normal_(p, std=0.02)
@@ -36,14 +49,22 @@ class InverseModel(nn.Module):
         (True = real slot); horizon_loops [N]: game loops between the frames, when it varies.
         Returns the latent action of each of the P players, [N, P, d_z]."""
         N = slots_a.shape[0]
-        kv = torch.cat([slots_a + self.before.to(slots_a.dtype), slots_b + self.after.to(slots_b.dtype)], 1)
+        kv = torch.cat(
+            [
+                slots_a + self.before.to(slots_a.dtype),
+                slots_b + self.after.to(slots_b.dtype),
+            ],
+            1,
+        )
         pad = ~torch.cat([mask_a, mask_b], 1)
         q = (self.query + self.player.weight[:P][None]).expand(N, -1, -1).to(kv.dtype)
         if horizon_loops is not None:
             q = q + self.hor(self.time(horizon_loops))[:, None].to(kv.dtype)
         for layer in self.layers:
             k = layer["nkv"](kv)
-            a, _ = layer["attn"](layer["nq"](q), k, k, key_padding_mask=pad, need_weights=False)
+            a, _ = layer["attn"](
+                layer["nq"](q), k, k, key_padding_mask=pad, need_weights=False
+            )
             q = q + a
             q = q + layer["ff"](layer["nf"](q))
         return self.out(q)
@@ -78,6 +99,8 @@ class EnemyIntent(nn.Module):
             idx = priv[f"{k}_idx"]
             x = self.ability(priv[f"{k}_ab"]) + lin(priv[f"{k}_feat"])
             s = x.new_zeros(n_tokens, x.shape[-1]).index_add_(0, idx, x)
-            c = x.new_zeros(n_tokens).index_add_(0, idx, torch.ones_like(idx, dtype=x.dtype))
+            c = x.new_zeros(n_tokens).index_add_(
+                0, idx, torch.ones_like(idx, dtype=x.dtype)
+            )
             pooled += [s / c.clamp(min=1)[:, None], torch.log1p(c)[:, None]]
         return self.out(torch.cat(pooled, -1)).to(d_dtype)

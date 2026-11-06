@@ -17,6 +17,7 @@ Each regenerated module is written over the installed one (the original is kept 
     .venv-win/Scripts/python.exe scripts/regen_s2proto.py --check    # import under upb, parse a message
     .venv-win/Scripts/python.exe scripts/regen_s2proto.py --restore  # put the originals back
 """
+
 import argparse
 import glob
 import importlib
@@ -51,6 +52,7 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, {module!r}, _globals)
 
 def package_dir():
     import s2clientprotocol
+
     return os.path.dirname(s2clientprotocol.__file__)
 
 
@@ -58,7 +60,9 @@ def regenerate():
     """Must run under the pure-Python implementation: only it can import the old modules."""
     os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
     d = package_dir()
-    mods = sorted(os.path.basename(p)[:-3] for p in glob.glob(os.path.join(d, "*_pb2.py")))
+    mods = sorted(
+        os.path.basename(p)[:-3] for p in glob.glob(os.path.join(d, "*_pb2.py"))
+    )
     files = {}
     for m in mods:
         orig = os.path.join(d, m + ".py.orig")
@@ -67,15 +71,22 @@ def regenerate():
             shutil.copy(orig, src)
         mod = importlib.import_module("s2clientprotocol." + m)
         desc = mod.DESCRIPTOR
-        deps = [dep.name for dep in desc.dependencies]  # e.g. s2clientprotocol/common.proto
+        deps = [
+            dep.name for dep in desc.dependencies
+        ]  # e.g. s2clientprotocol/common.proto
         imports = []
         for dep in deps:
             dep_mod = dep.replace(".proto", "_pb2").replace("/", ".")
             pkg, _, name = dep_mod.rpartition(".")
             alias = dep_mod.replace(".", "_dot_").replace("_pb2", "__pb2")
             imports.append(f"from {pkg} import {name} as {alias}")
-        files[m] = TEMPLATE.format(orig=m + ".py.orig", source=desc.name, imports="\n".join(imports),
-                                   blob=desc.serialized_pb, module="s2clientprotocol." + m)
+        files[m] = TEMPLATE.format(
+            orig=m + ".py.orig",
+            source=desc.name,
+            imports="\n".join(imports),
+            blob=desc.serialized_pb,
+            module="s2clientprotocol." + m,
+        )
     for m, text in files.items():
         src, orig = os.path.join(d, m + ".py"), os.path.join(d, m + ".py.orig")
         if not os.path.exists(orig):
@@ -102,6 +113,7 @@ def _import_protocol(base_path, protocol_module_name):
 
 def versions_init():
     import s2protocol
+
     return os.path.join(os.path.dirname(s2protocol.__file__), "versions", "__init__.py")
 
 
@@ -121,7 +133,9 @@ def patch_s2protocol_versions():
     start, end = text.index("def _import_protocol("), text.index("def list_all(")
     text = text[:start] + VERSIONS_LOADER.lstrip("\n") + "\n\n" + text[end:]
     open(path, "w", encoding="utf-8").write(text)
-    for pyc in glob.glob(os.path.join(os.path.dirname(path), "__pycache__", "__init__*.pyc")):
+    for pyc in glob.glob(
+        os.path.join(os.path.dirname(path), "__pycache__", "__init__*.pyc")
+    ):
         os.remove(pyc)
     print("patched s2protocol.versions for Python 3.12+")
 
@@ -166,8 +180,17 @@ print(f"ok: 500-unit observation parses in {dt*1000:.2f} ms ({len(b)} bytes)")
 """
     for impl in ("upb", "python"):
         env = dict(os.environ, PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=impl)
-        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
-        print(f"[{impl}] " + (r.stdout.strip() if r.returncode == 0 else "FAILED: " + r.stderr.strip()[-600:]))
+        r = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True
+        )
+        print(
+            f"[{impl}] "
+            + (
+                r.stdout.strip()
+                if r.returncode == 0
+                else "FAILED: " + r.stderr.strip()[-600:]
+            )
+        )
 
 
 if __name__ == "__main__":

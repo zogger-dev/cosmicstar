@@ -3,6 +3,7 @@ with ragged lists as list columns, and <view>.frames.arrow, one row per frame, i
 In the units file a batch's first frame is a keyframe and every other unit column is the change from that unit's row in the
 previous frame of the batch (statefile's integer deltas), so reading a moment touches only its batch. Each batch's custom
 metadata says how to undo that."""
+
 import json
 
 import numpy as np
@@ -28,7 +29,9 @@ def encode_units(cols, counts):
 
 def open_view(base):
     """(units reader, frames reader) of <base>.units.arrow, <base>.frames.arrow, memory mapped."""
-    return pa.ipc.open_file(pa.memory_map(f"{base}.units.arrow")), pa.ipc.open_file(pa.memory_map(f"{base}.frames.arrow"))
+    return pa.ipc.open_file(pa.memory_map(f"{base}.units.arrow")), pa.ipc.open_file(
+        pa.memory_map(f"{base}.frames.arrow")
+    )
 
 
 def read_units(reader, i):
@@ -45,5 +48,7 @@ def read_units(reader, i):
     decoded = statefile.decode_delta(ints, prev, starts)
     units = {k: statefile._from_ints(decoded[k], *how[k]) for k in how}
     units["u_id"] = ids
-    lists = {f.name: b.column(f.name) for f in b.schema if pa.types.is_large_list(f.type)}
+    lists = {
+        f.name: b.column(f.name) for f in b.schema if pa.types.is_large_list(f.type)
+    }
     return units, lists, frame

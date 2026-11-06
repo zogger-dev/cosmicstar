@@ -14,6 +14,7 @@ entry with the same id modifies the earlier one: scalar fields are set, array en
 `parent=` inherits the resolved parent's fields and arrays (a child's indexed patches refer
 to the inherited array). Entries with default="1" are templates and never used directly.
 """
+
 import copy
 import os
 import xml.etree.ElementTree as ET
@@ -21,13 +22,41 @@ import xml.etree.ElementTree as ET
 MODS = ("core", "liberty", "swarm", "void", "voidmulti")  # load order
 GAMEDATA = "data/worldmodel/gamedata"
 # EffectArray fields that carry mechanics (the rest are icons, tooltips, actors)
-MECHANICS = {"Amount", "AttributeBonus", "LifeArmor", "ShieldArmor", "LifeMax", "ShieldsMax", "EnergyMax", "Speed", "Range",
-             "RateMultiplier", "Period", "Acceleration", "LifeRegenRate", "ShieldRegenRate", "EnergyRegenRate", "Sight",
-             "DisplayAttackCount", "Radius", "Duration", "Chance", "MaxStackCount"}
+MECHANICS = {
+    "Amount",
+    "AttributeBonus",
+    "LifeArmor",
+    "ShieldArmor",
+    "LifeMax",
+    "ShieldsMax",
+    "EnergyMax",
+    "Speed",
+    "Range",
+    "RateMultiplier",
+    "Period",
+    "Acceleration",
+    "LifeRegenRate",
+    "ShieldRegenRate",
+    "EnergyRegenRate",
+    "Sight",
+    "DisplayAttackCount",
+    "Radius",
+    "Duration",
+    "Chance",
+    "MaxStackCount",
+}
 
 
 def mod_file(build, mod, catalog, root=GAMEDATA):
-    return os.path.join(root, str(build), "mods", f"{mod}.sc2mod", "base.sc2data", "gamedata", f"{catalog.lower()}.xml")
+    return os.path.join(
+        root,
+        str(build),
+        "mods",
+        f"{mod}.sc2mod",
+        "base.sc2data",
+        "gamedata",
+        f"{catalog.lower()}.xml",
+    )
 
 
 class Entry:
@@ -37,7 +66,9 @@ class Entry:
         self.id, self.tag = cid, tag
         self.parent = None
         self.default = False
-        self.ops = []  # (kind, field, index, attrib) in mod order; kind: set | append | patch | remove
+        self.ops = (
+            []
+        )  # (kind, field, index, attrib) in mod order; kind: set | append | patch | remove
 
     def apply(self, el):
         if el.get("parent") and self.parent is None:
@@ -48,11 +79,15 @@ class Entry:
             if ch.tag is ET.Comment:
                 continue
             idx = ch.get("index")
-            attrs = {k: v for k, v in ch.attrib.items() if k not in ("index", "removed")}
+            attrs = {
+                k: v for k, v in ch.attrib.items() if k not in ("index", "removed")
+            }
             if ch.get("removed") == "1":
                 self.ops.append(("remove", ch.tag, idx, attrs))
             elif ch.tag.endswith("Array"):
-                self.ops.append(("patch" if idx is not None else "append", ch.tag, idx, attrs))
+                self.ops.append(
+                    ("patch" if idx is not None else "append", ch.tag, idx, attrs)
+                )
             else:
                 self.ops.append(("set", ch.tag, idx, attrs))
 
@@ -82,7 +117,11 @@ class Catalog:
         e = self.entries.get(cid)
         if e is None:
             return {}
-        data = copy.deepcopy(self.resolve(e.parent)) if e.parent and e.parent != cid else {}
+        data = (
+            copy.deepcopy(self.resolve(e.parent))
+            if e.parent and e.parent != cid
+            else {}
+        )
         for kind, field, idx, attrs in e.ops:
             if kind == "set":
                 data[field] = attrs
@@ -96,14 +135,21 @@ class Catalog:
                 if not isinstance(arr, list):
                     arr = data[field] = []
                 i = int(idx) if idx.isdigit() else None
-                if i is None:  # named index (e.g. AttributeBonus[Armored]-style arrays keyed by name)
+                if (
+                    i is None
+                ):  # named index (e.g. AttributeBonus[Armored]-style arrays keyed by name)
                     arr.append(dict(attrs, index=idx))
                 else:
                     while len(arr) <= i:
                         arr.append({})
                     arr[i] = {**arr[i], **attrs}
             elif kind == "remove":
-                if field in data and isinstance(data[field], list) and idx is not None and idx.isdigit():
+                if (
+                    field in data
+                    and isinstance(data[field], list)
+                    and idx is not None
+                    and idx.isdigit()
+                ):
                     i = int(idx)
                     if i < len(data[field]):
                         data[field][i] = {"removed": "1"}
@@ -124,7 +170,7 @@ def parse_reference(ref):
     cat, cid, field = parts[0], parts[1], ",".join(parts[2:])
     key = None
     if "[" in field and field.endswith("]"):
-        field, key = field[:field.index("[")], field[field.index("[") + 1:-1]
+        field, key = field[: field.index("[")], field[field.index("[") + 1 : -1]
     return cat, cid, field, key
 
 
@@ -147,18 +193,33 @@ def upgrade_effects(build, root=GAMEDATA):
                 val = float(ent.get("Value", "0"))
             except ValueError:
                 continue
-            out.append((ref[0], ref[1], ref[2], ref[3], ent.get("Operation", "Add"), val))
+            out.append(
+                (ref[0], ref[1], ref[2], ref[3], ent.get("Operation", "Add"), val)
+            )
         effects[uid] = out
-        affected[uid] = [a["value"] for a in data.get("AffectedUnitArray", []) if isinstance(a, dict) and "value" in a]
+        affected[uid] = [
+            a["value"]
+            for a in data.get("AffectedUnitArray", [])
+            if isinstance(a, dict) and "value" in a
+        ]
     return effects, affected, cat.mods_seen
 
 
 if __name__ == "__main__":
     import sys
+
     build = int(sys.argv[1]) if len(sys.argv) > 1 else 98310
     eff, aff, mods = upgrade_effects(build)
-    print(f"build {build}: mods {mods}, {len(eff)} upgrades, {sum(len(v) for v in eff.values())} mechanic effects")
-    for uid in sys.argv[2:] or ("TerranInfantryWeaponsLevel1", "TerranInfantryWeaponsLevel3", "TerranInfantryArmorsLevel1", "zerglingattackspeed", "Stimpack"):
+    print(
+        f"build {build}: mods {mods}, {len(eff)} upgrades, {sum(len(v) for v in eff.values())} mechanic effects"
+    )
+    for uid in sys.argv[2:] or (
+        "TerranInfantryWeaponsLevel1",
+        "TerranInfantryWeaponsLevel3",
+        "TerranInfantryArmorsLevel1",
+        "zerglingattackspeed",
+        "Stimpack",
+    ):
         print(f"-- {uid}: affected {aff.get(uid)}")
         for e in eff.get(uid, []):
             print("    ", e)

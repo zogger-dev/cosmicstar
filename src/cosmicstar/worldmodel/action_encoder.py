@@ -58,7 +58,9 @@ class ActionEncoder(nn.Module):
 
     def __init__(self, state_encoder, avocab, d=256, depth=2, heads=8, mlp_ratio=4.0):
         super().__init__()
-        self._se = [state_encoder]  # shared tables; a list so its parameters aren't registered twice
+        self._se = [
+            state_encoder
+        ]  # shared tables; a list so its parameters aren't registered twice
         self.heads = heads
         self.kind = nn.Embedding(N_ACT_KINDS, d)
         self.family = nn.Embedding(avocab.n_families, d, padding_idx=0)
@@ -72,14 +74,23 @@ class ActionEncoder(nn.Module):
         self.time_in = mlp(self.time.out_dim(), d)
         self.fuse = mlp(self.N_PARTS * d, d, 2 * d)
         self.start = nn.Parameter(torch.zeros(1, 1, d))  # always-present first token
-        layer = nn.TransformerEncoderLayer(d, heads, int(d * mlp_ratio), 0.0, activation="gelu",
-                                           batch_first=True, norm_first=True)
+        layer = nn.TransformerEncoderLayer(
+            d,
+            heads,
+            int(d * mlp_ratio),
+            0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
         self.blocks = nn.TransformerEncoder(layer, depth, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(d)
         # summaries
         self.sum_query = nn.Parameter(torch.zeros(1, 1, 1, d))
         self.sum_time = mlp(self.time.out_dim(), d)
-        self.hor_time = mlp(self.time.out_dim(), d)  # how long the summarized interval is (variable horizons)
+        self.hor_time = mlp(
+            self.time.out_dim(), d
+        )  # how long the summarized interval is (variable horizons)
         self.nothing = nn.Parameter(torch.zeros(1, 1, d))
         self.sq, self.skv, self.so = nn.LayerNorm(d), nn.LayerNorm(d), nn.Linear(d, d)
         self.q, self.kv = nn.Linear(d, d), nn.Linear(d, 2 * d)
@@ -100,13 +111,23 @@ class ActionEncoder(nn.Module):
         has_xy, has_rec = num[..., :1], num[..., 9:10]
         tgt_ok = b["act_tgt_ok"][..., None].to(num.dtype)
         sel_emb = se.entity_tokens(b, "sel")
-        sums = torch.zeros(B * N, sel_emb.shape[-1], device=num.device, dtype=sel_emb.dtype)
+        sums = torch.zeros(
+            B * N, sel_emb.shape[-1], device=num.device, dtype=sel_emb.dtype
+        )
         sums.index_add_(0, b["sel_event"], sel_emb)
-        cnt = torch.bincount(b["sel_event"], minlength=B * N).clamp(min=1).to(sums.dtype)[:, None]
+        cnt = (
+            torch.bincount(b["sel_event"], minlength=B * N)
+            .clamp(min=1)
+            .to(sums.dtype)[:, None]
+        )
         sel = (sums / cnt).view(B, N, -1)
         parts = [
-            self.kind(b["act_kind"]), self.family(b["act_family"]), self.button(b["act_button"]),
-            self.tkind(b["act_tkind"]), self.group(b["act_group"]), self.gop(b["act_gop"]),
+            self.kind(b["act_kind"]),
+            self.family(b["act_family"]),
+            self.button(b["act_button"]),
+            self.tkind(b["act_tkind"]),
+            self.group(b["act_group"]),
+            self.gop(b["act_gop"]),
             self.remove(b["act_remove"]),
             se.team(b["act_team"]) + se.pcode(b["act_pcode"]),
             (se.team(b["act_rteam"]) + se.pcode(b["act_rpcode"])) * has_rec,
@@ -131,8 +152,12 @@ class ActionEncoder(nn.Module):
         x = self.tokens(b)
         B, N, d = x.shape
         x = torch.cat([self.start.expand(B, -1, -1).to(x.dtype), x], 1)
-        pad = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=x.device), ~b["act_mask"]], 1)
-        causal = torch.triu(torch.ones(N + 1, N + 1, dtype=torch.bool, device=x.device), 1)
+        pad = torch.cat(
+            [torch.zeros(B, 1, dtype=torch.bool, device=x.device), ~b["act_mask"]], 1
+        )
+        causal = torch.triu(
+            torch.ones(N + 1, N + 1, dtype=torch.bool, device=x.device), 1
+        )
         h = self.norm(self.blocks(x, mask=causal, src_key_padding_mask=pad))[:, 1:]
 
         # one summary per (segment, player)
@@ -140,23 +165,35 @@ class ActionEncoder(nn.Module):
         S, P = b["seg_t"].shape[1], b["sum_team"].shape[1]
         if ahead:
             S -= ahead
-        q = (self.sum_query + self.sum_time(self.time(b["seg_t"][:, :S]))[:, :, None]
-             + (se.team(b["sum_team"]) + se.pcode(b["sum_pcode"]))[:, None])  # [B, S, P, d]
+        q = (
+            self.sum_query
+            + self.sum_time(self.time(b["seg_t"][:, :S]))[:, :, None]
+            + (se.team(b["sum_team"]) + se.pcode(b["sum_pcode"]))[:, None]
+        )  # [B, S, P, d]
         if horizon_loops is not None:
             q = q + self.hor_time(self.time(horizon_loops))[:, None, None]
         q = q.reshape(B, S * P, d)
         kv_src = torch.cat([self.nothing.expand(B, -1, -1).to(h.dtype), h], 1)
-        seg = torch.arange(S, device=x.device).repeat_interleave(P)          # query -> segment
-        ply = torch.arange(P, device=x.device).repeat(S)                     # query -> player
+        seg = torch.arange(S, device=x.device).repeat_interleave(P)  # query -> segment
+        ply = torch.arange(P, device=x.device).repeat(S)  # query -> player
         a_seg = b["act_seg"][:, None]
-        in_seg = (a_seg == seg[None, :, None]) if not ahead else \
-            (a_seg >= seg[None, :, None]) & (a_seg < seg[None, :, None] + ahead)
-        allowed = in_seg & (b["act_player"][:, None] == ply[None, :, None]) & b["act_mask"][:, None]  # [B, S*P, N]
+        in_seg = (
+            (a_seg == seg[None, :, None])
+            if not ahead
+            else (a_seg >= seg[None, :, None]) & (a_seg < seg[None, :, None] + ahead)
+        )
+        allowed = (
+            in_seg
+            & (b["act_player"][:, None] == ply[None, :, None])
+            & b["act_mask"][:, None]
+        )  # [B, S*P, N]
         allowed = torch.cat([torch.ones_like(allowed[..., :1]), allowed], -1)
         H = self.heads
         qq = self.q(self.sq(q)).view(B, S * P, H, -1).transpose(1, 2)
         k, v = self.kv(self.skv(kv_src)).view(B, N + 1, 2, H, -1).unbind(2)
-        a = F.scaled_dot_product_attention(qq, k.transpose(1, 2), v.transpose(1, 2), attn_mask=allowed[:, None])
+        a = F.scaled_dot_product_attention(
+            qq, k.transpose(1, 2), v.transpose(1, 2), attn_mask=allowed[:, None]
+        )
         s = q + self.so(a.transpose(1, 2).reshape(B, S * P, d))
         s = s + self.sff(self.sf(s))
         summaries = self.out_norm(s).view(B, S, P, d)

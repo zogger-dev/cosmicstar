@@ -10,6 +10,7 @@ that arrives twice is one game with both sources in its sidecar. Loose files are
     python scripts/ingest_replays.py data/replays/pro-1v1
     python scripts/ingest_replays.py "data/replays/TSL 9 Replay Pack.zip" --source "TSL 9"
 """
+
 import argparse
 import collections
 import json
@@ -49,8 +50,18 @@ class Ingest:
         source = dict(pack=pack, file=original)
         if os.path.exists(side):
             d = json.load(open(side))
-            if not any(s.get("pack") == pack and s.get("file") == original for s in d["sources"]):
-                d["sources"].append(dict(source, ingested=corpus.replay_sidecar(info, gid, "", source)["sources"][0]["ingested"]))
+            if not any(
+                s.get("pack") == pack and s.get("file") == original
+                for s in d["sources"]
+            ):
+                d["sources"].append(
+                    dict(
+                        source,
+                        ingested=corpus.replay_sidecar(info, gid, "", source)[
+                            "sources"
+                        ][0]["ingested"],
+                    )
+                )
                 json.dump(d, open(side, "w"), indent=1)
             if not self.copy and os.path.abspath(path) != os.path.abspath(dest):
                 os.remove(path)  # the duplicate
@@ -62,7 +73,13 @@ class Ingest:
         else:
             shutil.move(path, dest + ".tmp")
         os.replace(dest + ".tmp", dest)
-        json.dump(corpus.replay_sidecar(info, gid, os.path.join(rel, gid + corpus.EXT), source), open(side, "w"), indent=1)
+        json.dump(
+            corpus.replay_sidecar(
+                info, gid, os.path.join(rel, gid + corpus.EXT), source
+            ),
+            open(side, "w"),
+            indent=1,
+        )
         self.counts["new"] += 1
         self.by_kind[(info["format"], info["base_build"])] += 1
 
@@ -77,14 +94,26 @@ class Ingest:
                     self.archive(p, pack + "/" + name)
 
     def archive(self, path, pack):
-        tmp = tempfile.mkdtemp(prefix="ingest_", dir=os.path.join(self.root, ".ingest") if os.path.isdir(os.path.join(self.root, ".ingest")) else None)
+        tmp = tempfile.mkdtemp(
+            prefix="ingest_",
+            dir=(
+                os.path.join(self.root, ".ingest")
+                if os.path.isdir(os.path.join(self.root, ".ingest"))
+                else None
+            ),
+        )
         try:
-            r = subprocess.run(["7z", "x", "-y", "-o" + tmp, path], capture_output=True, text=True)
+            r = subprocess.run(
+                ["7z", "x", "-y", "-o" + tmp, path], capture_output=True, text=True
+            )
             if r.returncode != 0:
                 self.unreadable.append((path, "7z: " + r.stderr.strip()[-120:]))
                 self.counts["unreadable archives"] += 1
                 return
-            copy, self.copy = self.copy, False  # the unpacked copies are moved into place
+            copy, self.copy = (
+                self.copy,
+                False,
+            )  # the unpacked copies are moved into place
             self.directory(tmp, pack)
             self.copy = copy
         finally:
@@ -96,7 +125,11 @@ class Ingest:
         elif p.lower().endswith(ARCHIVES):
             self.archive(p, pack or os.path.basename(p))
         elif p.lower().endswith(corpus.EXT.lower()):
-            self.file(p, pack or os.path.basename(os.path.dirname(os.path.abspath(p))), os.path.basename(p))
+            self.file(
+                p,
+                pack or os.path.basename(os.path.dirname(os.path.abspath(p))),
+                os.path.basename(p),
+            )
         else:
             print(f"skipped (not a replay, directory or archive): {p}", file=sys.stderr)
 
@@ -105,9 +138,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("inputs", nargs="+", help="replay files, directories or archives")
     ap.add_argument("--root", default=corpus.REPLAYS)
-    ap.add_argument("--source", help="pack label for the sidecars (default: the directory's or archive's name)")
-    ap.add_argument("--copy", action="store_true", help="copy loose files instead of moving them")
-    ap.add_argument("--no_index", action="store_true", help="don't rebuild index.json afterwards")
+    ap.add_argument(
+        "--source",
+        help="pack label for the sidecars (default: the directory's or archive's name)",
+    )
+    ap.add_argument(
+        "--copy", action="store_true", help="copy loose files instead of moving them"
+    )
+    ap.add_argument(
+        "--no_index", action="store_true", help="don't rebuild index.json afterwards"
+    )
     args = ap.parse_args()
     os.makedirs(os.path.join(args.root, ".ingest"), exist_ok=True)
     ing = Ingest(args.root, args.copy)
@@ -121,7 +161,9 @@ def main():
         print(f"  unreadable: {p}: {why}", file=sys.stderr)
     if not args.no_index:
         index = corpus.build_index(args.root)
-        print(f"index: {len(index)} games -> {os.path.join(args.root, corpus.INDEX)}, maps -> {os.path.join(args.root, corpus.MAPS)}")
+        print(
+            f"index: {len(index)} games -> {os.path.join(args.root, corpus.INDEX)}, maps -> {os.path.join(args.root, corpus.MAPS)}"
+        )
 
 
 if __name__ == "__main__":

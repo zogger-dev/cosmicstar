@@ -7,6 +7,7 @@
 
 Quick validation every --val_every updates goes to the log. The full evaluation pauses training after each checkpoint, and goes to the log and RUN/eval.jsonl.
 """
+
 import argparse
 import collections
 import gc
@@ -31,8 +32,14 @@ from cosmicstar.worldmodel import epochs, physics, physics_data, statefile
 from cosmicstar.worldmodel.action_tokens import ActionVocab
 from cosmicstar.worldmodel.vocab import Vocab
 
-TOKENS_PER_WINDOW = 259   # beyond its rows: 3 globals and 256 cells
-EXCLUDED = ("982fc2368b80adb3", "1ff02cd0dd2751fa", "c50626c6c77288c6", "5bf221dbd7045ab1", "d2de5d4aef655894")
+TOKENS_PER_WINDOW = 259  # beyond its rows: 3 globals and 256 cells
+EXCLUDED = (
+    "982fc2368b80adb3",
+    "1ff02cd0dd2751fa",
+    "c50626c6c77288c6",
+    "5bf221dbd7045ab1",
+    "d2de5d4aef655894",
+)
 
 
 def map_of(base):
@@ -55,7 +62,13 @@ class Games:
     """Open games, least recently used closed. Reads windows on worker threads."""
 
     def __init__(self, bases, vocab, avocab, keep=48, map_ids=None):
-        self.bases, self.vocab, self.avocab, self.keep, self.map_ids = bases, vocab, avocab, keep, map_ids or {}
+        self.bases, self.vocab, self.avocab, self.keep, self.map_ids = (
+            bases,
+            vocab,
+            avocab,
+            keep,
+            map_ids or {},
+        )
         self.open, self.lock = collections.OrderedDict(), threading.Lock()
 
     def get(self, gid):
@@ -82,7 +95,10 @@ class Games:
 def warm_compile(model, games, ids, L):
     """Compile on two windows. Compiling holds several GB until the next collection, and a full pass has no room for that. No optimizer step: this changes no weights."""
     rng = np.random.default_rng()
-    b = physics_data.collate([games.read(ids[rng.integers(len(ids))], -1, L, False) for _ in range(2)], games.vocab)
+    b = physics_data.collate(
+        [games.read(ids[rng.integers(len(ids))], -1, L, False) for _ in range(2)],
+        games.vocab,
+    )
     b = {k: v.cuda() for k, v in b.items()}
     with torch.autocast("cuda", dtype=torch.bfloat16):
         loss, _ = model(b)
@@ -92,12 +108,15 @@ def warm_compile(model, games, ids, L):
         model(b)
     del b, loss
     gc.collect()
-    gc.freeze()         # what stays, compiled code above all, is left out of every later collection: 0.3 s a pass otherwise
+    gc.freeze()  # what stays, compiled code above all, is left out of every later collection: 0.3 s a pass otherwise
 
 
-def _read_passes(q, bases, vocab_path, map_ids, seqs, L, workers, chosen, plan_kw, start):
+def _read_passes(
+    q, bases, vocab_path, map_ids, seqs, L, workers, chosen, plan_kw, start
+):
     """The reader process: the passes of the epoch plan (epochs.Plan) into q, from pass `start` counted from the first epoch, so a resumed run
-    carries on where it stopped. chosen: a fixed list of (game, frame) instead, cycled seqs at a time."""
+    carries on where it stopped. chosen: a fixed list of (game, frame) instead, cycled seqs at a time.
+    """
     vocab = Vocab(json.load(open(vocab_path)))
     games = Games(bases, vocab, ActionVocab(), map_ids=map_ids)
     pool = ThreadPoolExecutor(workers)
@@ -106,23 +125,78 @@ def _read_passes(q, bases, vocab_path, map_ids, seqs, L, workers, chosen, plan_k
         while True:
             pick = [chosen[(i + k) % len(chosen)] for k in range(seqs)]
             i += seqs
-            q.put(physics_data.collate(list(pool.map(lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))), pick)), vocab))
-    plan = epochs.Plan(bases, {g: map_of(b) for g, b in bases.items()}, L, seqs=seqs, **plan_kw)
+            q.put(
+                physics_data.collate(
+                    list(
+                        pool.map(
+                            lambda p: games.read(p[0], p[1], L, bool(rng.integers(2))),
+                            pick,
+                        )
+                    ),
+                    vocab,
+                )
+            )
+    plan = epochs.Plan(
+        bases, {g: map_of(b) for g, b in bases.items()}, L, seqs=seqs, **plan_kw
+    )
     epoch, k = plan.locate(start)
     while True:
         passes = plan.passes(epoch)
-        print(json.dumps(dict(epoch=epoch, passes=len(passes), windows=sum(map(len, passes)), from_pass=k, buckets=len(plan.top))), flush=True)
+        print(
+            json.dumps(
+                dict(
+                    epoch=epoch,
+                    passes=len(passes),
+                    windows=sum(map(len, passes)),
+                    from_pass=k,
+                    buckets=len(plan.top),
+                )
+            ),
+            flush=True,
+        )
         for wins in passes[k:]:
-            q.put(physics_data.collate(list(pool.map(lambda p: games.read(p[0], p[1], L, p[2]), wins)), vocab))
+            q.put(
+                physics_data.collate(
+                    list(pool.map(lambda p: games.read(p[0], p[1], L, p[2]), wins)),
+                    vocab,
+                )
+            )
         epoch, k = epoch + 1, 0
 
 
-def batches(bases, vocab_path, map_ids, seqs, L, workers, plan_kw=None, start=0, prefetch=4, chosen=None):
+def batches(
+    bases,
+    vocab_path,
+    map_ids,
+    seqs,
+    L,
+    workers,
+    plan_kw=None,
+    start=0,
+    prefetch=4,
+    chosen=None,
+):
     """Passes of windows from a process of their own: reading on threads here took the interpreter from the training thread, about 1.1 s of idle GPU each time 16 windows were read.
-    A thread here holds passes ready, since the reader hands one over late while its own threads are reading. chosen: a fixed list of (game, frame) to cycle instead of random ones."""
+    A thread here holds passes ready, since the reader hands one over late while its own threads are reading. chosen: a fixed list of (game, frame) to cycle instead of random ones.
+    """
     ctx = mp.get_context("spawn")
     q = ctx.Queue(2)
-    reader = ctx.Process(target=_read_passes, args=(q, bases, vocab_path, map_ids, seqs, L, workers, chosen, plan_kw or {}, start), daemon=True)
+    reader = ctx.Process(
+        target=_read_passes,
+        args=(
+            q,
+            bases,
+            vocab_path,
+            map_ids,
+            seqs,
+            L,
+            workers,
+            chosen,
+            plan_kw or {},
+            start,
+        ),
+        daemon=True,
+    )
     reader.start()
     ready = queue.Queue(prefetch)
 
@@ -132,7 +206,11 @@ def batches(bases, vocab_path, map_ids, seqs, L, workers, plan_kw=None, start=0,
                 ready.put(q.get(timeout=5))
             except queue.Empty:
                 if not reader.is_alive():
-                    ready.put(RuntimeError(f"the reader process died, exit code {reader.exitcode}"))
+                    ready.put(
+                        RuntimeError(
+                            f"the reader process died, exit code {reader.exitcode}"
+                        )
+                    )
                     return
 
     threading.Thread(target=pull, daemon=True).start()
@@ -177,12 +255,23 @@ def evaluate(model, games, windows, seqs, L, workers):
     """Every loss over fixed windows, and position error by kind of row. Sampling inside the losses is seeded too, and training's random state is left as it was."""
     grad_ckpt, model.enc.grad_ckpt = model.enc.grad_ckpt, False
     model.record_pos = True
-    logs, pos, n = collections.Counter(), collections.defaultdict(lambda: np.zeros(3)), 0
+    logs, pos, n = (
+        collections.Counter(),
+        collections.defaultdict(lambda: np.zeros(3)),
+        0,
+    )
     with ThreadPoolExecutor(workers) as pool, torch.random.fork_rng(devices=[0]):
         torch.manual_seed(0)
         for i in range(0, len(windows), seqs):
-            ws = list(pool.map(lambda p: games.read(p[0], p[1], L, p[2]), windows[i:i + seqs]))
-            b = {k: v.cuda(non_blocking=True) for k, v in physics_data.collate(ws, games.vocab).items()}
+            ws = list(
+                pool.map(
+                    lambda p: games.read(p[0], p[1], L, p[2]), windows[i : i + seqs]
+                )
+            )
+            b = {
+                k: v.cuda(non_blocking=True)
+                for k, v in physics_data.collate(ws, games.vocab).items()
+            }
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 _, lg = model(b)
             for k, v in lg.items():
@@ -192,7 +281,12 @@ def evaluate(model, games, windows, seqs, L, workers):
             n += 1
     model.enc.grad_ckpt, model.record_pos = grad_ckpt, False
     out = {k: round(v / n, 4) for k, v in logs.items()}
-    out["position"] = {k: dict(rows=int(c), model=round(e / max(c, 1), 5), copy=round(d / max(c, 1), 5)) for k, (c, e, d) in pos.items()}
+    out["position"] = {
+        k: dict(
+            rows=int(c), model=round(e / max(c, 1), 5), copy=round(d / max(c, 1), 5)
+        )
+        for k, (c, e, d) in pos.items()
+    }
     return out
 
 
@@ -200,75 +294,213 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", default="data/games_v3")
     ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
-    ap.add_argument("--patch", default="5.0.14", help="train and validate on one patch's games (empty: every patch)")
+    ap.add_argument(
+        "--patch",
+        default="5.0.14",
+        help="train and validate on one patch's games (empty: every patch)",
+    )
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
-    ap.add_argument("--tokens", type=int, default=3900, help="budget of a pass: windows x (most rows + 259)")
-    ap.add_argument("--bucket", type=int, default=32, help="a pass holds windows whose row counts fall in one bucket of this width, so it pads little")
-    ap.add_argument("--min_bucket_games", type=int, default=40, help="the thin ends of the size range join their neighbours until a bucket has windows from this many games")
-    ap.add_argument("--stride", type=int, default=14, help="an epoch starts a window every this many frames of each game; this many epochs start one at every frame")
-    ap.add_argument("--seed", type=int, default=0, help="the epoch plan's seed: offsets, order and swaps")
+    ap.add_argument(
+        "--tokens",
+        type=int,
+        default=3900,
+        help="budget of a pass: windows x (most rows + 259)",
+    )
+    ap.add_argument(
+        "--bucket",
+        type=int,
+        default=32,
+        help="a pass holds windows whose row counts fall in one bucket of this width, so it pads little",
+    )
+    ap.add_argument(
+        "--min_bucket_games",
+        type=int,
+        default=40,
+        help="the thin ends of the size range join their neighbours until a bucket has windows from this many games",
+    )
+    ap.add_argument(
+        "--stride",
+        type=int,
+        default=14,
+        help="an epoch starts a window every this many frames of each game; this many epochs start one at every frame",
+    )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="the epoch plan's seed: offsets, order and swaps",
+    )
     ap.add_argument("--eval_seqs", type=int, default=4)
     ap.add_argument("--frames", type=int, default=56)
     ap.add_argument("--accum", type=int, default=2)
     ap.add_argument("--steps", type=int, default=40000)
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--warmup", type=int, default=500, help="updates of a linear rise to --lr")
+    ap.add_argument(
+        "--warmup", type=int, default=500, help="updates of a linear rise to --lr"
+    )
     ap.add_argument("--d", type=int, default=512)
     ap.add_argument("--ckpt", action="store_true", help="gradient checkpointing")
     ap.add_argument("--no_compile", action="store_true")
-    ap.add_argument("--no_demean", action="store_true", help="Barlow Twins correlations without removing each row's mean over time")
+    ap.add_argument(
+        "--no_demean",
+        action="store_true",
+        help="Barlow Twins correlations without removing each row's mean over time",
+    )
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--measure", action="store_true")
     ap.add_argument("--measure_steps", type=int, default=4)
-    ap.add_argument("--typical", action="store_true", help="--measure on random windows instead of the largest")
-    ap.add_argument("--min_map_games", type=int, default=5, help="a map with fewer training games is left out: too little to learn its tokens")
+    ap.add_argument(
+        "--typical",
+        action="store_true",
+        help="--measure on random windows instead of the largest",
+    )
+    ap.add_argument(
+        "--min_map_games",
+        type=int,
+        default=5,
+        help="a map with fewer training games is left out: too little to learn its tokens",
+    )
     ap.add_argument("--blocks", type=int, default=6, help="spatial-temporal blocks")
     ap.add_argument("--run", default="")
-    ap.add_argument("--gpu_gb", type=float, default=29.0, help="most GPU memory PyTorch may hold, cache included, so the desktop keeps the rest")
-    ap.add_argument("--save_every", type=int, default=500, help="checkpoint and full evaluation, in updates")
-    ap.add_argument("--val_every", type=int, default=25, help="quick validation, in updates")
-    ap.add_argument("--val_windows", type=int, default=6, help="windows per set in a quick validation")
-    ap.add_argument("--eval_windows", type=int, default=144, help="windows per set in a full evaluation")
+    ap.add_argument(
+        "--gpu_gb",
+        type=float,
+        default=29.0,
+        help="most GPU memory PyTorch may hold, cache included, so the desktop keeps the rest",
+    )
+    ap.add_argument(
+        "--save_every",
+        type=int,
+        default=500,
+        help="checkpoint and full evaluation, in updates",
+    )
+    ap.add_argument(
+        "--val_every", type=int, default=25, help="quick validation, in updates"
+    )
+    ap.add_argument(
+        "--val_windows",
+        type=int,
+        default=6,
+        help="windows per set in a quick validation",
+    )
+    ap.add_argument(
+        "--eval_windows",
+        type=int,
+        default=144,
+        help="windows per set in a full evaluation",
+    )
     ap.add_argument("--resume", default="", help="checkpoint to carry on from")
-    ap.add_argument("--eval_only", action="store_true", help="the full evaluation of --resume, then exit")
+    ap.add_argument(
+        "--eval_only",
+        action="store_true",
+        help="the full evaluation of --resume, then exit",
+    )
     args = ap.parse_args()
 
     if torch.cuda.is_available():
-        torch.cuda.set_per_process_memory_fraction(min(1.0, args.gpu_gb * 2**30 / torch.cuda.get_device_properties(0).total_memory))
+        torch.cuda.set_per_process_memory_fraction(
+            min(
+                1.0,
+                args.gpu_gb * 2**30 / torch.cuda.get_device_properties(0).total_memory,
+            )
+        )
     vocab, avocab = Vocab(json.load(open(args.vocab))), ActionVocab()
     split = json.load(open(args.split))
     train_ids = set(split["train"]) - set(EXCLUDED)
     bases = of_patch(physics_data.base_paths(args.games, train_ids), args.patch)
     # a learned table per map: only maps with games enough to learn one
     per_map = collections.Counter(map_of(b) for b in bases.values())
-    map_ids = {m: i for i, m in enumerate(sorted(m for m, n in per_map.items() if n >= args.min_map_games))}
+    map_ids = {
+        m: i
+        for i, m in enumerate(
+            sorted(m for m, n in per_map.items() if n >= args.min_map_games)
+        )
+    }
     bases = {g: b for g, b in bases.items() if map_of(b) in map_ids}
     ids = sorted(bases)
-    print(f"{len(ids)} training games of patch {args.patch or 'any'} on {len(map_ids)} maps, left out {sum(n for m, n in per_map.items() if m not in map_ids)} on {len(per_map) - len(map_ids)}", flush=True)
-    model = physics.Physics(vocab, avocab, args.d, demean=not args.no_demean, moving_neutrals=physics_data.MOVING_NEUTRALS, blocks=args.blocks, n_maps=len(map_ids)).cuda()
+    print(
+        f"{len(ids)} training games of patch {args.patch or 'any'} on {len(map_ids)} maps, left out {sum(n for m, n in per_map.items() if m not in map_ids)} on {len(per_map) - len(map_ids)}",
+        flush=True,
+    )
+    model = physics.Physics(
+        vocab,
+        avocab,
+        args.d,
+        demean=not args.no_demean,
+        moving_neutrals=physics_data.MOVING_NEUTRALS,
+        blocks=args.blocks,
+        n_maps=len(map_ids),
+    ).cuda()
     model.enc.grad_ckpt = args.ckpt
     if not args.no_compile:
         model.enc.compile_parts()
         model.teacher.compile_parts()
-    print(f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('teacher')) / 1e6:.1f}M parameters", flush=True)
+    print(
+        f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('teacher')) / 1e6:.1f}M parameters",
+        flush=True,
+    )
     games = Games(bases, vocab, avocab, map_ids=map_ids)
-    val_bases = {"unseen_games": {g: b for g, b in of_patch(physics_data.base_paths(args.games, set(split["held_out_games"]) - set(EXCLUDED)), args.patch).items() if map_of(b) in map_ids}}
-    quick = {k: fixed_windows(v, args.val_windows, args.frames) for k, v in val_bases.items()}
-    full = {k: fixed_windows(v, args.eval_windows, args.frames) for k, v in {"train": bases, **val_bases}.items()}
+    val_bases = {
+        "unseen_games": {
+            g: b
+            for g, b in of_patch(
+                physics_data.base_paths(
+                    args.games, set(split["held_out_games"]) - set(EXCLUDED)
+                ),
+                args.patch,
+            ).items()
+            if map_of(b) in map_ids
+        }
+    }
+    quick = {
+        k: fixed_windows(v, args.val_windows, args.frames) for k, v in val_bases.items()
+    }
+    full = {
+        k: fixed_windows(v, args.eval_windows, args.frames)
+        for k, v in {"train": bases, **val_bases}.items()
+    }
     all_bases = {k: v for d in (bases, *val_bases.values()) for k, v in d.items()}
-    val_games = Games(all_bases, vocab, avocab, keep=2 * args.val_windows, map_ids=map_ids)
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()   # which code these weights go with
-    run = args.run or f"data/worldmodel/runs/physics_{commit}_{time.strftime('%Y%m%d_%H%M%S')}"
+    val_games = Games(
+        all_bases, vocab, avocab, keep=2 * args.val_windows, map_ids=map_ids
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()  # which code these weights go with
+    run = (
+        args.run
+        or f"data/worldmodel/runs/physics_{commit}_{time.strftime('%Y%m%d_%H%M%S')}"
+    )
 
     def full_eval(at):
         t = time.time()
         for k, w in full.items():
-            r = dict(eval=k, step=at, windows=len(w), **evaluate(model, Games(all_bases, vocab, avocab, keep=8, map_ids=map_ids), w, args.eval_seqs, args.frames, args.workers))
+            r = dict(
+                eval=k,
+                step=at,
+                windows=len(w),
+                **evaluate(
+                    model,
+                    Games(all_bases, vocab, avocab, keep=8, map_ids=map_ids),
+                    w,
+                    args.eval_seqs,
+                    args.frames,
+                    args.workers,
+                ),
+            )
             print(json.dumps(r), flush=True)
             with open(f"{run}/eval.jsonl", "a") as f:
                 f.write(json.dumps(r) + "\n")
-        print(json.dumps(dict(eval_s=round(time.time() - t, 1), step=at, gpu_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2))), flush=True)
+        print(
+            json.dumps(
+                dict(
+                    eval_s=round(time.time() - t, 1),
+                    step=at,
+                    gpu_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
+                )
+            ),
+            flush=True,
+        )
 
     start, ck = 0, None
     if args.resume:
@@ -283,9 +515,26 @@ def main():
     if args.measure and not args.typical:
         chosen, info = largest_windows(bases, args.frames, args.seqs)
         print("largest", [(i[0], i[1], i[2]) for i in info], flush=True)
-    plan_kw = dict(seed=args.seed, stride=args.stride, width=args.bucket, min_games=args.min_bucket_games, tokens=args.tokens, per_window=TOKENS_PER_WINDOW,
-                   accum=args.accum)
-    data = batches(bases, args.vocab, map_ids, args.seqs, args.frames, args.workers, plan_kw, start * args.accum, chosen=chosen)
+    plan_kw = dict(
+        seed=args.seed,
+        stride=args.stride,
+        width=args.bucket,
+        min_games=args.min_bucket_games,
+        tokens=args.tokens,
+        per_window=TOKENS_PER_WINDOW,
+        accum=args.accum,
+    )
+    data = batches(
+        bases,
+        args.vocab,
+        map_ids,
+        args.seqs,
+        args.frames,
+        args.workers,
+        plan_kw,
+        start * args.accum,
+        chosen=chosen,
+    )
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
     if ck:
@@ -293,7 +542,12 @@ def main():
         del ck
     if not args.measure:
         os.makedirs(run, exist_ok=True)
-        json.dump(dict(vars(args), commit=commit, map_ids=map_ids), open(f"{run}/config_from{start}.json" if start else f"{run}/config.json", "w"))
+        json.dump(
+            dict(vars(args), commit=commit, map_ids=map_ids),
+            open(
+                f"{run}/config_from{start}.json" if start else f"{run}/config.json", "w"
+            ),
+        )
     steps = args.measure_steps if args.measure else args.steps
     t0 = time.time()
     if not args.no_compile:
@@ -315,11 +569,11 @@ def main():
                 loss, lg = model(b)
             (loss * w).backward()
             del loss
-            gc.collect()      # a pass's checkpoints sit in a reference cycle: uncollected, they take GBs from the next pass
+            gc.collect()  # a pass's checkpoints sit in a reference cycle: uncollected, they take GBs from the next pass
             for k, v in lg.items():
                 logs[k] += float(v) * w
         del passes
-        n = 1                 # logs are already the update's weighted means
+        n = 1  # logs are already the update's weighted means
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         for g in opt.param_groups:
             g["lr"] = args.lr * min(1.0, (step + 1) / args.warmup)
@@ -327,17 +581,52 @@ def main():
         opt.zero_grad(set_to_none=True)
         model.update_teacher()
         if args.measure or step % 20 == 0:
-            print(json.dumps(dict(step=step, s=round(time.time() - t0, 1), data_s=round(data_s, 2), gpu_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
-                                  windows=b["mask"].shape[0], rows=b["mask"].shape[2], actions=b["act_mask"].shape[2], **{k: round(v / n, 4) for k, v in logs.items()})), flush=True)
+            print(
+                json.dumps(
+                    dict(
+                        step=step,
+                        s=round(time.time() - t0, 1),
+                        data_s=round(data_s, 2),
+                        gpu_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
+                        windows=b["mask"].shape[0],
+                        rows=b["mask"].shape[2],
+                        actions=b["act_mask"].shape[2],
+                        **{k: round(v / n, 4) for k, v in logs.items()},
+                    )
+                ),
+                flush=True,
+            )
         if args.measure:
             continue
         if (step + 1) % args.val_every == 0:
             t = time.time()
             for k, w in quick.items():
-                print(json.dumps(dict(val=k, step=step + 1, **evaluate(model, val_games, w, args.eval_seqs, args.frames, args.workers))), flush=True)
-            print(json.dumps(dict(val_s=round(time.time() - t, 1), step=step + 1)), flush=True)
+                print(
+                    json.dumps(
+                        dict(
+                            val=k,
+                            step=step + 1,
+                            **evaluate(
+                                model,
+                                val_games,
+                                w,
+                                args.eval_seqs,
+                                args.frames,
+                                args.workers,
+                            ),
+                        )
+                    ),
+                    flush=True,
+                )
+            print(
+                json.dumps(dict(val_s=round(time.time() - t, 1), step=step + 1)),
+                flush=True,
+            )
         if (step + 1) % args.save_every == 0:
-            torch.save(dict(model=model.state_dict(), opt=opt.state_dict(), step=step + 1), f"{run}/model_step{step + 1}.pt")
+            torch.save(
+                dict(model=model.state_dict(), opt=opt.state_dict(), step=step + 1),
+                f"{run}/model_step{step + 1}.pt",
+            )
             full_eval(step + 1)
 
 

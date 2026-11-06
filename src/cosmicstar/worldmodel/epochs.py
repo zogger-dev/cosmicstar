@@ -15,6 +15,7 @@ Spread evenly through an epoch:
 - maps: a pass takes distinct maps where it can
 - time in game (thirds) and effects present: from a game, the window whose kind was seen longest ago
 """
+
 import zlib
 
 import numpy as np
@@ -33,7 +34,9 @@ def game_windows(base, L):
     rows = np.zeros(len(t0), np.int32)
     for s in SOURCES:
         first, last = np.sort(ix[f"first{s}"]), np.sort(ix[f"last{s}"])
-        rows += (np.searchsorted(first, t0 + L, "left") - np.searchsorted(last, t0, "left")).astype(np.int32)
+        rows += (
+            np.searchsorted(first, t0 + L, "left") - np.searchsorted(last, t0, "left")
+        ).astype(np.int32)
     eff = np.zeros(len(t0), bool)
     for s in VIEWS:
         d = statefile.load(f"{base}.p{s}.cst")
@@ -47,9 +50,29 @@ def game_windows(base, L):
 class Plan:
     """All windows of all games, bucketed. passes(epoch) -> the epoch's passes, each [(game, t0, swap), ...]."""
 
-    def __init__(self, bases, maps, L, seed=0, stride=14, width=32, min_games=40, tokens=3900, seqs=16, per_window=259, accum=2, recent=8):
+    def __init__(
+        self,
+        bases,
+        maps,
+        L,
+        seed=0,
+        stride=14,
+        width=32,
+        min_games=40,
+        tokens=3900,
+        seqs=16,
+        per_window=259,
+        accum=2,
+        recent=8,
+    ):
         self.ids = sorted(bases)
-        self.L, self.seed, self.stride, self.accum, self.recent = L, seed, stride, accum, recent
+        self.L, self.seed, self.stride, self.accum, self.recent = (
+            L,
+            seed,
+            stride,
+            accum,
+            recent,
+        )
         self.F, self.rows, self.eff = {}, {}, {}
         for g in self.ids:
             self.F[g], self.rows[g], self.eff[g] = game_windows(bases[g], L)
@@ -73,7 +96,9 @@ class Plan:
 
     def offset(self, g, epoch):
         """The game's offset this epoch: a permutation of 0..stride-1 per game, a new one each cycle of stride epochs."""
-        perm = np.random.default_rng([self.seed, zlib.crc32(g.encode()), epoch // self.stride]).permutation(self.stride)
+        perm = np.random.default_rng(
+            [self.seed, zlib.crc32(g.encode()), epoch // self.stride]
+        ).permutation(self.stride)
         return int(perm[epoch % self.stride])
 
     def windows(self, epoch):
@@ -117,7 +142,14 @@ class Plan:
         for u in range(0, len(order), self.accum):
             for j in range(u + 1, min(u + self.accum, len(order))):
                 if order[j] in order[u:j]:
-                    k = next((k for k in range(j + 1, len(order)) if order[k] not in order[u:j]), None)
+                    k = next(
+                        (
+                            k
+                            for k in range(j + 1, len(order))
+                            if order[k] not in order[u:j]
+                        ),
+                        None,
+                    )
                     if k is not None:
                         order[j], order[k] = order[k], order[j]
         # each bucket's windows by game, in random order; each game's next turn evenly spaced through the bucket's passes
@@ -131,14 +163,23 @@ class Plan:
                 per[gi[w]].append(w)
             cnt = np.array([len(x) for x in per], np.float64)
             due = np.where(cnt > 0, rng.random(G) * P[bk] / np.maximum(cnt, 1), np.inf)
-            pool[bk] = dict(per=per, cnt=cnt, gap=P[bk] / np.maximum(cnt, 1), due=due, left=n[bk], passes=P[bk])
+            pool[bk] = dict(
+                per=per,
+                cnt=cnt,
+                gap=P[bk] / np.maximum(cnt, 1),
+                due=due,
+                left=n[bk],
+                passes=P[bk],
+            )
         maps = np.array([self.map[g] for g in self.ids])
         seen_kind = np.full(THIRDS * 2, -1.0)
-        last = np.full(G, -10**9)                         # the pass each game was last in, any bucket
+        last = np.full(G, -(10**9))  # the pass each game was last in, any bucket
         out, swaps = [], rng.random(len(gi)) < 0.5
         for p, bk in enumerate(order):
             s = pool[bk]
-            size = -(-s["left"] // s["passes"])           # windows shared evenly over the passes left
+            size = -(
+                -s["left"] // s["passes"]
+            )  # windows shared evenly over the passes left
             s["left"] -= size
             s["passes"] -= 1
             cand = np.argsort(s["due"], kind="stable")[: max(6 * size, 32)]
@@ -148,12 +189,26 @@ class Plan:
             took = must[np.argsort(-s["cnt"][must], kind="stable")][:size].tolist()
             took_maps = {maps[c] for c in took}
             fresh = lambda c: p - last[c] > self.recent
-            for want_map, want_fresh in ((True, True), (False, True), (True, False), (False, False)):   # in order of due: distinct maps, games not just seen
+            for want_map, want_fresh in (
+                (True, True),
+                (False, True),
+                (True, False),
+                (False, False),
+            ):  # in order of due: distinct maps, games not just seen
                 for c in cand:
-                    if len(took) < size and c not in took and (not want_fresh or fresh(c)) and (not want_map or maps[c] not in took_maps):
+                    if (
+                        len(took) < size
+                        and c not in took
+                        and (not want_fresh or fresh(c))
+                        and (not want_map or maps[c] not in took_maps)
+                    ):
                         took.append(c), took_maps.add(maps[c])
-            if len(took) < size:                          # fewer games left than windows: a game again, the ones with most left
-                left = {c: len(s["per"][c]) - took.count(c) for c in range(G) if s["per"][c]}
+            if (
+                len(took) < size
+            ):  # fewer games left than windows: a game again, the ones with most left
+                left = {
+                    c: len(s["per"][c]) - took.count(c) for c in range(G) if s["per"][c]
+                }
                 while len(took) < size:
                     c = max(left, key=left.get)
                     took.append(c)
@@ -161,7 +216,9 @@ class Plan:
             wins = []
             for c in took:
                 lst = s["per"][c]
-                k = min(range(len(lst)), key=lambda i: seen_kind[kind[lst[i]]])   # the kind of window seen longest ago
+                k = min(
+                    range(len(lst)), key=lambda i: seen_kind[kind[lst[i]]]
+                )  # the kind of window seen longest ago
                 w = lst.pop(k)
                 seen_kind[kind[w]] = p
                 last[c] = p

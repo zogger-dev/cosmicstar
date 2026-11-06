@@ -11,6 +11,7 @@ in 2026. The API client does not fetch missing files itself (ResponseReplayInfo
 ParsingError: "Failed to open the map archive"), only the game UI does, so anything that
 plays replays from the API has to fill the cache first: fetch() / ensure_cached() below.
 """
+
 import os
 import tempfile
 
@@ -41,6 +42,7 @@ def fetch(hash_hex, ext, cache_dir, region="us", timeout=180):
     """Downloads one depot file into the cache (atomically) and returns its path; raises on
     HTTP errors or a non-MPQ body for archive types."""
     import requests
+
     url = DEPOT_URL.format(region=region, hash=hash_hex, ext=ext)
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
@@ -67,7 +69,9 @@ def ensure_cached(handles, cache_dirs, log=None):
             p = fetch(hx, ext, cache_dirs[0])
             if log:
                 log(f"fetched {ext} {hx[:12]} ({os.path.getsize(p) / 1e6:.1f} MB)")
-        except Exception as e:  # noqa: BLE001 -- report and keep going; the caller decides
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 -- report and keep going; the caller decides
             missing.append((ext, hx))
             if log:
                 log(f"depot fetch failed for {ext} {hx[:12]}: {e}")

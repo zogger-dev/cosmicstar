@@ -35,6 +35,7 @@ exactly. Installing into a copy of the install (archives hardlinked, the rest co
 KNOWN_BUILDS maps base builds to BuildConfig hashes; any other build can be given as
 `<build>=<buildconfig hash>` (hashes: https://blizztrack.com/api/manifest/s2/versions?seqn=...).
 """
+
 import collections
 import glob
 import hashlib
@@ -72,8 +73,11 @@ class CDN:
     """Fetches from the TACT CDN with a local cache of configs and manifests (not archive
     ranges: those go straight into the storage)."""
 
-    def __init__(self, cache_dir=DEFAULT_CACHE, host=CDN_HOST, path=CDN_PATH, threads=8):
+    def __init__(
+        self, cache_dir=DEFAULT_CACHE, host=CDN_HOST, path=CDN_PATH, threads=8
+    ):
         import requests
+
         self.requests = requests
         self.cache_dir = os.path.abspath(cache_dir)
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -84,8 +88,13 @@ class CDN:
         s = getattr(self._local, "s", None)
         if s is None:
             s = self._local.s = self.requests.Session()
-            a = self.requests.adapters.HTTPAdapter(max_retries=self.requests.adapters.Retry(
-                total=6, backoff_factor=1.0, status_forcelist=(429, 500, 502, 503, 504)))
+            a = self.requests.adapters.HTTPAdapter(
+                max_retries=self.requests.adapters.Retry(
+                    total=6,
+                    backoff_factor=1.0,
+                    status_forcelist=(429, 500, 502, 503, 504),
+                )
+            )
             s.mount("http://", a)
             s.mount("https://", a)
         return s
@@ -95,10 +104,14 @@ class CDN:
 
     def get(self, kind, key, suffix="", rng=None, timeout=300):
         headers = {"Range": f"bytes={rng[0]}-{rng[0] + rng[1] - 1}"} if rng else {}
-        r = self.session().get(self.url(kind, key, suffix), headers=headers, timeout=timeout)
+        r = self.session().get(
+            self.url(kind, key, suffix), headers=headers, timeout=timeout
+        )
         r.raise_for_status()
         if rng and len(r.content) != rng[1]:
-            raise IOError(f"{self.url(kind, key, suffix)} range {rng}: got {len(r.content)} bytes")
+            raise IOError(
+                f"{self.url(kind, key, suffix)} range {rng}: got {len(r.content)} bytes"
+            )
         return r.content
 
     def cached(self, kind, key, suffix=""):
@@ -141,11 +154,11 @@ def blte_decode(data):
     chunks, pos = [], 12
     for _ in range(count):
         csize, dsize = struct.unpack_from(">II", data, pos)
-        chunks.append((csize, dsize, data[pos + 8:pos + 24]))
+        chunks.append((csize, dsize, data[pos + 8 : pos + 24]))
         pos += 24
     out, pos = [], hsize
     for csize, dsize, md5 in chunks:
-        chunk = data[pos:pos + csize]
+        chunk = data[pos : pos + csize]
         if hashlib.md5(chunk).digest() != md5:
             raise ValueError("BLTE chunk checksum mismatch")
         dec = _blte_chunk(chunk)
@@ -194,14 +207,16 @@ def parse_encoding(data):
     page_size = ck_page_kb * 1024
     out = {}
     for _ in range(ck_pages):
-        page, p = data[pos:pos + page_size], 0
+        page, p = data[pos : pos + page_size], 0
         while p + 6 + ck_size <= len(page):
             n = page[p]
             if n == 0:
                 break
-            ckey = page[p + 6:p + 6 + ck_size]
+            ckey = page[p + 6 : p + 6 + ck_size]
             p += 6 + ck_size
-            out[ckey] = [page[p + i * ek_size:p + (i + 1) * ek_size] for i in range(n)]
+            out[ckey] = [
+                page[p + i * ek_size : p + (i + 1) * ek_size] for i in range(n)
+            ]
             p += n * ek_size
         pos += page_size
     return out
@@ -213,7 +228,7 @@ def _tags(data, pos, num_tags, num_entries):
     for _ in range(num_tags):
         name, pos = _cstr(data, pos)
         typ = struct.unpack_from(">H", data, pos)[0]
-        mask = data[pos + 2:pos + 2 + mask_len]
+        mask = data[pos + 2 : pos + 2 + mask_len]
         tags[name] = (typ, mask)
         pos += 2 + mask_len
     return tags, pos
@@ -233,7 +248,7 @@ def parse_install(data):
     entries = []
     for _ in range(num_entries):
         name, pos = _cstr(data, pos)
-        ckey = data[pos:pos + hash_size]
+        ckey = data[pos : pos + hash_size]
         size = struct.unpack_from(">I", data, pos + hash_size)[0]
         entries.append((name, ckey, size))
         pos += hash_size + 4
@@ -256,8 +271,8 @@ def parse_download(data):
     entries = []
     esize = ek_size + 5 + 1 + (4 if has_checksum else 0) + flag_bytes
     for _ in range(num_entries):
-        ekey = data[pos:pos + ek_size]
-        size = int.from_bytes(data[pos + ek_size:pos + ek_size + 5], "big")
+        ekey = data[pos : pos + ek_size]
+        size = int.from_bytes(data[pos + ek_size : pos + ek_size + 5], "big")
         prio = data[pos + ek_size + 5]
         entries.append((ekey, size, prio))
         pos += esize
@@ -265,8 +280,10 @@ def parse_download(data):
     return entries, tags
 
 
-CODE_TAG_TYPE = 16384  # "code": the binaries, which the Agent writes to disk (install manifest) and
-                       # never keeps in the storage
+CODE_TAG_TYPE = (
+    16384  # "code": the binaries, which the Agent writes to disk (install manifest) and
+)
+# never keeps in the storage
 
 
 def select_by_tags(tags, num_entries, tag_configs):
@@ -277,7 +294,8 @@ def select_by_tags(tags, num_entries, tag_configs):
     region, speech/text), it carries one of the named tags; the result is the union over the
     configs, minus the "code" entries (checked against the installed 5.0.17: the rule selects
     188 576 of its manifest's 608 424 entries, 188 448 of which the storage has, and 192 of the
-    entries it rejects are present too, i.e. it reproduces what the Agent installed to 0.1%)."""
+    entries it rejects are present too, i.e. it reproduces what the Agent installed to 0.1%).
+    """
     by_type = collections.defaultdict(list)
     for name, (typ, mask) in tags.items():
         by_type[typ].append((name, mask))
@@ -311,7 +329,7 @@ def parse_archive_index(data):
         base = b * block
         for i in range(block // (key_size + 8)):
             p = base + i * (key_size + 8)
-            ekey = data[p:p + key_size]
+            ekey = data[p : p + key_size]
             if not any(ekey):
                 break
             size, offset = struct.unpack_from(">II", data, p + key_size)
@@ -334,19 +352,31 @@ def _rot(x, k):
 def hashlittle2(data, pc=0, pb=0):
     """Bob Jenkins' lookup3 hashlittle2: returns (pc, pb)."""
     length = len(data)
-    a = b = c = (0xdeadbeef + length + pc) & _M
+    a = b = c = (0xDEADBEEF + length + pc) & _M
     c = (c + pb) & _M
     i = 0
     while length > 12:
         a = (a + struct.unpack_from("<I", data, i)[0]) & _M
         b = (b + struct.unpack_from("<I", data, i + 4)[0]) & _M
         c = (c + struct.unpack_from("<I", data, i + 8)[0]) & _M
-        a = (a - c) & _M; a ^= _rot(c, 4); c = (c + b) & _M
-        b = (b - a) & _M; b ^= _rot(a, 6); a = (a + c) & _M
-        c = (c - b) & _M; c ^= _rot(b, 8); b = (b + a) & _M
-        a = (a - c) & _M; a ^= _rot(c, 16); c = (c + b) & _M
-        b = (b - a) & _M; b ^= _rot(a, 19); a = (a + c) & _M
-        c = (c - b) & _M; c ^= _rot(b, 4); b = (b + a) & _M
+        a = (a - c) & _M
+        a ^= _rot(c, 4)
+        c = (c + b) & _M
+        b = (b - a) & _M
+        b ^= _rot(a, 6)
+        a = (a + c) & _M
+        c = (c - b) & _M
+        c ^= _rot(b, 8)
+        b = (b + a) & _M
+        a = (a - c) & _M
+        a ^= _rot(c, 16)
+        c = (c + b) & _M
+        b = (b - a) & _M
+        b ^= _rot(a, 19)
+        a = (a + c) & _M
+        c = (c - b) & _M
+        c ^= _rot(b, 4)
+        b = (b + a) & _M
         length -= 12
         i += 12
     if length == 0:
@@ -355,18 +385,41 @@ def hashlittle2(data, pc=0, pb=0):
     a = (a + struct.unpack_from("<I", tail, 0)[0]) & _M
     b = (b + struct.unpack_from("<I", tail, 4)[0]) & _M
     c = (c + struct.unpack_from("<I", tail, 8)[0]) & _M
-    c ^= b; c = (c - _rot(b, 14)) & _M
-    a ^= c; a = (a - _rot(c, 11)) & _M
-    b ^= a; b = (b - _rot(a, 25)) & _M
-    c ^= b; c = (c - _rot(b, 16)) & _M
-    a ^= c; a = (a - _rot(c, 4)) & _M
-    b ^= a; b = (b - _rot(a, 14)) & _M
-    c ^= b; c = (c - _rot(b, 24)) & _M
+    c ^= b
+    c = (c - _rot(b, 14)) & _M
+    a ^= c
+    a = (a - _rot(c, 11)) & _M
+    b ^= a
+    b = (b - _rot(a, 25)) & _M
+    c ^= b
+    c = (c - _rot(b, 16)) & _M
+    a ^= c
+    a = (a - _rot(c, 4)) & _M
+    b ^= a
+    b = (b - _rot(a, 14)) & _M
+    c ^= b
+    c = (c - _rot(b, 24)) & _M
     return c, b
 
 
-_CHECKSUM_TABLE = [0x049396b8, 0x72a82a9b, 0xee626cca, 0x9917754f, 0x15de40b1, 0xf5a8a9b6, 0x421eac7e, 0xa9d55c9a,
-                   0x317fd40c, 0x04faf80d, 0x3d6be971, 0x52933cfd, 0x27f64b7d, 0xc6f5c11b, 0xd5757e3a, 0x6c388745]
+_CHECKSUM_TABLE = [
+    0x049396B8,
+    0x72A82A9B,
+    0xEE626CCA,
+    0x9917754F,
+    0x15DE40B1,
+    0xF5A8A9B6,
+    0x421EAC7E,
+    0xA9D55C9A,
+    0x317FD40C,
+    0x04FAF80D,
+    0x3D6BE971,
+    0x52933CFD,
+    0x27F64B7D,
+    0xC6F5C11B,
+    0xD5757E3A,
+    0x6C388745,
+]
 
 
 def record_header(ekey, size, archive, offset, flags=0):
@@ -376,7 +429,9 @@ def record_header(ekey, size, archive, offset, flags=0):
     h = bytearray(ekey[::-1]) + struct.pack("<IH", size, flags)
     h += struct.pack("<I", hashlittle2(bytes(h), 0x3D6BE971)[0])
     off = ((offset & 0x3FFFFFFF) | ((archive & 3) << 30)) & _M
-    enc = (_CHECKSUM_TABLE[(off + 0x1E) & 0xF] ^ ((off + 0x1E) & _M)).to_bytes(4, "little")
+    enc = (_CHECKSUM_TABLE[(off + 0x1E) & 0xF] ^ ((off + 0x1E) & _M)).to_bytes(
+        4, "little"
+    )
     hh = bytearray(4)
     for i in range(0x1A):
         hh[(i + off) & 3] ^= h[i]
@@ -390,7 +445,9 @@ def record_header(ekey, size, archive, offset, flags=0):
 IDX_HEADER = 0x28
 IDX_ENTRY = 18
 ARCHIVE_MAX = 0x40000000  # 30-bit offsets: 1 GB per data.NNN
-MARKER_TAIL = bytes.fromhex("0038bfe1989077800be3361b4e20")  # the Agent's per-archive marker keys
+MARKER_TAIL = bytes.fromhex(
+    "0038bfe1989077800be3361b4e20"
+)  # the Agent's per-archive marker keys
 FREE_ENTRIES = 1090
 
 
@@ -414,7 +471,9 @@ class LocalStorage:
                 self.versions[b] = v
         self.entries = {}  # 9-byte key -> (archive, offset, size)
         for b, v in self.versions.items():
-            self.entries.update(self.read_idx(os.path.join(data_dir, f"{b:02x}{v:08x}.idx")))
+            self.entries.update(
+                self.read_idx(os.path.join(data_dir, f"{b:02x}{v:08x}.idx"))
+            )
         self.read_shmem()
 
     @staticmethod
@@ -422,13 +481,17 @@ class LocalStorage:
         with open(path, "rb") as f:
             data = f.read()
         hsize, hhash, version = struct.unpack_from("<IIH", data, 0)
-        if version != 7 or hashlittle2(data[8:8 + hsize])[0] != hhash:
+        if version != 7 or hashlittle2(data[8 : 8 + hsize])[0] != hhash:
             raise ValueError(f"{path}: unexpected header")
         esize = struct.unpack_from("<I", data, 0x20)[0]
         out = {}
         for p in range(IDX_HEADER, IDX_HEADER + esize, IDX_ENTRY):
-            raw = int.from_bytes(data[p + 9:p + 14], "big")
-            out[data[p:p + 9]] = (raw >> 30, raw & 0x3FFFFFFF, struct.unpack_from("<I", data, p + 14)[0])
+            raw = int.from_bytes(data[p + 9 : p + 14], "big")
+            out[data[p : p + 9]] = (
+                raw >> 30,
+                raw & 0x3FFFFFFF,
+                struct.unpack_from("<I", data, p + 14)[0],
+            )
         return out
 
     def has(self, ekey):
@@ -447,15 +510,29 @@ class LocalStorage:
         fsize, foff = struct.unpack_from("<II", s, 0x108)
         vers = struct.unpack_from("<16I", s, 0x110)
         if any(vers[b] != self.versions.get(b) for b in range(16)):
-            raise ValueError(f"shmem idx versions {vers} differ from the .idx files {self.versions}")
+            raise ValueError(
+                f"shmem idx versions {vers} differ from the .idx files {self.versions}"
+            )
         self.free = []
         ftype, count = struct.unpack_from("<II", s, foff)
         if ftype == 1 and count:
             base = foff + 0x20
             for i in range(count):
-                size = int.from_bytes(s[base + 5 * i:base + 5 * i + 5], "big")
-                raw = int.from_bytes(s[base + 5 * FREE_ENTRIES + 5 * i:base + 5 * FREE_ENTRIES + 5 * i + 5], "big")
-                self.free.append([raw >> 30, raw & 0x3FFFFFFF, size])  # archive, offset, free bytes
+                size = int.from_bytes(s[base + 5 * i : base + 5 * i + 5], "big")
+                raw = int.from_bytes(
+                    s[
+                        base
+                        + 5 * FREE_ENTRIES
+                        + 5 * i : base
+                        + 5 * FREE_ENTRIES
+                        + 5 * i
+                        + 5
+                    ],
+                    "big",
+                )
+                self.free.append(
+                    [raw >> 30, raw & 0x3FFFFFFF, size]
+                )  # archive, offset, free bytes
         else:  # no usable list (an engine-written template): the archives' tails, then new archives
             log("shmem has no free-space list; rebuilding it from the archive sizes")
             archives = self.archives()
@@ -463,12 +540,17 @@ class LocalStorage:
                 size = os.path.getsize(os.path.join(self.dir, f"data.{a:03d}"))
                 if size < ARCHIVE_MAX:
                     self.free.append([a, size, ARCHIVE_MAX - size])
-            for a in range(max(archives) + 1, max(archives) + 1 + FREE_ENTRIES - len(self.free)):
+            for a in range(
+                max(archives) + 1, max(archives) + 1 + FREE_ENTRIES - len(self.free)
+            ):
                 self.free.append([a, 0, ARCHIVE_MAX])
         self.shmem_len = len(s)
 
     def archives(self):
-        return sorted(int(f[-3:]) for f in glob.glob(os.path.join(self.dir, "data.[0-9][0-9][0-9]")))
+        return sorted(
+            int(f[-3:])
+            for f in glob.glob(os.path.join(self.dir, "data.[0-9][0-9][0-9]"))
+        )
 
     # -- writing ------------------------------------------------------------------------------
     def allocate(self, size):
@@ -524,23 +606,32 @@ class LocalStorage:
         for k, v in self.pending.items():
             by_bucket[bucket_of(k)][k] = v
         for b, new in by_bucket.items():
-            old = self.read_idx(os.path.join(self.dir, f"{b:02x}{self.versions[b]:08x}.idx"))
+            old = self.read_idx(
+                os.path.join(self.dir, f"{b:02x}{self.versions[b]:08x}.idx")
+            )
             old.update(new)
             self.versions[b] += 1
-            self.write_idx(os.path.join(self.dir, f"{b:02x}{self.versions[b]:08x}.idx"), b, old)
+            self.write_idx(
+                os.path.join(self.dir, f"{b:02x}{self.versions[b]:08x}.idx"), b, old
+            )
         self.entries.update(self.pending)
         self.pending = {}
         self.write_shmem()
 
     @staticmethod
     def write_idx(path, bucket, entries):
-        body = b"".join(k + (((v[0] << 30) | v[1]).to_bytes(5, "big")) + struct.pack("<I", v[2])
-                        for k, v in sorted(entries.items()))
-        hdr = struct.pack("<HBBBBBBQ", 7, bucket, 0, 4, 5, 9, 30, 0x4000000000) + b"\0" * 8
+        body = b"".join(
+            k + (((v[0] << 30) | v[1]).to_bytes(5, "big")) + struct.pack("<I", v[2])
+            for k, v in sorted(entries.items())
+        )
+        hdr = (
+            struct.pack("<HBBBBBBQ", 7, bucket, 0, 4, 5, 9, 30, 0x4000000000)
+            + b"\0" * 8
+        )
         hdr = struct.pack("<II", 0x10, hashlittle2(hdr[:0x10])[0]) + hdr
         pc = pb = 0
         for p in range(0, len(body), IDX_ENTRY):
-            pc, pb = hashlittle2(body[p:p + IDX_ENTRY], pc, pb)
+            pc, pb = hashlittle2(body[p : p + IDX_ENTRY], pc, pb)
         data = hdr + struct.pack("<II", len(body), pc) + body
         data += b"\0" * (-len(data) % 0x10000)
         tmp = path + ".part"
@@ -554,15 +645,26 @@ class LocalStorage:
         win = "Global\\C:/Program Files (x86)/StarCraft II/SC2Data/data"
         with open(os.path.join(self.dir, "shmem"), "rb") as f:
             old = f.read()
-        path = old[8:8 + 0x100]  # keep the recorded data path (the engine writes it with a lower-case drive)
+        path = old[
+            8 : 8 + 0x100
+        ]  # keep the recorded data path (the engine writes it with a lower-case drive)
         if not path.startswith(b"Global\\"):
             path = win.encode().ljust(0x100, b"\0")
         free = [e for e in self.free if e[2] > 0]
         blk = struct.pack("<II", 1, len(free)) + b"\0" * 0x18
         sizes = b"".join(e[2].to_bytes(5, "big") for e in free)
         offs = b"".join(((e[0] << 30) | e[1]).to_bytes(5, "big") for e in free)
-        blk += sizes + b"\0" * (5 * FREE_ENTRIES - len(sizes)) + offs + b"\0" * (5 * FREE_ENTRIES - len(offs))
-        head = struct.pack("<II", 4, 0x150) + path + struct.pack("<II", len(blk) + 4, 0x150)
+        blk += (
+            sizes
+            + b"\0" * (5 * FREE_ENTRIES - len(sizes))
+            + offs
+            + b"\0" * (5 * FREE_ENTRIES - len(offs))
+        )
+        head = (
+            struct.pack("<II", 4, 0x150)
+            + path
+            + struct.pack("<II", len(blk) + 4, 0x150)
+        )
         head += struct.pack("<16I", *[self.versions[b] for b in range(16)])
         data = head + blk
         data += b"\0" * max(0, max(self.shmem_len, 11280) - len(data))
@@ -591,7 +693,9 @@ class Build:
     def encoding(self):
         if self._encoding is None:
             log(f"parsing encoding {self.encoding_ekey} ...")
-            self._encoding = parse_encoding(blte_decode(self.cdn.cached("data", self.encoding_ekey)))
+            self._encoding = parse_encoding(
+                blte_decode(self.cdn.cached("data", self.encoding_ekey))
+            )
         return self._encoding
 
     def ekey(self, ckey_hex):
@@ -603,7 +707,12 @@ class Build:
 
     def metadata_ekeys(self):
         """EKeys of the build's own metadata files, which the storage keeps too."""
-        keys = [self.encoding_ekey, self.config["install"][1], self.config["download"][1], self.config["size"][1]]
+        keys = [
+            self.encoding_ekey,
+            self.config["install"][1],
+            self.config["download"][1],
+            self.config["size"][1],
+        ]
         keys.append(self.ekey(self.root_ckey).hex())
         return keys
 
@@ -618,7 +727,10 @@ class CDNIndex:
         self.where = {}
         log(f"loading {len(self.archives)} archive indexes ...")
         with ThreadPoolExecutor(cdn.threads) as ex:
-            for arch, idx in zip(self.archives, ex.map(lambda a: cdn.cached("data", a, ".index"), self.archives)):
+            for arch, idx in zip(
+                self.archives,
+                ex.map(lambda a: cdn.cached("data", a, ".index"), self.archives),
+            ):
                 for ekey, (off, size) in parse_archive_index(idx).items():
                     self.where[ekey] = (arch, off, size)
 
@@ -639,9 +751,11 @@ class CDNIndex:
 # --------------------------------------------------------------------------------------------
 # The install
 # --------------------------------------------------------------------------------------------
-BUILD_INFO_HEADER = ("Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|CDN Key!HEX:16|Install Key!HEX:16|IM Size!DEC:4|"
-                     "CDN Path!STRING:0|CDN Hosts!STRING:0|CDN Servers!STRING:0|Tags!STRING:0|Armadillo!STRING:0|"
-                     "Last Activated!STRING:0|Version!STRING:0|KeyRing!HEX:16|Product!STRING:0")
+BUILD_INFO_HEADER = (
+    "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|CDN Key!HEX:16|Install Key!HEX:16|IM Size!DEC:4|"
+    "CDN Path!STRING:0|CDN Hosts!STRING:0|CDN Servers!STRING:0|Tags!STRING:0|Armadillo!STRING:0|"
+    "Last Activated!STRING:0|Version!STRING:0|KeyRing!HEX:16|Product!STRING:0"
+)
 
 
 def read_build_info(install):
@@ -655,13 +769,16 @@ def read_build_info(install):
 
 def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
     """What installing `build` (base build number) into `install` takes. Returns a dict with
-    the Build, the CDNIndex, the missing EKeys with sizes, and the install files to write."""
+    the Build, the CDNIndex, the missing EKeys with sizes, and the install files to write.
+    """
     bc_hash = KNOWN_BUILDS.get(build) if isinstance(build, int) else None
     if isinstance(build, str) and "=" in build:
         build, bc_hash = build.split("=")
         build = int(build)
     if not bc_hash:
-        raise ValueError(f"no BuildConfig hash known for build {build}; pass <build>=<hash>")
+        raise ValueError(
+            f"no BuildConfig hash known for build {build}; pass <build>=<hash>"
+        )
     header, rows = read_build_info(install)
     active = [r for r in rows if r["Active"] == "1"] or rows
     tag_configs = active[0]["Tags"].split(":")
@@ -669,8 +786,10 @@ def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
     cdn = CDN(cache, threads=threads)
     b = Build(cdn, bc_hash)
     storage = LocalStorage(os.path.join(install, "SC2Data", "data"))
-    log(f"build {build}: BuildConfig {bc_hash}, root {b.root_ckey}; storage has {len(storage.entries)} entries "
-        f"in {len(storage.archives())} archives")
+    log(
+        f"build {build}: BuildConfig {bc_hash}, root {b.root_ckey}; storage has {len(storage.entries)} entries "
+        f"in {len(storage.archives())} archives"
+    )
 
     entries, tags = parse_download(b.manifest("download"))
     chosen = select_by_tags(tags, len(entries), tag_configs)
@@ -678,8 +797,10 @@ def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
     for k in b.metadata_ekeys():
         need.setdefault(bytes.fromhex(k), 0)
     missing = {k: s for k, s in need.items() if not storage.has(k)}
-    log(f"download manifest: {len(entries)} files, {len(chosen)} for tags {tag_configs}; "
-        f"missing locally: {len(missing)} ({sum(missing.values()) / 1e6:.1f} MB)")
+    log(
+        f"download manifest: {len(entries)} files, {len(chosen)} for tags {tag_configs}; "
+        f"missing locally: {len(missing)} ({sum(missing.values()) / 1e6:.1f} MB)"
+    )
 
     inst, itags = parse_install(b.manifest("install"))
     want_tags = {"Windows", "x86_64", "enUS"} & set(itags)
@@ -691,16 +812,36 @@ def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
         if name.startswith(f"Versions/Base{build}/") or not os.path.exists(dest):
             files.append((name, ckey, size))
     log(f"install manifest: {len(inst)} files; to write: {[f[0] for f in files]}")
-    return dict(build=build, bc_hash=bc_hash, cdn=cdn, b=b, storage=storage, missing=missing, files=files,
-                cdn_config_hash=cdn_config_hash, header=header, rows=rows, active=active[0])
+    return dict(
+        build=build,
+        bc_hash=bc_hash,
+        cdn=cdn,
+        b=b,
+        storage=storage,
+        missing=missing,
+        files=files,
+        cdn_config_hash=cdn_config_hash,
+        header=header,
+        rows=rows,
+        active=active[0],
+    )
 
 
 def sc2_running(max_age=None):
     """Running processes that use the storage (the engine, the Agent), as (age in seconds,
     name); with max_age only the ones younger than that."""
     import subprocess
-    out = subprocess.run(["ps", "-eo", "etimes,args"], capture_output=True, text=True).stdout
-    names = ("sc2_x64.exe", "sc2.exe", "agent.exe", "sc2switcher_x64.exe", "sc2editor_x64.exe")
+
+    out = subprocess.run(
+        ["ps", "-eo", "etimes,args"], capture_output=True, text=True
+    ).stdout
+    names = (
+        "sc2_x64.exe",
+        "sc2.exe",
+        "agent.exe",
+        "sc2switcher_x64.exe",
+        "sc2editor_x64.exe",
+    )
     found = []
     for line in out.splitlines()[1:]:
         age, _, args = line.strip().partition(" ")
@@ -719,7 +860,10 @@ def fetch_missing(p, index):
     cdn = p["cdn"]
     blob_dir = os.path.join(cdn.cache_dir, "blobs")
     os.makedirs(blob_dir, exist_ok=True)
-    missing = sorted(p["missing"], key=lambda k: (index.where.get(k, ("~",))[0], index.where.get(k, (0, 0))[1]))
+    missing = sorted(
+        p["missing"],
+        key=lambda k: (index.where.get(k, ("~",))[0], index.where.get(k, (0, 0))[1]),
+    )
     paths = {k: os.path.join(blob_dir, k.hex()) for k in missing}
     todo = [k for k in missing if not os.path.exists(paths[k])]
     done = [0, 0]
@@ -738,8 +882,10 @@ def fetch_missing(p, index):
             done[1] += n
             if done[0] % 50 == 0:
                 log(f"  {done[0]}/{len(todo)} files, {done[1] / 1e6:.0f} MB")
-    log(f"fetched {done[0]} files, {done[1] / 1e6:.1f} MB in {time.time() - t0:.0f} s "
-        f"({len(missing) - len(todo)} were cached)")
+    log(
+        f"fetched {done[0]} files, {done[1] / 1e6:.1f} MB in {time.time() - t0:.0f} s "
+        f"({len(missing) - len(todo)} were cached)"
+    )
     return paths
 
 
@@ -752,10 +898,14 @@ def write_storage(p, paths, force=False):
     storage = p["storage"]
     running = sc2_running()
     if running and not force:
-        raise RuntimeError(f"{running} running: the storage can only be written while nothing uses it "
-                           "(--force writes between engine launches)")
+        raise RuntimeError(
+            f"{running} running: the storage can only be written while nothing uses it "
+            "(--force writes between engine launches)"
+        )
     if running:
-        log(f"{len(running)} engine/Agent processes running; waiting for a gap between launches")
+        log(
+            f"{len(running)} engine/Agent processes running; waiting for a gap between launches"
+        )
         while sc2_running(max_age=20):
             time.sleep(1)
     t0 = time.time()
@@ -770,11 +920,17 @@ def write_storage(p, paths, force=False):
         n += 1
         size += len(blob)
     storage.commit()
-    log(f"storage: {n} files, {size / 1e6:.1f} MB written in {time.time() - t0:.1f} s; "
-        f"archives now {storage.archives()[-1] + 1}, idx versions {[storage.versions[b] for b in range(16)]}")
+    log(
+        f"storage: {n} files, {size / 1e6:.1f} MB written in {time.time() - t0:.1f} s; "
+        f"archives now {storage.archives()[-1] + 1}, idx versions {[storage.versions[b] for b in range(16)]}"
+    )
     if running:
-        time.sleep(25)  # an engine started meanwhile writes shmem within its first seconds
-        check = LocalStorage(storage.dir)  # raises when shmem and the .idx files disagree
+        time.sleep(
+            25
+        )  # an engine started meanwhile writes shmem within its first seconds
+        check = LocalStorage(
+            storage.dir
+        )  # raises when shmem and the .idx files disagree
         if check.free != storage.free:
             log("shmem was rewritten by an engine start; writing it again")
             storage.write_shmem()
@@ -782,16 +938,25 @@ def write_storage(p, paths, force=False):
 
 def backup(install, storage):
     """Copies what the install step rewrites (.build.info, shmem, the live .idx files) to
-    SC2Data/backup-<time>/ with a manifest of the archive sizes, so revert() can undo it."""
+    SC2Data/backup-<time>/ with a manifest of the archive sizes, so revert() can undo it.
+    """
     import json
+
     bak = os.path.join(install, "SC2Data", f"backup-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(bak, exist_ok=True)
     shutil.copy2(os.path.join(install, ".build.info"), bak)
     shutil.copy2(os.path.join(storage.dir, "shmem"), bak)
     for bk, v in storage.versions.items():
         shutil.copy2(os.path.join(storage.dir, f"{bk:02x}{v:08x}.idx"), bak)
-    sizes = {a: os.path.getsize(os.path.join(storage.dir, f"data.{a:03d}")) for a in storage.archives()}
-    json.dump(dict(archive_sizes=sizes, idx_versions=storage.versions), open(os.path.join(bak, "manifest.json"), "w"), indent=1)
+    sizes = {
+        a: os.path.getsize(os.path.join(storage.dir, f"data.{a:03d}"))
+        for a in storage.archives()
+    }
+    json.dump(
+        dict(archive_sizes=sizes, idx_versions=storage.versions),
+        open(os.path.join(bak, "manifest.json"), "w"),
+        indent=1,
+    )
     log(f"backed up .build.info, shmem and the .idx files to {bak}")
     return bak
 
@@ -802,13 +967,18 @@ def revert(install, bak, build=None):
     and deletes archives created since; with build, also removes Versions/Base<build> and the
     build's BuildConfig copy. Nothing older than the backup is touched."""
     import json
+
     install, bak = os.path.abspath(install), os.path.abspath(bak)
     if not bak.startswith(os.path.join(install, "SC2Data", "backup-")):
-        raise ValueError(f"{bak} is not a backup of {install}: refusing to apply another install's sizes")
+        raise ValueError(
+            f"{bak} is not a backup of {install}: refusing to apply another install's sizes"
+        )
     m = json.load(open(os.path.join(bak, "manifest.json")))
     data = os.path.join(install, "SC2Data", "data")
     sizes = {int(k): v for k, v in m["archive_sizes"].items()}
-    for a in sorted(int(f[-3:]) for f in glob.glob(os.path.join(data, "data.[0-9][0-9][0-9]"))):
+    for a in sorted(
+        int(f[-3:]) for f in glob.glob(os.path.join(data, "data.[0-9][0-9][0-9]"))
+    ):
         p = os.path.join(data, f"data.{a:03d}")
         if a not in sizes:
             os.remove(p)
@@ -826,7 +996,9 @@ def revert(install, bak, build=None):
         shutil.copy2(f, data)
     shutil.copy2(os.path.join(bak, ".build.info"), install)
     if build:
-        shutil.rmtree(os.path.join(install, "Versions", f"Base{build}"), ignore_errors=True)
+        shutil.rmtree(
+            os.path.join(install, "Versions", f"Base{build}"), ignore_errors=True
+        )
         h = KNOWN_BUILDS.get(build)
         if h:
             cfg = os.path.join(install, "SC2Data", "config", h[:2], h[2:4], h)
@@ -835,7 +1007,9 @@ def revert(install, bak, build=None):
     log(f"reverted to {bak}")
 
 
-def install_build(install, build, dry_run=False, cache=DEFAULT_CACHE, threads=8, force=False):
+def install_build(
+    install, build, dry_run=False, cache=DEFAULT_CACHE, threads=8, force=False
+):
     t0 = time.time()
     p = plan(install, build, cache=cache, threads=threads)
     b, storage, cdn = p["b"], p["storage"], p["cdn"]
@@ -851,8 +1025,13 @@ def install_build(install, build, dry_run=False, cache=DEFAULT_CACHE, threads=8,
     loose = []
     for name, ckey, size in p["files"]:
         ekey = b.encoding[ckey][0]
-        blob = open(paths[ekey], "rb").read() if ekey in paths else (
-            storage_read(storage, ekey) if storage.has(ekey) else index.fetch(ekey))
+        blob = (
+            open(paths[ekey], "rb").read()
+            if ekey in paths
+            else (
+                storage_read(storage, ekey) if storage.has(ekey) else index.fetch(ekey)
+            )
+        )
         content = blte_decode(blob)
         if hashlib.md5(content).digest() != ckey or len(content) != size:
             raise IOError(f"{name}: content hash mismatch")
@@ -870,12 +1049,18 @@ def install_build(install, build, dry_run=False, cache=DEFAULT_CACHE, threads=8,
         os.chmod(dest, 0o775 if dest.endswith(".exe") else 0o664)
         log(f"wrote {name} ({len(content) / 1e6:.1f} MB)")
     # the BuildConfig next to the current one, and a .build.info row
-    cfg_dir = os.path.join(install, "SC2Data", "config", p["bc_hash"][:2], p["bc_hash"][2:4])
+    cfg_dir = os.path.join(
+        install, "SC2Data", "config", p["bc_hash"][:2], p["bc_hash"][2:4]
+    )
     os.makedirs(cfg_dir, exist_ok=True)
     with open(os.path.join(cfg_dir, p["bc_hash"]), "wb") as f:
         f.write(cdn.cached("config", p["bc_hash"]))
     if not row_present:
-        row = dict(p["active"], Active="0", **{"Build Key": p["bc_hash"], "Version": build_version(b, p["build"])})
+        row = dict(
+            p["active"],
+            Active="0",
+            **{"Build Key": p["bc_hash"], "Version": build_version(b, p["build"])},
+        )
         cols = [c.split("!")[0] for c in p["header"].split("|")]
         with open(os.path.join(install, ".build.info"), "a") as f:
             f.write("|".join(row.get(c, "") for c in cols) + "\n")
@@ -884,7 +1069,14 @@ def install_build(install, build, dry_run=False, cache=DEFAULT_CACHE, threads=8,
     return p
 
 
-GAME_VERSIONS = {93333: "5.0.14", 94137: "5.0.14", 95841: "5.0.15", 97364: "5.0.16", 97563: "5.0.16", 98310: "5.0.17"}
+GAME_VERSIONS = {
+    93333: "5.0.14",
+    94137: "5.0.14",
+    95841: "5.0.15",
+    97364: "5.0.16",
+    97563: "5.0.16",
+    98310: "5.0.17",
+}
 
 
 def build_version(b, build):
@@ -904,19 +1096,45 @@ def storage_read(storage, ekey):
 def main(argv=None):
     import argparse
     from cosmicstar.envs.wine_run_config import sc2_install_dir
+
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("build", help="base build (e.g. 93333) or <build>=<BuildConfig hash>")
-    ap.add_argument("--install", default=sc2_install_dir(), help="the StarCraft II folder")
-    ap.add_argument("--cache", default=DEFAULT_CACHE, help="where configs, manifests and indexes are cached")
+    ap.add_argument(
+        "build", help="base build (e.g. 93333) or <build>=<BuildConfig hash>"
+    )
+    ap.add_argument(
+        "--install", default=sc2_install_dir(), help="the StarCraft II folder"
+    )
+    ap.add_argument(
+        "--cache",
+        default=DEFAULT_CACHE,
+        help="where configs, manifests and indexes are cached",
+    )
     ap.add_argument("--threads", type=int, default=8)
-    ap.add_argument("--dry-run", action="store_true", help="only report what is missing")
-    ap.add_argument("--force", action="store_true", help="write the storage even while the engine runs")
-    ap.add_argument("--revert", metavar="BACKUP_DIR", help="undo the install of <build> from this SC2Data/backup-* folder")
+    ap.add_argument(
+        "--dry-run", action="store_true", help="only report what is missing"
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="write the storage even while the engine runs",
+    )
+    ap.add_argument(
+        "--revert",
+        metavar="BACKUP_DIR",
+        help="undo the install of <build> from this SC2Data/backup-* folder",
+    )
     a = ap.parse_args(argv)
     build = int(a.build) if a.build.isdigit() else a.build
     if a.revert:
         return revert(a.install, a.revert, build if isinstance(build, int) else None)
-    install_build(a.install, build, dry_run=a.dry_run, cache=a.cache, threads=a.threads, force=a.force)
+    install_build(
+        a.install,
+        build,
+        dry_run=a.dry_run,
+        cache=a.cache,
+        threads=a.threads,
+        force=a.force,
+    )
 
 
 if __name__ == "__main__":

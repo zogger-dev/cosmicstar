@@ -30,6 +30,7 @@ maps.json lists them). Pruning: a format, patch or map is one
 directory in both trees; anything else is a query over the sidecars (or index.json) that
 yields ids, then those ids' files. scripts/ingest_replays.py sorts packs into the replay tree.
 """
+
 import collections
 import datetime
 import hashlib
@@ -46,7 +47,11 @@ ID_HEX = 16
 
 def game_id(path_or_bytes):
     """sha1 of the replay's bytes, first ID_HEX hex digits."""
-    data = path_or_bytes if isinstance(path_or_bytes, (bytes, bytearray)) else open(path_or_bytes, "rb").read()
+    data = (
+        path_or_bytes
+        if isinstance(path_or_bytes, (bytes, bytearray))
+        else open(path_or_bytes, "rb").read()
+    )
     return hashlib.sha1(data).hexdigest()[:ID_HEX]
 
 
@@ -79,13 +84,17 @@ def rel_dir(fmt, base_build, map_hash):
 
 # ---------------------------------------------------------------- replay metadata (no engine)
 
+
 def _s(b):
     return b.decode("utf-8", "replace") if isinstance(b, bytes) else b
 
 
 def _protocol(archive):
     from s2protocol import versions
-    header = versions.latest().decode_replay_header(archive.header["user_data_header"]["content"])
+
+    header = versions.latest().decode_replay_header(
+        archive.header["user_data_header"]["content"]
+    )
     build = header["m_version"]["m_build"]
     try:
         return versions.build(build), build
@@ -103,7 +112,9 @@ def ruleset_key(base_build, data_version, mods):
 def filetime_iso(ft, offset=0):
     """A Windows FILETIME (100 ns since 1601, as the replay's m_timeUTC) -> ISO 8601 UTC."""
     try:
-        t = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(microseconds=ft / 10)
+        t = datetime.datetime(
+            1601, 1, 1, tzinfo=datetime.timezone.utc
+        ) + datetime.timedelta(microseconds=ft / 10)
         return t.replace(microsecond=0).isoformat()
     except (OverflowError, ValueError, TypeError):
         return None
@@ -114,6 +125,7 @@ def replay_info(path):
     ruleset, duration, players with MMR, date."""
     import mpyq
     from cosmicstar.envs import depot
+
     a = mpyq.MPQArchive(path)
     proto, build = _protocol(a)
     header = proto.decode_replay_header(a.header["user_data_header"]["content"])
@@ -122,16 +134,30 @@ def replay_info(path):
     handles = det["m_cacheHandles"]
     h = handles[-1]  # the map; the others are mods (core data, balance mods, ...)
     mods = [x[8:].hex() for x in handles[:-1]]
-    players = [dict(slot=i + 1, name=_s(p["m_name"]), race=_s(p["m_race"]), team=p["m_teamId"], result=p["m_result"],
-                    mmr=None) for i, p in enumerate(det["m_playerList"])]
+    players = [
+        dict(
+            slot=i + 1,
+            name=_s(p["m_name"]),
+            race=_s(p["m_race"]),
+            team=p["m_teamId"],
+            result=p["m_result"],
+            mmr=None,
+        )
+        for i, p in enumerate(det["m_playerList"])
+    ]
     map_cells = None
     try:  # MMR lives with the lobby user; players and users meet through the working-set slot
-        init = proto.decode_replay_initdata(a.read_file("replay.initData"))["m_syncLobbyState"]
+        init = proto.decode_replay_initdata(a.read_file("replay.initData"))[
+            "m_syncLobbyState"
+        ]
         gd = init["m_gameDescription"]
         map_cells = [gd["m_mapSizeX"], gd["m_mapSizeY"]]
         users = init["m_userInitialData"]
-        slot_user = {sl["m_workingSetSlotId"]: sl["m_userId"] for sl in init["m_lobbyState"]["m_slots"]
-                     if sl.get("m_userId") is not None}
+        slot_user = {
+            sl["m_workingSetSlotId"]: sl["m_userId"]
+            for sl in init["m_lobbyState"]["m_slots"]
+            if sl.get("m_userId") is not None
+        }
         for pl, p in zip(players, det["m_playerList"]):
             u = slot_user.get(p.get("m_workingSetSlotId"))
             if u is not None and users[u].get("m_scaledRating") is not None:
@@ -139,28 +165,63 @@ def replay_info(path):
     except Exception:
         pass
     base_build, data_version = int(meta["BaseBuild"][4:]), meta.get("DataVersion")
-    return dict(build=build, base_build=base_build, game_version=".".join(meta["GameVersion"].split(".")[:-1]),
-                data_version=data_version, map=_s(det["m_title"]), map_hash=h[8:].hex(), mods=mods,
-                handles=[depot.parse_handle(x) for x in handles],
-                ruleset=ruleset_key(base_build, data_version, mods),
-                # The header's exact loop count (metadata "Duration" is in normal-speed seconds
-                # of 16 loops, not real seconds)
-                duration_loops=int(header["m_elapsedGameLoops"]), players=players,
-                time_utc=filetime_iso(det.get("m_timeUTC")), format=game_format(players), map_cells=map_cells)
+    return dict(
+        build=build,
+        base_build=base_build,
+        game_version=".".join(meta["GameVersion"].split(".")[:-1]),
+        data_version=data_version,
+        map=_s(det["m_title"]),
+        map_hash=h[8:].hex(),
+        mods=mods,
+        handles=[depot.parse_handle(x) for x in handles],
+        ruleset=ruleset_key(base_build, data_version, mods),
+        # The header's exact loop count (metadata "Duration" is in normal-speed seconds
+        # of 16 loops, not real seconds)
+        duration_loops=int(header["m_elapsedGameLoops"]),
+        players=players,
+        time_utc=filetime_iso(det.get("m_timeUTC")),
+        format=game_format(players),
+        map_cells=map_cells,
+    )
 
 
 def replay_sidecar(info, gid, rel_path, source):
     """The <id>.json next to a replay. source: {"pack": ..., "file": original name} (merged
     into a list when the same game arrives again)."""
-    keep = ("format", "build", "base_build", "game_version", "data_version", "map", "map_hash", "mods", "handles",
-            "ruleset", "duration_loops", "players", "time_utc")  # handles: (ext, hash) of the map and mods, for the depot
+    keep = (
+        "format",
+        "build",
+        "base_build",
+        "game_version",
+        "data_version",
+        "map",
+        "map_hash",
+        "mods",
+        "handles",
+        "ruleset",
+        "duration_loops",
+        "players",
+        "time_utc",
+    )  # handles: (ext, hash) of the map and mods, for the depot
     d = {k: info[k] for k in keep}
-    d.update(id=gid, path=rel_path, duration_s=round(info["duration_loops"] / 22.4, 1),
-             sources=[dict(source, ingested=datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat())])
+    d.update(
+        id=gid,
+        path=rel_path,
+        duration_s=round(info["duration_loops"] / 22.4, 1),
+        sources=[
+            dict(
+                source,
+                ingested=datetime.datetime.now(datetime.timezone.utc)
+                .replace(microsecond=0)
+                .isoformat(),
+            )
+        ],
+    )
     return d
 
 
 # ---------------------------------------------------------------- the trees
+
 
 def iter_sidecars(root=REPLAYS, fmt=None):
     """(path, sidecar dict) for every replay sidecar under root (format filtered if given)."""
@@ -185,13 +246,19 @@ def build_index(root=REPLAYS):
     index = {d["id"]: d for _, d in iter_sidecars(root)}
     maps = {}
     for d in index.values():
-        m = maps.setdefault(map_dir(d["map_hash"]), dict(name=d["map"], names=[], games=0, builds=[], hash=d["map_hash"]))
+        m = maps.setdefault(
+            map_dir(d["map_hash"]),
+            dict(name=d["map"], names=[], games=0, builds=[], hash=d["map_hash"]),
+        )
         m["games"] += 1
         if d["map"] not in m["names"]:
             m["names"].append(d["map"])
         if d["base_build"] not in m["builds"]:
             m["builds"].append(d["base_build"])
-    for name, obj in ((INDEX, index), (MAPS, dict(sorted(maps.items(), key=lambda kv: (kv[1]["name"], kv[0]))))):
+    for name, obj in (
+        (INDEX, index),
+        (MAPS, dict(sorted(maps.items(), key=lambda kv: (kv[1]["name"], kv[0])))),
+    ):
         tmp = os.path.join(root, name + ".tmp")
         json.dump(obj, open(tmp, "w"), indent=0 if name == INDEX else 1)
         os.replace(tmp, os.path.join(root, name))
@@ -205,7 +272,11 @@ def map_dirs_named(index, names):
     out = set()
     for d in index.values():
         md = map_dir(d["map_hash"])
-        if map_slug(d["map"]) in want or any(md.startswith(n) for n in want if n and all(c in "0123456789abcdef" for c in n)):
+        if map_slug(d["map"]) in want or any(
+            md.startswith(n)
+            for n in want
+            if n and all(c in "0123456789abcdef" for c in n)
+        ):
             out.add(md)
     return out
 
@@ -244,7 +315,11 @@ VIEW_RE = re.compile(r"^(?P<id>[0-9a-f]{%d})\.p(?P<slot>\d+)\.cst$" % ID_HEX)
 def acts_path(view_path):
     """The action table next to a view: <dir>/<id>.acts.npz."""
     m = VIEW_RE.match(os.path.basename(view_path))
-    return os.path.join(os.path.dirname(view_path), m.group("id") + ".acts.npz") if m else None
+    return (
+        os.path.join(os.path.dirname(view_path), m.group("id") + ".acts.npz")
+        if m
+        else None
+    )
 
 
 def iter_views(games_root=GAMES, fmt=None):
@@ -274,6 +349,7 @@ def update_meta(path, slot, record):
     """Merges one view's record into <id>.meta.json under a file lock (two workers finish a
     game's two views independently)."""
     import fcntl
+
     lock = path + ".lock"
     with open(lock, "a+") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)

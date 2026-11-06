@@ -43,20 +43,23 @@ SELECTION = 10
 ENGINE_TAG_OFFSET = 1 << 32
 
 
-
 def ragged(acts, start_key, flat_key, i):
     """Row i's slice of a ragged action-table column. The *_start arrays hold one start per
     row and no trailing sentinel, so the last row's slice ends at the flat array's end (indexing
-    start[i + 1] there raised IndexError on views whose frames reach the replay's last row)."""
+    start[i + 1] there raised IndexError on views whose frames reach the replay's last row).
+    """
     start = acts[start_key]
     end = start[i + 1] if i + 1 < len(start) else len(acts[flat_key])
-    return acts[flat_key][start[i]:end].tolist()
+    return acts[flat_key][start[i] : end].tolist()
+
 
 class Tracker:
     def __init__(self):
         self.lists = [[] for _ in range(N_LISTS)]  # replay tags, ascending
         self.errors = collections.Counter()
-        self.error_rows = []  # rows of the action table whose mask reached past the end of the list
+        self.error_rows = (
+            []
+        )  # rows of the action table whose mask reached past the end of the list
 
     def remove(self, lst, kind, positions, row=-1):
         n = len(lst)
@@ -81,14 +84,18 @@ class Tracker:
         positions = ragged(acts, "rem_start", "rem_pos", i)
         if acts["kind"][i] == ra.SELECT:
             added = ragged(acts, "add_start", "add_tag", i)
-            self.lists[g] = self.merge(self.remove(self.lists[g], kind, positions, i), added)
+            self.lists[g] = self.merge(
+                self.remove(self.lists[g], kind, positions, i), added
+            )
             return
         op = int(acts["group_op"][i])
         sel = self.lists[SELECTION]
         if op in (0, 4):
             self.lists[g] = list(sel)
         elif op in (1, 5):
-            self.lists[g] = self.merge(self.remove(self.lists[g], kind, positions, i), sel)
+            self.lists[g] = self.merge(
+                self.remove(self.lists[g], kind, positions, i), sel
+            )
         elif op == 2:
             self.lists[SELECTION] = self.remove(self.lists[g], kind, positions, i)
         elif op == 3:
@@ -140,10 +147,14 @@ def deaths_by_replay_tag(died_engine):
 def deaths_from_frames(arrays):
     """Replay tag -> loop of the frame that reported the death (dead_id lists of a state
     file; at most a frame late against the replay's own death loops)."""
-    unit_tag, frame_loop, ds = arrays["unit_tag"], arrays["frame_loop"], arrays["dead_frame_start"]
+    unit_tag, frame_loop, ds = (
+        arrays["unit_tag"],
+        arrays["frame_loop"],
+        arrays["dead_frame_start"],
+    )
     died = {}
     for f in range(len(frame_loop)):
-        for i in arrays["dead_id"][ds[f]:ds[f + 1]]:
+        for i in arrays["dead_id"][ds[f] : ds[f + 1]]:
             died.setdefault(int(unit_tag[i]) - ENGINE_TAG_OFFSET, int(frame_loop[f]))
     return died
 
@@ -161,14 +172,22 @@ def frame_groups(acts, slots, frame_loop, unit_tag, died):
         loop = int(frame_loop[f])
         for frames in per_player:
             for lst in frames[f]:
-                flat.extend(ids[t] for t in lst if t in ids and died.get(t, loop + 1) > loop)
+                flat.extend(
+                    ids[t] for t in lst if t in ids and died.get(t, loop + 1) > loop
+                )
                 start.append(len(flat))
-    return dict(grp_player=np.asarray(list(slots), np.int8), grp_start=np.asarray(start, np.int64),
-                grp_id=np.asarray(flat, np.int32))
+    return dict(
+        grp_player=np.asarray(list(slots), np.int8),
+        grp_start=np.asarray(start, np.int64),
+        grp_id=np.asarray(flat, np.int32),
+    )
 
 
 N_CAMERA_SAVES = 8  # camera hotkey slots (F5-F8 and the shifted set; slots 0-7 all seen in pro replays)
-FLAG_SET_AUTOCAST, FLAG_AUTOCAST_ON = 0x40, 0x80  # SCmdEvent m_cmdFlags (3 toggles in 25 pro replays, all 0xC0: on)
+FLAG_SET_AUTOCAST, FLAG_AUTOCAST_ON = (
+    0x40,
+    0x80,
+)  # SCmdEvent m_cmdFlags (3 toggles in 25 pro replays, all 0xC0: on)
 
 
 def frame_memory(acts, slots, frame_loop, unit_tag, died):
@@ -194,17 +213,30 @@ def frame_memory(acts, slots, frame_loop, unit_tag, died):
     F, P = len(frame_loop), len(slots)
     cam = np.full((F, P, N_CAMERA_SAVES, 2), np.nan, np.float32)
     sub = np.zeros((F, P), np.int16)
-    lc = dict(link=np.full((F, P), -1, np.int16), cmd=np.full((F, P), -1, np.int16), flags=np.zeros((F, P), np.int64),
-              target=np.zeros((F, P), np.int8), x=np.full((F, P), np.nan, np.float32), y=np.full((F, P), np.nan, np.float32),
-              unit=np.full((F, P), -1, np.int32), loop=np.full((F, P), -1, np.int32))
+    lc = dict(
+        link=np.full((F, P), -1, np.int16),
+        cmd=np.full((F, P), -1, np.int16),
+        flags=np.zeros((F, P), np.int64),
+        target=np.zeros((F, P), np.int8),
+        x=np.full((F, P), np.nan, np.float32),
+        y=np.full((F, P), np.nan, np.float32),
+        unit=np.full((F, P), -1, np.int32),
+        loop=np.full((F, P), -1, np.int32),
+    )
     ac = dict(loop=[], player=[], link=[], cmd=[], on=[], start=[0], unit=[])
     for k, slot in enumerate(slots):
         rows = player_rows(acts, slot)
-        toggles = [int(r) for r in rows if acts["kind"][r] == ra.CMD and int(acts["flags"][r]) & FLAG_SET_AUTOCAST]
+        toggles = [
+            int(r)
+            for r in rows
+            if acts["kind"][r] == ra.CMD and int(acts["flags"][r]) & FLAG_SET_AUTOCAST
+        ]
         _, at_rows, _ = replay(acts, slot, (), toggles)
         cams = np.full((N_CAMERA_SAVES, 2), np.nan, np.float32)
         subgroup = 0
-        last = dict(link=-1, cmd=-1, flags=0, target=0, x=np.nan, y=np.nan, unit=-1, loop=-1)
+        last = dict(
+            link=-1, cmd=-1, flags=0, target=0, x=np.nan, y=np.nan, unit=-1, loop=-1
+        )
         fi = 0
         for r in rows:
             r, loop = int(r), int(acts["loop"][r])
@@ -224,19 +256,37 @@ def frame_memory(acts, slots, frame_loop, unit_tag, died):
                 subgroup = 0
             elif kind == ra.CMD:
                 tag = int(acts["target_tag"][r])
-                last = dict(link=int(acts["abil_link"][r]), cmd=int(acts["abil_cmd"][r]), flags=int(acts["flags"][r]),
-                            target=int(acts["target"][r]), x=float(acts["tx"][r]), y=float(acts["ty"][r]),
-                            unit=ids.get(tag, -1) if tag else -1, loop=loop)
+                last = dict(
+                    link=int(acts["abil_link"][r]),
+                    cmd=int(acts["abil_cmd"][r]),
+                    flags=int(acts["flags"][r]),
+                    target=int(acts["target"][r]),
+                    x=float(acts["tx"][r]),
+                    y=float(acts["ty"][r]),
+                    unit=ids.get(tag, -1) if tag else -1,
+                    loop=loop,
+                )
                 if r in at_rows:
-                    ac["loop"].append(loop); ac["player"].append(slot)
-                    ac["link"].append(last["link"]); ac["cmd"].append(last["cmd"])
+                    ac["loop"].append(loop)
+                    ac["player"].append(slot)
+                    ac["link"].append(last["link"])
+                    ac["cmd"].append(last["cmd"])
                     ac["on"].append(bool(int(acts["flags"][r]) & FLAG_AUTOCAST_ON))
-                    ac["unit"].extend(ids[t] for t in at_rows[r] if t in ids and died.get(t, loop + 1) >= loop)
+                    ac["unit"].extend(
+                        ids[t]
+                        for t in at_rows[r]
+                        if t in ids and died.get(t, loop + 1) >= loop
+                    )
                     ac["start"].append(len(ac["unit"]))
             elif kind in (ra.CMD_POINT, ra.CMD_UNIT):
                 tag = int(acts["target_tag"][r])
-                last = dict(last, target=int(acts["target"][r]), x=float(acts["tx"][r]), y=float(acts["ty"][r]),
-                            unit=ids.get(tag, -1) if tag else -1)
+                last = dict(
+                    last,
+                    target=int(acts["target"][r]),
+                    x=float(acts["tx"][r]),
+                    y=float(acts["ty"][r]),
+                    unit=ids.get(tag, -1) if tag else -1,
+                )
         while fi < F:
             cam[fi, k], sub[fi, k] = cams, subgroup
             for key, v in last.items():
@@ -244,10 +294,15 @@ def frame_memory(acts, slots, frame_loop, unit_tag, died):
             fi += 1
     out = dict(cam_save=cam, subgroup=sub)
     out.update({f"lc_{key}": v for key, v in lc.items()})
-    out.update(ac_loop=np.asarray(ac["loop"], np.int32), ac_player=np.asarray(ac["player"], np.int8),
-               ac_link=np.asarray(ac["link"], np.int16), ac_cmd=np.asarray(ac["cmd"], np.int16),
-               ac_on=np.asarray(ac["on"], np.bool_), ac_start=np.asarray(ac["start"], np.int64),
-               ac_unit=np.asarray(ac["unit"], np.int32))
+    out.update(
+        ac_loop=np.asarray(ac["loop"], np.int32),
+        ac_player=np.asarray(ac["player"], np.int8),
+        ac_link=np.asarray(ac["link"], np.int16),
+        ac_cmd=np.asarray(ac["cmd"], np.int16),
+        ac_on=np.asarray(ac["on"], np.bool_),
+        ac_start=np.asarray(ac["start"], np.int64),
+        ac_unit=np.asarray(ac["unit"], np.int32),
+    )
     return out
 
 
@@ -262,7 +317,10 @@ def selected_at(arrays, loop):
     if k < 0:
         return None
     ss, unit_tag = arrays["sel_start"], arrays["unit_tag"]
-    return {int(unit_tag[i]) - ENGINE_TAG_OFFSET for i in arrays["sel_id"][ss[k]:ss[k + 1]]}
+    return {
+        int(unit_tag[i]) - ENGINE_TAG_OFFSET
+        for i in arrays["sel_id"][ss[k] : ss[k + 1]]
+    }
 
 
 def validate(arrays, acts, slot, died=None, verbose=False):
@@ -300,6 +358,7 @@ def validate(arrays, acts, slot, died=None, verbose=False):
                            engine's own selection at the loop after the command
     """
     from . import command_join
+
     frame_loop, unit_tag = arrays["frame_loop"], arrays["unit_tag"]
     F = len(frame_loop)
     if died is None:
@@ -310,9 +369,20 @@ def validate(arrays, acts, slot, died=None, verbose=False):
     frames, at_rows, tr = replay(acts, slot, frame_loop, cmd_rows, after)
     ids = {int(t) - ENGINE_TAG_OFFSET: i for i, t in enumerate(unit_tag.tolist())}
     fs, u_id, u_type = arrays["frame_start"], arrays["u_id"], arrays["u_type"]
-    out = collections.Counter(cells=F * 10, grp_count=0, grp_nonempty=0, grp_leader=0, frames=F, sel=0,
-                              cmd=len(cmd_event), cmd_matched=len(cmd_rows), cmd_exact=0, cmd_subset=0, cmd_order=0,
-                              cmd_none=0)
+    out = collections.Counter(
+        cells=F * 10,
+        grp_count=0,
+        grp_nonempty=0,
+        grp_leader=0,
+        frames=F,
+        sel=0,
+        cmd=len(cmd_event),
+        cmd_matched=len(cmd_rows),
+        cmd_exact=0,
+        cmd_subset=0,
+        cmd_order=0,
+        cmd_none=0,
+    )
     out.update({f"join_{k}": v for k, v in join.items()})
     shown = collections.Counter()
     has_ui = "ui_grp_count" in arrays
@@ -323,7 +393,9 @@ def validate(arrays, acts, slot, died=None, verbose=False):
         out["cells"] = out["frames"] = 0
     for f in range(F if has_ui else 0):
         loop = int(frame_loop[f])
-        types = dict(zip(u_id[fs[f]:fs[f + 1]].tolist(), u_type[fs[f]:fs[f + 1]].tolist()))
+        types = dict(
+            zip(u_id[fs[f] : fs[f + 1]].tolist(), u_type[fs[f] : fs[f + 1]].tolist())
+        )
         snap = [[t for t in lst if died.get(t, loop + 1) > loop] for lst in frames[f]]
 
         def type_of(tag):
@@ -339,9 +411,11 @@ def validate(arrays, acts, slot, died=None, verbose=False):
                     out["grp_leader"] += 1
                 elif verbose and shown["grp"] < 10 and n != ui_count[f, g]:
                     shown["grp"] += 1
-                    print(f"  group {g} frame {f} loop {loop}: tracked {n} ui {int(ui_count[f, g])}")
+                    print(
+                        f"  group {g} frame {f} loop {loop}: tracked {n} ui {int(ui_count[f, g])}"
+                    )
         sel = sorted(type_of(t) for t in snap[SELECTION])
-        panel = sorted(ui_type[ui_start[f]:ui_start[f + 1]].tolist())
+        panel = sorted(ui_type[ui_start[f] : ui_start[f + 1]].tolist())
         if sel == panel:
             out["sel"] += 1
         elif verbose and shown["sel"] < 10:
@@ -353,8 +427,10 @@ def validate(arrays, acts, slot, died=None, verbose=False):
         if r < 0:
             continue
         loop = int(arrays["cmd_loop"][c])
-        recip = [rtag[int(i)] for i in cu[cs[c]:cs[c + 1]]]
-        sel = [t for t in at_rows[int(r)] if died.get(t, loop + 1) >= loop]  # a morph is logged as a death at its loop
+        recip = [rtag[int(i)] for i in cu[cs[c] : cs[c + 1]]]
+        sel = [
+            t for t in at_rows[int(r)] if died.get(t, loop + 1) >= loop
+        ]  # a morph is logged as a death at its loop
         if set(recip) == set(sel):
             out["cmd_exact"] += 1
             out["cmd_order"] += tuple(recip) == tuple(sel)
@@ -364,18 +440,28 @@ def validate(arrays, acts, slot, died=None, verbose=False):
             out["cmd_none"] += not (set(recip) & set(sel))
             if verbose and shown["cmd"] < 10:
                 shown["cmd"] += 1
-                print(f"  command {c} loop {loop} ability {int(arrays['cmd_abil'][c])} row {int(r)}: recipients {recip} tracked {sel}")
+                print(
+                    f"  command {c} loop {loop} ability {int(arrays['cmd_abil'][c])} row {int(r)}: recipients {recip} tracked {sel}"
+                )
     # the engine's own selection, per loop (player views extracted with the snapshots)
     mismatches = []
     if "sel_loop" in arrays:
-        rows = [int(r) for r in player_rows(acts, slot) if acts["kind"][r] in (ra.SELECT, ra.GROUP)]
+        rows = [
+            int(r)
+            for r in player_rows(acts, slot)
+            if acts["kind"][r] in (ra.SELECT, ra.GROUP)
+        ]
         by_loop = collections.OrderedDict()
         for r in rows:
             by_loop.setdefault(int(acts["loop"][r]), []).append(r)
         last_snap = int(arrays["sel_loop"][-1]) if len(arrays["sel_loop"]) else -1
         for loop, rs in by_loop.items():
             engine = selected_at(arrays, loop + 1)
-            if engine is None or loop + 1 > last_snap + 1 or loop + 1 > int(frame_loop[-1]):
+            if (
+                engine is None
+                or loop + 1 > last_snap + 1
+                or loop + 1 > int(frame_loop[-1])
+            ):
                 continue
             tracked = {t for t in after[rs[-1]] if died.get(t, loop + 2) > loop + 1}
             out["ev"] += 1
@@ -390,15 +476,26 @@ def validate(arrays, acts, slot, died=None, verbose=False):
                     kind = ra.KINDS[acts["kind"][r]]
                     mask = ragged(acts, "rem_start", "rem_pos", r)
                     added = ragged(acts, "add_start", "add_tag", r)
-                    desc.append(f"{kind} g{int(acts['group'][r])}" + (f" op{int(acts['group_op'][r])}" if kind == "GROUP" else "")
-                                + f" rm{int(acts['select_remove'][r])}{mask}" + (f" add{added}" if added else ""))
-                mismatches.append(dict(loop=loop, rows=desc, tracked_only=sorted(tracked - engine), engine_only=sorted(engine - tracked)))
+                    desc.append(
+                        f"{kind} g{int(acts['group'][r])}"
+                        + (f" op{int(acts['group_op'][r])}" if kind == "GROUP" else "")
+                        + f" rm{int(acts['select_remove'][r])}{mask}"
+                        + (f" add{added}" if added else "")
+                    )
+                mismatches.append(
+                    dict(
+                        loop=loop,
+                        rows=desc,
+                        tracked_only=sorted(tracked - engine),
+                        engine_only=sorted(engine - tracked),
+                    )
+                )
         for c in range(len(cmd_event)):
             loop = int(arrays["cmd_loop"][c])
             engine = selected_at(arrays, loop + 1)
             if engine is None:
                 continue
-            recip = set(rtag[int(i)] for i in cu[cs[c]:cs[c + 1]])
+            recip = set(rtag[int(i)] for i in cu[cs[c] : cs[c + 1]])
             out["cmd_sel"] += 1
             out["cmd_sel_eq"] += recip == engine
             out["cmd_sel_subset"] += recip < engine

@@ -40,11 +40,14 @@ from .tokenize import C_GRID
 MAGIC = b"FCACHE1\n"
 TEAM_KEYS = ("ent_team", "eff_team", "ply_team")
 PLAYER_KEYS = ("ent_pcode", "eff_pcode", "ply_pcode", "ent_src", "eff_src")
-LAYERS_SWAPPED = np.r_[3:6, 0:3, 6:C_GRID]  # visible / seen / creep are per player, first
+LAYERS_SWAPPED = np.r_[
+    3:6, 0:3, 6:C_GRID
+]  # visible / seen / creep are per player, first
 
 
 def _zstd():
     import zstandard
+
     return zstandard
 
 
@@ -55,22 +58,29 @@ def choose_starts(n_frames, per_game, length, rng, margin=8):
     if hi - lo < per_game:
         return np.arange(lo, max(lo, hi))
     edges = np.linspace(lo, hi, per_game + 1).astype(np.int64)
-    return np.array([rng.randint(a, max(a + 1, b)) for a, b in zip(edges[:-1], edges[1:])])
+    return np.array(
+        [rng.randint(a, max(a + 1, b)) for a, b in zip(edges[:-1], edges[1:])]
+    )
 
 
-choose_moments = lambda n_frames, per_game, rng, margin=8: choose_starts(n_frames, per_game, 1, rng, margin)
+choose_moments = lambda n_frames, per_game, rng, margin=8: choose_starts(
+    n_frames, per_game, 1, rng, margin
+)
 
 
 def write_game(path, windows, meta):
     """windows: an iterable of (t0, [loop per frame], [[p1, p2, combined] per frame]). Each window is
     compressed as soon as it's built and its frames dropped: uncompressed, a game's 300 windows are
-    13,500 frames (tens of GB across workers; holding them crashed the machine, 2026-11-01)."""
+    13,500 frames (tens of GB across workers; holding them crashed the machine, 2026-11-01).
+    """
     c = _zstd().ZstdCompressor(level=6)
     blobs, index, off, L = [], [], 0, 0
     for t0, loops, frames in windows:
         L = len(frames)
         b = c.compress(pickle.dumps({"frames": frames}, protocol=5))
-        index.append(dict(t0=int(t0), loops=[int(x) for x in loops], offset=off, size=len(b)))
+        index.append(
+            dict(t0=int(t0), loops=[int(x) for x in loops], offset=off, size=len(b))
+        )
         blobs.append(b)
         off += len(b)
         del frames
@@ -117,12 +127,13 @@ def swap_players(views):
 
 class FrameCache:
     """The entries (windows, or single moments) of one or more splits: index them from the headers;
-    read any entry; sample moments (a random frame of a random window) or whole windows."""
+    read any entry; sample moments (a random frame of a random window) or whole windows.
+    """
 
     def __init__(self, root, splits):
         self.root = root
-        self.items = []          # (path, absolute offset, size, game index)
-        self.games = []          # game ids
+        self.items = []  # (path, absolute offset, size, game index)
+        self.games = []  # game ids
         self.length = 1
         for split in splits:
             d = os.path.join(root, split)
@@ -134,7 +145,7 @@ class FrameCache:
                 p = os.path.join(d, name)
                 head, base = read_header(p)
                 gi = len(self.games)
-                self.games.append(name[:-len(".fcache")])
+                self.games.append(name[: -len(".fcache")])
                 entries = head.get("windows", head.get("moments", []))
                 self.length = head.get("length", 1)
                 self.items += [(p, base + m["offset"], m["size"], gi) for m in entries]
@@ -174,4 +185,5 @@ class FrameCache:
 
 def load_vocab(root):
     from . import vocab as vocab_mod
+
     return vocab_mod.Vocab(json.load(open(os.path.join(root, "vocab.json"))))

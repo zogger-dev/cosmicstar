@@ -1,6 +1,6 @@
 """Dumps static unit data (name, attributes, costs, supply) from the running game version.
 
-    python scripts/dump_unit_data.py --out data/worldmodel/unit_data.json
+python scripts/dump_unit_data.py --out data/worldmodel/unit_data.json
 """
 
 import argparse
@@ -25,20 +25,37 @@ def main():
     flags.FLAGS(sys.argv[:1])
     rc = run_configs.get()
     with rc.start(want_rgb=False) as c:
-        create = sc_pb.RequestCreateGame(local_map=sc_pb.LocalMap(map_path=os.path.abspath(args.map)), realtime=False)
+        create = sc_pb.RequestCreateGame(
+            local_map=sc_pb.LocalMap(map_path=os.path.abspath(args.map)), realtime=False
+        )
         create.player_setup.add(type=sc_pb.Participant)
-        create.player_setup.add(type=sc_pb.Computer, race=sc_common.Terran, difficulty=sc_pb.VeryEasy)
+        create.player_setup.add(
+            type=sc_pb.Computer, race=sc_common.Terran, difficulty=sc_pb.VeryEasy
+        )
         c.create_game(create)
-        c.join_game(sc_pb.RequestJoinGame(race=sc_common.Zerg, options=sc_pb.InterfaceOptions(raw=True)))
+        c.join_game(
+            sc_pb.RequestJoinGame(
+                race=sc_common.Zerg, options=sc_pb.InterfaceOptions(raw=True)
+            )
+        )
         data = c.data_raw()
     units = {}
     for u in data.units:
         if not u.name:
             continue
         attrs = list(u.attributes)
-        units[u.unit_id] = dict(name=u.name, race=u.race, attributes=attrs, structure=STRUCTURE in attrs,
-                                worker=u.unit_id in WORKERS, food=u.food_required, minerals=u.mineral_cost,
-                                vespene=u.vespene_cost, build_time=u.build_time, available=u.available)
+        units[u.unit_id] = dict(
+            name=u.name,
+            race=u.race,
+            attributes=attrs,
+            structure=STRUCTURE in attrs,
+            worker=u.unit_id in WORKERS,
+            food=u.food_required,
+            minerals=u.mineral_cost,
+            vespene=u.vespene_cost,
+            build_time=u.build_time,
+            available=u.available,
+        )
     json.dump(units, open(args.out, "w"), indent=1)
     print(f"{len(units)} unit types -> {args.out}")
 

@@ -24,6 +24,7 @@ Everything else is stored as is. Use:
 
 load() falls back to np.load for the older .npz files, which have the same interface.
 """
+
 import json
 import os
 
@@ -32,7 +33,7 @@ import numpy as np
 MAGIC = b"CSTATE1\n"
 VERSION = 1
 FIXED = 4096  # the engine's fixed-point scale for positions, hp, shield, energy, ...
-LEVEL = 9     # zstd level: 3.2 MB / 0.4 s on the median view; 19 gives ~12% less for 15x the time
+LEVEL = 9  # zstd level: 3.2 MB / 0.4 s on the median view; 19 gives ~12% less for 15x the time
 XOR_KEYS = ("vis", "creep")
 # unit columns stored without delta_id: u_id is needed to decode the others, and raw is its best
 # form anyway (the engine's row order is only half stable frame to frame, so row-aligned or
@@ -42,10 +43,12 @@ NO_DELTA = ("u_id",)
 
 def _zstd():
     import zstandard
+
     return zstandard
 
 
 # ------------------------------------------------------------------ the per-unit delta
+
 
 def prev_rows(u_id, frame_start):
     """For every unit row, the row of the same unit in the previous frame, -1 if none."""
@@ -67,7 +70,11 @@ def _to_ints(v):
     bit patterns otherwise). Returns (ints, how) with how in fixed | bits | int."""
     if v.dtype == np.float32:
         fixed = np.round(v.astype(np.float64) * FIXED)
-        if np.all(np.isfinite(v)) and np.abs(fixed).max(initial=0) < 2 ** 31 and np.array_equal((fixed / FIXED).astype(np.float32), v):
+        if (
+            np.all(np.isfinite(v))
+            and np.abs(fixed).max(initial=0) < 2**31
+            and np.array_equal((fixed / FIXED).astype(np.float32), v)
+        ):
             return fixed.astype(np.int32), "fixed"
         return v.view(np.int32), "bits"
     if v.dtype == np.float16:
@@ -95,7 +102,9 @@ def encode_delta(cols, prev):
     src = prev[has]
     for k, v in cols.items():
         d = v.copy()
-        d[has] = (v[has] - v[src]).astype(v.dtype, copy=False)  # numpy integer arithmetic wraps
+        d[has] = (v[has] - v[src]).astype(
+            v.dtype, copy=False
+        )  # numpy integer arithmetic wraps
         out[k] = d
     return out
 
@@ -119,20 +128,33 @@ def decode_delta(cols, prev, frame_start):
 
 # ------------------------------------------------------------------ save
 
+
 def save(path, arrays, level=LEVEL):
     """Writes the arrays to path (.cst), atomically. Returns the file size in bytes."""
     zstd = _zstd()
-    arrays = {k: (np.asarray(v) if not isinstance(v, np.ndarray) else v) for k, v in arrays.items()}
+    arrays = {
+        k: (np.asarray(v) if not isinstance(v, np.ndarray) else v)
+        for k, v in arrays.items()
+    }
     n_rows = len(arrays["u_id"]) if "u_id" in arrays else -1
-    unit_cols = [k for k, v in arrays.items() if k.startswith("u_") and v.ndim == 1 and len(v) == n_rows
-                 and k not in NO_DELTA and not k.endswith("_start")]
+    unit_cols = [
+        k
+        for k, v in arrays.items()
+        if k.startswith("u_")
+        and v.ndim == 1
+        and len(v) == n_rows
+        and k not in NO_DELTA
+        and not k.endswith("_start")
+    ]
     prev = prev_rows(arrays["u_id"], arrays["frame_start"]) if unit_cols else None
     unit_cols = set(unit_cols)
     header, blobs, offset = {}, [], 0
     comp = zstd.ZstdCompressor(level=level)
     for k, v in arrays.items():
         entry = dict(dtype=v.dtype.str, shape=list(v.shape), transform="raw")
-        if k in unit_cols:  # one column at a time: a long game's columns together are GBs
+        if (
+            k in unit_cols
+        ):  # one column at a time: a long game's columns together are GBs
             ints, how = _to_ints(v)
             stored = encode_delta({k: ints}, prev)[k]
             entry.update(transform="delta_id", how=how, stored_dtype=stored.dtype.str)
@@ -140,16 +162,23 @@ def save(path, arrays, level=LEVEL):
             stored = v.copy()
             stored[1:] ^= v[:-1]
             entry.update(transform="xor_frames", stored_dtype=stored.dtype.str)
-        elif (k.endswith("_start") and v.ndim == 1 and np.issubdtype(v.dtype, np.integer) and len(v)
-              and np.all(np.diff(v) >= 0)):
+        elif (
+            k.endswith("_start")
+            and v.ndim == 1
+            and np.issubdtype(v.dtype, np.integer)
+            and len(v)
+            and np.all(np.diff(v) >= 0)
+        ):
             d = np.diff(v, prepend=v[:1] * 0)
             d[0] = v[0]
-            stored = d.astype(np.int32) if d.max(initial=0) < 2 ** 31 else d
+            stored = d.astype(np.int32) if d.max(initial=0) < 2**31 else d
             entry.update(transform="diff", stored_dtype=stored.dtype.str)
         else:
             stored = v
             entry["stored_dtype"] = v.dtype.str
-        if stored.dtype.kind in "US":  # strings (meta, up_name): keep numpy's own encoding
+        if (
+            stored.dtype.kind in "US"
+        ):  # strings (meta, up_name): keep numpy's own encoding
             raw = stored.tobytes()
             entry["stored_dtype"] = stored.dtype.str
         else:
@@ -159,7 +188,9 @@ def save(path, arrays, level=LEVEL):
         offset += len(blob)
         header[k] = entry
         blobs.append(blob)
-    head = json.dumps(dict(version=VERSION, codec="zstd", level=level, arrays=header)).encode()
+    head = json.dumps(
+        dict(version=VERSION, codec="zstd", level=level, arrays=header)
+    ).encode()
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(MAGIC)
@@ -172,6 +203,7 @@ def save(path, arrays, level=LEVEL):
 
 
 # ------------------------------------------------------------------ load
+
 
 class StateFile:
     """A .cst file: arrays decoded on first access and cached. Mirrors NpzFile's interface
@@ -219,8 +251,14 @@ class StateFile:
 
     def _stored(self, k):
         e = self.arrays[k]
-        raw = self._dec.decompress(self._blobs[e["offset"]:e["offset"] + e["size"]], max_output_size=e["raw"])
-        return np.frombuffer(raw, dtype=np.dtype(e["stored_dtype"])).reshape(e["shape"]).copy()
+        raw = self._dec.decompress(
+            self._blobs[e["offset"] : e["offset"] + e["size"]], max_output_size=e["raw"]
+        )
+        return (
+            np.frombuffer(raw, dtype=np.dtype(e["stored_dtype"]))
+            .reshape(e["shape"])
+            .copy()
+        )
 
     def __getitem__(self, k):
         if k in self._cache:
@@ -244,7 +282,11 @@ class StateFile:
 
     def _decode_deltas(self):
         """All delta_id columns in one pass over the frames (one pass costs the same for 1 or 27)."""
-        names = [k for k, e in self.arrays.items() if e["transform"] == "delta_id" and k not in self._cache]
+        names = [
+            k
+            for k, e in self.arrays.items()
+            if e["transform"] == "delta_id" and k not in self._cache
+        ]
         if not names:
             return
         if self._prev is None:

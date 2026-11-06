@@ -23,6 +23,7 @@ effective number of components used, and in evaluation the prediction error with
 mean vs one sample vs the best of K samples vs the posterior (the oracle). A gap between the
 mean and best-of-K says the future was multimodal and the prior spans it.
 """
+
 import math
 
 import torch
@@ -50,7 +51,9 @@ def gauss_logp(z, mu, lv):
 
 def kl_gauss(mu_q, lv_q, mu_p, lv_p):
     """KL(N_q || N_p) for diagonal Gaussians, summed over the last dimension (nats)."""
-    return 0.5 * (lv_p - lv_q + (lv_q.exp() + (mu_q - mu_p) ** 2) / lv_p.exp() - 1).sum(-1)
+    return 0.5 * (lv_p - lv_q + (lv_q.exp() + (mu_q - mu_p) ** 2) / lv_p.exp() - 1).sum(
+        -1
+    )
 
 
 class MixturePrior(nn.Module):
@@ -62,18 +65,35 @@ class MixturePrior(nn.Module):
         super().__init__()
         self.K, self.d_z = K, d_z
         self.player = nn.Embedding(max_players, d)
-        self.net = nn.Sequential(nn.LayerNorm(2 * d), nn.Linear(2 * d, 4 * d), nn.GELU(), nn.Linear(4 * d, K + 2 * K * d_z))
+        self.net = nn.Sequential(
+            nn.LayerNorm(2 * d),
+            nn.Linear(2 * d, 4 * d),
+            nn.GELU(),
+            nn.Linear(4 * d, K + 2 * K * d_z),
+        )
         nn.init.zeros_(self.net[-1].bias)
-        with torch.no_grad():  # spread the components' means a little at init so they can specialize
+        with (
+            torch.no_grad()
+        ):  # spread the components' means a little at init so they can specialize
             self.net[-1].weight.mul_(0.5)
 
     def forward(self, cls, ply):
         """cls [B, d], ply [B, P, d] -> dict(logits [B, P, K], mu [B, P, K, d_z], lv [B, P, K, d_z])."""
         B, P, _ = ply.shape
-        x = torch.cat([cls[:, None].expand(-1, P, -1), ply + self.player.weight[:P][None].to(ply.dtype)], -1)
+        x = torch.cat(
+            [
+                cls[:, None].expand(-1, P, -1),
+                ply + self.player.weight[:P][None].to(ply.dtype),
+            ],
+            -1,
+        )
         o = self.net(x).float()
-        logits, rest = o[..., :self.K], o[..., self.K:].view(B, P, self.K, 2, self.d_z)
-        return dict(logits=logits, mu=rest[..., 0, :], lv=rest[..., 1, :].clamp(LV_MIN, LV_MAX))
+        logits, rest = o[..., : self.K], o[..., self.K :].view(
+            B, P, self.K, 2, self.d_z
+        )
+        return dict(
+            logits=logits, mu=rest[..., 0, :], lv=rest[..., 1, :].clamp(LV_MIN, LV_MAX)
+        )
 
 
 def mix_component_logp(z, p):
@@ -97,7 +117,7 @@ def mix_mean(p):
 @torch.no_grad()
 def mix_sample(p):
     """One z per (pair, player) from the mixture: pick a component, then its Gaussian."""
-    k = torch.distributions.Categorical(logits=p["logits"]).sample()                     # [B, P]
+    k = torch.distributions.Categorical(logits=p["logits"]).sample()  # [B, P]
     idx = k[..., None, None].expand(-1, -1, 1, p["mu"].shape[-1])
     mu, lv = p["mu"].gather(2, idx)[:, :, 0], p["lv"].gather(2, idx)[:, :, 0]
     return rsample(mu, lv)
@@ -110,7 +130,8 @@ def kl_mc(z, mu_q, lv_q, p):
 
 def usage(resp, mask):
     """How evenly the prior's components are used over a batch: (loss = log K - H(mean
-    responsibility), effective number of components = exp H). resp [B, P, K], mask [B, P]."""
+    responsibility), effective number of components = exp H). resp [B, P, K], mask [B, P].
+    """
     m = mask.float()[..., None]
     r = (resp * m).sum((0, 1)) / m.sum().clamp(min=1)
     H = -(r * (r + 1e-8).log()).sum()
@@ -119,12 +140,12 @@ def usage(resp, mask):
 
 def diversity(p, mask):
     """Repulsion between a state's component means: mean |cosine| over component pairs."""
-    mu = F.normalize(p["mu"], dim=-1)                                                   # [B, P, K, d_z]
+    mu = F.normalize(p["mu"], dim=-1)  # [B, P, K, d_z]
     K = mu.shape[-2]
     if K < 2:
         return mu.sum() * 0
-    cos = mu @ mu.transpose(-1, -2)                                                      # [B, P, K, K]
-    off = cos.abs().sum((-1, -2)) - K                                                    # minus the diagonal
+    cos = mu @ mu.transpose(-1, -2)  # [B, P, K, K]
+    off = cos.abs().sum((-1, -2)) - K  # minus the diagonal
     per = off / (K * (K - 1))
     m = mask.float()
     return (per * m).sum() / m.sum().clamp(min=1)
@@ -140,6 +161,7 @@ def active_units(post_mu, threshold=0.01):
 # ------------------------------------------------------------------ categorical latent (DreamerV3 style)
 # z = G one-hot variables with C classes each (32 x 32: ~2^160 states); logits [..., G, C].
 
+
 def cat_probs(logits, unimix=0.01):
     """Class probabilities with `unimix` of uniform mixed in: no class reaches probability 0,
     which keeps the KL bounded (DreamerV3)."""
@@ -150,7 +172,9 @@ def cat_probs(logits, unimix=0.01):
 def cat_sample(probs):
     """One-hot sample per variable with a straight-through gradient: forward is discrete, the
     backward pass flows through the probabilities."""
-    idx = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1).view(probs.shape[:-1])
+    idx = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1).view(
+        probs.shape[:-1]
+    )
     hard = F.one_hot(idx, probs.shape[-1]).to(probs.dtype)
     return hard + probs - probs.detach()
 
@@ -168,10 +192,13 @@ def cat_kl(p, q):
 def cat_kl_balanced(post, prior, w_dyn=0.5, w_rep=0.1, free=1.0):
     """DreamerV3's KL balancing with free bits: the prior learns to predict the posterior
     (w_dyn, posterior stopped), the posterior is only lightly pulled toward the prior (w_rep,
-    prior stopped); each side is free below `free` nats. Returns (charged [...], raw KL [...])."""
+    prior stopped); each side is free below `free` nats. Returns (charged [...], raw KL [...]).
+    """
     dyn = cat_kl(post.detach(), prior)
     rep = cat_kl(post, prior.detach())
-    return w_dyn * dyn.clamp(min=free) + w_rep * rep.clamp(min=free), cat_kl(post.detach(), prior.detach())
+    return w_dyn * dyn.clamp(min=free) + w_rep * rep.clamp(min=free), cat_kl(
+        post.detach(), prior.detach()
+    )
 
 
 class CategoricalPrior(nn.Module):
@@ -182,7 +209,12 @@ class CategoricalPrior(nn.Module):
         super().__init__()
         hidden = hidden or 2 * d_in
         self.G, self.C = groups, classes
-        self.net = nn.Sequential(nn.LayerNorm(d_in), nn.Linear(d_in, hidden), nn.GELU(), nn.Linear(hidden, groups * classes))
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_in),
+            nn.Linear(d_in, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, groups * classes),
+        )
 
     def forward(self, x):
         B, P, _ = x.shape

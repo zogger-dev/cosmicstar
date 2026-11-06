@@ -18,7 +18,8 @@ so globals read and write at every layer. A 2 x 2 merge leads to the next level.
 16: 3 ResNet blocks, then full attention over norm tokens, entities and globals (no lattice: too many
 tokens). The latent is [CLS, players, 16 x 16 norm tokens], taken out after the last block.
 
-Window sizes vary with clumps, so windows are padded by size group, never to the fullest window."""
+Window sizes vary with clumps, so windows are padded by size group, never to the fullest window.
+"""
 
 import torch
 import torch.nn.functional as F
@@ -31,10 +32,26 @@ from .encoder import mlp
 from .grid_latent import GridEncoder, cell_of, geometry
 from .pyramid import _rot
 
-TOP = 128                              # norm tokens per side at the finest level
+TOP = 128  # norm tokens per side at the finest level
 SLIDE = WIN // 2
-CAPS = (24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 4096)   # window tokens, by size group
-MAX_SCORES = 1.5e8                     # attention scores per head in one call: larger groups are split
+CAPS = (
+    24,
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256,
+    384,
+    512,
+    768,
+    1024,
+    1536,
+    2048,
+    4096,
+)  # window tokens, by size group
+MAX_SCORES = 1.5e8  # attention scores per head in one call: larger groups are split
 
 
 def attend(q, k, v, mask):
@@ -60,7 +77,8 @@ def window_of(ij, S, slide):
 @torch.no_grad()
 def window_sets(win, member, n_win):
     """win [B, T] window ids, member [B, T] -> the windows grouped by size, as a list of (tok, dest, frame, m):
-    flat token positions, their places in a rows x cap padded tensor, each row's frame, which places are real."""
+    flat token positions, their places in a rows x cap padded tensor, each row's frame, which places are real.
+    """
     B, T = win.shape
     idx = torch.nonzero(member.reshape(-1), as_tuple=True)[0]
     w = (win + torch.arange(B, device=win.device)[:, None] * n_win).reshape(-1)[idx]
@@ -81,7 +99,11 @@ def window_sets(win, member, n_win):
             row[chunk] = torch.arange(len(chunk), device=win.device)
             sel = row[win_s] >= 0
             dest = row[win_s[sel]] * cap + rank[sel]
-            m = torch.zeros(len(chunk) * cap, dtype=torch.bool, device=win.device).index_fill(0, dest, True).view(len(chunk), cap)
+            m = (
+                torch.zeros(len(chunk) * cap, dtype=torch.bool, device=win.device)
+                .index_fill(0, dest, True)
+                .view(len(chunk), cap)
+            )
             out.append((tok[sel], dest, uq[chunk] // n_win, m))
     return out
 
@@ -111,9 +133,17 @@ class WinAttend(nn.Module):
         m [rows, cap] -> the windows' tokens' results, in tok's order."""
         rows, cap = m.shape
         H, dh = qf.shape[1:]
-        pad = lambda t_: qf.new_zeros(rows * cap, H, dh).index_copy(0, dest, t_.index_select(0, tok)).view(rows, cap, H, dh)
-        r = attend(pad(qf).transpose(1, 2), torch.cat([pad(kf), gk[frame]], 1).transpose(1, 2),
-                   torch.cat([pad(vf), gv[frame]], 1).transpose(1, 2), torch.cat([m, gm[frame]], 1))
+        pad = (
+            lambda t_: qf.new_zeros(rows * cap, H, dh)
+            .index_copy(0, dest, t_.index_select(0, tok))
+            .view(rows, cap, H, dh)
+        )
+        r = attend(
+            pad(qf).transpose(1, 2),
+            torch.cat([pad(kf), gk[frame]], 1).transpose(1, 2),
+            torch.cat([pad(vf), gv[frame]], 1).transpose(1, 2),
+            torch.cat([m, gm[frame]], 1),
+        )
         return r.transpose(1, 2).reshape(rows * cap, H, dh).index_select(0, dest)
 
 
@@ -157,36 +187,102 @@ class QuadBlock(nn.Module):
         xe, xm = x[:, :n0], x[:, n0:]
         q, k, v = self.pre(xe, xm, ang)
         H, dh = q.shape[2:]
-        qf, kf, vf = q.reshape(B * T, H, dh), k.reshape(B * T, H, dh), v.reshape(B * T, H, dh)
+        qf, kf, vf = (
+            q.reshape(B * T, H, dh),
+            k.reshape(B * T, H, dh),
+            v.reshape(B * T, H, dh),
+        )
         gk, gv, gm = k[:, :g0], v[:, :g0], valid[:, :g0]
-        res = [self.win(qf, kf, vf, gk, gv, gm, tok, dest, frame, m) for tok, dest, frame, m in sets]
-        a = qf.new_zeros(B * T, H, dh).index_copy(0, torch.cat([s_[0] for s_ in sets]), torch.cat(res))
-        ga = self.glob(q[:, :g0].transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), valid).transpose(1, 2)
+        res = [
+            self.win(qf, kf, vf, gk, gv, gm, tok, dest, frame, m)
+            for tok, dest, frame, m in sets
+        ]
+        a = qf.new_zeros(B * T, H, dh).index_copy(
+            0, torch.cat([s_[0] for s_ in sets]), torch.cat(res)
+        )
+        ga = self.glob(
+            q[:, :g0].transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), valid
+        ).transpose(1, 2)
         a = torch.cat([ga, a.view(B, T, H, dh)[:, g0:]], 1).reshape(B, T, d)
         return self.post(xe, xm, a)
 
 
 class QuadEncoder(GridEncoder):
     """See the module docstring. Shares the token parts, the player index, the viewer code and the map
-    view embedding with GridEncoder. Reads the square lattice from grid_latent.map_views."""
+    view embedding with GridEncoder. Reads the square lattice from grid_latent.map_views.
+    """
 
-    def __init__(self, vocab, n_families, d=128, S=16, conv_blocks=3, attn_blocks=3, full_blocks=3, heads=4, mlp_ratio=4.0):
-        super().__init__(vocab, n_families, d, S=S, pool_level=0, mix_depth=0, heads=heads, mlp_ratio=mlp_ratio, levels=1)
-        for name in ("off_mu", "pool", "mix", "convs", "attn", "down", "_masks", "team", "norm", "vis_in"):
+    def __init__(
+        self,
+        vocab,
+        n_families,
+        d=128,
+        S=16,
+        conv_blocks=3,
+        attn_blocks=3,
+        full_blocks=3,
+        heads=4,
+        mlp_ratio=4.0,
+    ):
+        super().__init__(
+            vocab,
+            n_families,
+            d,
+            S=S,
+            pool_level=0,
+            mix_depth=0,
+            heads=heads,
+            mlp_ratio=mlp_ratio,
+            levels=1,
+        )
+        for name in (
+            "off_mu",
+            "pool",
+            "mix",
+            "convs",
+            "attn",
+            "down",
+            "_masks",
+            "team",
+            "norm",
+            "vis_in",
+        ):
             delattr(self, name)
         self.grids = [TOP >> i for i in range(4)]
         assert self.grids[-1] == S
         self.seed = nn.Linear(d, d)
-        self.convs = nn.ModuleList([nn.ModuleList([ResBlock(d) for _ in range(conv_blocks)]) for _ in self.grids])
-        self.attn = nn.ModuleList([nn.ModuleList([QuadBlock(d, heads, mlp_ratio) for _ in range(attn_blocks)]) for _ in self.grids[:-1]])
+        self.convs = nn.ModuleList(
+            [
+                nn.ModuleList([ResBlock(d) for _ in range(conv_blocks)])
+                for _ in self.grids
+            ]
+        )
+        self.attn = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [QuadBlock(d, heads, mlp_ratio) for _ in range(attn_blocks)]
+                )
+                for _ in self.grids[:-1]
+            ]
+        )
         self.down = nn.ModuleList([Down(d) for _ in self.grids[:-1]])
         self.lat_down = nn.ModuleList([Down(d) for _ in self.grids[:-2]])
-        self.full = nn.ModuleList([Block(d, heads, self.rope, mlp_ratio) for _ in range(full_blocks)])
+        self.full = nn.ModuleList(
+            [Block(d, heads, self.rope, mlp_ratio) for _ in range(full_blocks)]
+        )
 
     def compile_parts(self):
         """Everything that compiles. Not the window grouping (shapes that depend on the data) nor the loops over levels."""
         for m in self.modules():
-            if type(m).__name__ in ("ResBlock", "Down", "Block", "QuadPre", "QuadPost", "WinAttend", "GlobalAttend"):
+            if type(m).__name__ in (
+                "ResBlock",
+                "Down",
+                "Block",
+                "QuadPre",
+                "QuadPost",
+                "WinAttend",
+                "GlobalAttend",
+            ):
                 m.compile(dynamic=True)
         self.lattice = torch.compile(self.lattice, dynamic=True)
         self.seed_norm = torch.compile(self.seed_norm, dynamic=True)
@@ -195,17 +291,35 @@ class QuadEncoder(GridEncoder):
         """The norm tokens at the top level: their place and the mean of the lattice cells inside them."""
         B, D = L.shape[0], L.shape[1]
         size, centers = geometry(half, TOP)
-        seg = (cell_of(lp, size, TOP) + torch.arange(B, device=L.device)[:, None] * TOP * TOP).reshape(-1)
+        seg = (
+            cell_of(lp, size, TOP)
+            + torch.arange(B, device=L.device)[:, None] * TOP * TOP
+        ).reshape(-1)
         w = lv.reshape(-1).float()
-        tot = torch.zeros(B * TOP * TOP, D, device=L.device).index_add_(0, seg, L.permute(0, 2, 3, 1).reshape(-1, D).float() * w[:, None])
-        den = torch.zeros(B * TOP * TOP, device=L.device).index_add_(0, seg, w).clamp(min=1)
-        N0 = self.pos_mu(centers) + self.cell_q + self.seed((tot / den[:, None]).view(B, TOP * TOP, D).to(centers.dtype))
+        tot = torch.zeros(B * TOP * TOP, D, device=L.device).index_add_(
+            0, seg, L.permute(0, 2, 3, 1).reshape(-1, D).float() * w[:, None]
+        )
+        den = (
+            torch.zeros(B * TOP * TOP, device=L.device)
+            .index_add_(0, seg, w)
+            .clamp(min=1)
+        )
+        N0 = (
+            self.pos_mu(centers)
+            + self.cell_q
+            + self.seed((tot / den[:, None]).view(B, TOP * TOP, D).to(centers.dtype))
+        )
         return N0.view(B, TOP, TOP, D).permute(0, 3, 1, 2)
 
     def lattice(self, b):
         """The real map cells over the square: [B, d, Q, Q], after the minimap and the stem."""
         x = self.grid_static(b["lat_grid"])
-        h = self.grid_mix(F.gelu(self.grid_view(b["lat_view"]) + self.grid_code(b["view_player"])[:, :, None, None]))
+        h = self.grid_mix(
+            F.gelu(
+                self.grid_view(b["lat_view"])
+                + self.grid_code(b["view_player"])[:, :, None, None]
+            )
+        )
         return F.gelu(x.index_add(0, b["view_frame"], h.to(x.dtype)))
 
     def forward(self, b):
@@ -213,32 +327,47 @@ class QuadEncoder(GridEncoder):
         B, P, D = ply.shape
         dev = ply.device
         G = torch.cat([cls.expand(B, -1, -1).to(ply.dtype), ply], 1)
-        gmask = torch.cat([torch.ones(B, 1, dtype=torch.bool, device=dev), b["ply_mask"]], 1)
+        gmask = torch.cat(
+            [torch.ones(B, 1, dtype=torch.bool, device=dev), b["ply_mask"]], 1
+        )
         E = torch.cat([ent.to(ply.dtype), eff.to(ply.dtype)], 1)
         emask = torch.cat([b["ent_mask"], effmask], 1)
         epos = torch.cat([b["ent_pos"], effpos.to(b["ent_pos"].dtype)], 1).float()
         g0, ne = G.shape[1], E.shape[1]
         n0 = g0 + ne
         half = b["half"].float()
-        side = 2 * half.max(-1).values                                    # the square's side, map units
+        side = 2 * half.max(-1).values  # the square's side, map units
         ckpt = self.grad_ckpt and self.training and torch.is_grad_enabled()
         from torch.utils.checkpoint import checkpoint
-        run = (lambda f, *a: checkpoint(f, *a, use_reentrant=False)) if ckpt else (lambda f, *a: f(*a))
+
+        run = (
+            (lambda f, *a: checkpoint(f, *a, use_reentrant=False))
+            if ckpt
+            else (lambda f, *a: f(*a))
+        )
 
         def lat_geom(s, Q):
             """A lattice level of s map units per cell: cell centers (square-centered) and which are in the square."""
             c = (torch.arange(Q, device=dev, dtype=torch.float32) + 0.5) * s
-            xy = torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(1, Q * Q, 2)
+            xy = torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(
+                1, Q * Q, 2
+            )
             pos = xy - side[:, None, None] / 2
             return pos, (pos.abs() - s / 2 < side[:, None, None] / 2).all(-1)
 
-        L = self.lattice({k: b[k] for k in ("lat_grid", "lat_view", "view_player", "view_frame")})
+        L = self.lattice(
+            {k: b[k] for k in ("lat_grid", "lat_view", "view_player", "view_frame")}
+        )
         lp, lv = lat_geom(1, L.shape[-1])
         lm = lv.view(B, 1, L.shape[-2], L.shape[-1]).to(L.dtype)
         L = (L * lm).contiguous(memory_format=torch.channels_last)
         for blk in self.stem:
             L = run(blk, L, lm)
-        N = self.seed_norm(L, lp, lv, half).to(G.dtype).contiguous(memory_format=torch.channels_last)
+        N = (
+            self.seed_norm(L, lp, lv, half)
+            .to(G.dtype)
+            .contiguous(memory_format=torch.channels_last)
+        )
         one = N.new_ones(B, 1, 1, 1)
         s = 1
         gpos = torch.zeros(B, g0, 2, device=dev)
@@ -249,27 +378,56 @@ class QuadEncoder(GridEncoder):
             lp, lv = lat_geom(s, Q)
             size, centers = geometry(half, S)
             c = torch.arange(S, device=dev)
-            nij = torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(1, S * S, 2).expand(B, -1, -1)
-            ij = lambda pos: torch.stack([(pos[..., k] / size[:, None] + S / 2).floor().long().clamp(0, S - 1) for k in (0, 1)], -1)
+            nij = (
+                torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1)
+                .view(1, S * S, 2)
+                .expand(B, -1, -1)
+            )
+            ij = lambda pos: torch.stack(
+                [
+                    (pos[..., k] / size[:, None] + S / 2).floor().long().clamp(0, S - 1)
+                    for k in (0, 1)
+                ],
+                -1,
+            )
             tij = torch.cat([ij(epos), nij, ij(lp)], 1)
-            valid = torch.cat([gmask, emask, torch.ones(B, S * S, dtype=torch.bool, device=dev), lv], 1)
+            valid = torch.cat(
+                [gmask, emask, torch.ones(B, S * S, dtype=torch.bool, device=dev), lv],
+                1,
+            )
             member = valid.clone()
             member[:, :g0] = False
-            tij = torch.cat([torch.zeros(B, g0, 2, dtype=torch.long, device=dev), tij], 1)
+            tij = torch.cat(
+                [torch.zeros(B, g0, 2, dtype=torch.long, device=dev), tij], 1
+            )
             sets = []
             for slide in (0, SLIDE):
                 w, nw = window_of(tij, S, slide)
                 sets.append(window_sets(w, member, nw))
             pos = torch.cat([gpos, epos, centers.expand(B, -1, -1), lp], 1)
             ang = self.attn_rope.angles(pos)
-            x = torch.cat([G, E, N.permute(0, 2, 3, 1).reshape(B, S * S, D).to(G.dtype),
-                           L.permute(0, 2, 3, 1).reshape(B, Q * Q, D).to(G.dtype)], 1)
+            x = torch.cat(
+                [
+                    G,
+                    E,
+                    N.permute(0, 2, 3, 1).reshape(B, S * S, D).to(G.dtype),
+                    L.permute(0, 2, 3, 1).reshape(B, Q * Q, D).to(G.dtype),
+                ],
+                1,
+            )
             for j, blk in enumerate(self.attn[li]):
                 x = run(blk, x, g0, n0, ang, valid, sets[j % 2])
             G, E = x[:, :g0], x[:, g0:n0]
-            N = x[:, n0:n0 + S * S].view(B, S, S, D).permute(0, 3, 1, 2).contiguous(memory_format=torch.channels_last)
-            L = x[:, n0 + S * S:].view(B, Q, Q, D).permute(0, 3, 1, 2)
-            L = (L * lv.view(B, 1, Q, Q).to(L.dtype)).contiguous(memory_format=torch.channels_last)
+            N = (
+                x[:, n0 : n0 + S * S]
+                .view(B, S, S, D)
+                .permute(0, 3, 1, 2)
+                .contiguous(memory_format=torch.channels_last)
+            )
+            L = x[:, n0 + S * S :].view(B, Q, Q, D).permute(0, 3, 1, 2)
+            L = (L * lv.view(B, 1, Q, Q).to(L.dtype)).contiguous(
+                memory_format=torch.channels_last
+            )
             N = self.down[li](N)
             if li < len(self.lat_down):
                 L = self.lat_down[li](L)
@@ -280,13 +438,27 @@ class QuadEncoder(GridEncoder):
             N = run(blk, N, one)
         size, centers = geometry(half, S)
         y = torch.cat([G, E, N.permute(0, 2, 3, 1).reshape(B, S * S, D).to(G.dtype)], 1)
-        mask = torch.cat([gmask, emask, torch.ones(B, S * S, dtype=torch.bool, device=dev)], 1)
+        mask = torch.cat(
+            [gmask, emask, torch.ones(B, S * S, dtype=torch.bool, device=dev)], 1
+        )
         ang = self.rope.angles(torch.cat([gpos, epos, centers.expand(B, -1, -1)], 1))
         for blk in self.full:
             y = run(blk, y, mask, ang)
         keep = torch.cat([y[:, :g0], y[:, n0:]], 1)
         lat = self.lat_norm(keep)
-        lmask = torch.cat([gmask, torch.ones(B, S * S, dtype=torch.bool, device=dev)], 1)
+        lmask = torch.cat(
+            [gmask, torch.ones(B, S * S, dtype=torch.bool, device=dev)], 1
+        )
         lang = self.rope.angles(torch.cat([gpos, centers.expand(B, -1, -1)], 1))
-        return dict(tokens=lat, mask=lmask, ang=lang, cls=lat[:, 0], players=lat[:, 1:g0], P=P, cell_slice=(g0, g0 + S * S),
-                    cell_hw=(S, S), cell_size=size, centers=centers)
+        return dict(
+            tokens=lat,
+            mask=lmask,
+            ang=lang,
+            cls=lat[:, 0],
+            players=lat[:, 1:g0],
+            P=P,
+            cell_slice=(g0, g0 + S * S),
+            cell_hw=(S, S),
+            cell_size=size,
+            centers=centers,
+        )

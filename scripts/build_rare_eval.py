@@ -11,6 +11,7 @@ view), with fixed player codes. Written as one pickle: {"frames": [...], "tags":
 
     python scripts/build_rare_eval.py --cache data/worldmodel/frame_cache --out data/worldmodel/rare_eval.pkl
 """
+
 import argparse
 import collections
 import os
@@ -24,6 +25,7 @@ import numpy as np  # noqa: E402
 
 from cosmicstar.worldmodel import frame_cache as fc  # noqa: E402
 from cosmicstar.worldmodel.rare_eval import STATES, states_of  # noqa: E402
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -41,7 +43,9 @@ def main():
         if all(got[s] >= args.per_state for s in want):
             break
         w = c.read(int(i))
-        for fr in w[rng.randint(len(w))]:  # one frame of the entry (a window's frames are near-duplicates), its 3 views
+        for fr in w[
+            rng.randint(len(w))
+        ]:  # one frame of the entry (a window's frames are near-duplicates), its 3 views
             st = states_of(fr)
             need = [s for s in want if st[s] > 0 and got[s] < args.per_state]
             if not need:
@@ -52,7 +56,11 @@ def main():
                 if st[s] > 0:
                     got[s] += 1
                     units[s] += st[s]
-    pickle.dump(dict(frames=frames, tags=tags, counts=dict(units), frames_per_state=dict(got)), open(args.out, "wb"), protocol=5)
+    pickle.dump(
+        dict(frames=frames, tags=tags, counts=dict(units), frames_per_state=dict(got)),
+        open(args.out, "wb"),
+        protocol=5,
+    )
     print(f"{len(frames)} frames -> {args.out}")
     for s in want:
         print(f"  {s:18s} frames {got[s]:3d}  units {units[s]:6d}")

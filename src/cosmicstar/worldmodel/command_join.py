@@ -24,7 +24,11 @@ REPORTED = (ra.CMD, ra.CMD_POINT, ra.CMD_UNIT, ra.REPEAT)
 def same_target(acts, i, target, tx, ty, target_tag):
     t = acts["target"][i]
     if t == ra.TARGET_POINT:
-        return target == 1 and abs(tx - acts["tx"][i]) < 0.5 and abs(ty - acts["ty"][i]) < 0.5
+        return (
+            target == 1
+            and abs(tx - acts["tx"][i]) < 0.5
+            and abs(ty - acts["ty"][i]) < 0.5
+        )
     if t == ra.TARGET_UNIT:
         return target == 2 and target_tag == int(acts["target_tag"][i])
     if t == ra.TARGET_NONE:
@@ -36,14 +40,21 @@ def match(acts, slot, pov):
     """pov: a player-view state file's arrays (cmd_*, unit_tag). Returns (cmd_event[C]: the
     action-table row each engine command executes, -1 if none; stats)."""
     loops, abil, target = pov["cmd_loop"], pov["cmd_abil"], pov["cmd_target"]
-    tx, ty, tid, tags = pov["cmd_tx"], pov["cmd_ty"], pov["cmd_target_id"], pov["unit_tag"]
+    tx, ty, tid, tags = (
+        pov["cmd_tx"],
+        pov["cmd_ty"],
+        pov["cmd_target_id"],
+        pov["unit_tag"],
+    )
     by_loop = collections.defaultdict(list)
     for c in range(len(loops)):
         by_loop[int(loops[c])].append(c)
     used = np.zeros(len(loops), bool)
     cmd_event = np.full(len(loops), -1, np.int64)
     rows = np.where((acts["player"] == slot) & np.isin(acts["kind"], REPORTED))[0]
-    st = collections.Counter(engine=len(loops), rows=len(rows), cmd_rows=0, cmd_rows_matched=0)
+    st = collections.Counter(
+        engine=len(loops), rows=len(rows), cmd_rows=0, cmd_rows_matched=0
+    )
     last_api = None
     for i in rows:
         kind = acts["kind"][i]
@@ -57,7 +68,9 @@ def match(acts, slot, pov):
                 ok = last_api is not None and abil[c] == last_api
             else:
                 ttag = int(tags[tid[c]]) - (1 << 32) if target[c] == 2 else 0
-                ok = same_target(acts, i, int(target[c]), float(tx[c]), float(ty[c]), ttag)
+                ok = same_target(
+                    acts, i, int(target[c]), float(tx[c]), float(ty[c]), ttag
+                )
             if ok:
                 hit = c
                 break

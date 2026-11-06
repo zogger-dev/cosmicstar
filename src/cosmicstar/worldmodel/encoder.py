@@ -27,7 +27,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .tokenize import C_ENTITY, C_FORMAT, C_GROUPS, C_ORDER, C_PLAYER, C_VIS, N_CODE_EMB, N_REL
+from .tokenize import (
+    C_ENTITY,
+    C_FORMAT,
+    C_GROUPS,
+    C_ORDER,
+    C_PLAYER,
+    C_VIS,
+    N_CODE_EMB,
+    N_REL,
+)
 
 
 class Fourier(nn.Module):
@@ -35,7 +44,9 @@ class Fourier(nn.Module):
 
     def __init__(self, n_freq):
         super().__init__()
-        self.register_buffer("freqs", math.pi * 2.0 ** torch.arange(n_freq), persistent=False)
+        self.register_buffer(
+            "freqs", math.pi * 2.0 ** torch.arange(n_freq), persistent=False
+        )
 
     def out_dim(self, d_in):
         return d_in * 2 * len(self.freqs)
@@ -76,7 +87,9 @@ class MapFourier(nn.Module):
     def __init__(self, shortest=0.125, longest=512.0):
         super().__init__()
         n = int(round(math.log2(longest / shortest))) + 1
-        self.register_buffer("freqs", 2 * math.pi / (shortest * 2.0 ** torch.arange(n)), persistent=False)
+        self.register_buffer(
+            "freqs", 2 * math.pi / (shortest * 2.0 ** torch.arange(n)), persistent=False
+        )
 
     def out_dim(self, d_in):
         return d_in * 2 * len(self.freqs)
@@ -114,39 +127,61 @@ class WindowReadout(nn.Module):
         self.empty = nn.Parameter(torch.zeros(1, 1, d))
         self.layers = nn.ModuleList()
         for _ in range(depth):
-            self.layers.append(nn.ModuleDict(dict(
-                nq=nn.LayerNorm(d), nkv=nn.LayerNorm(d), q=nn.Linear(d, d), kv=nn.Linear(d, 2 * d),
-                o=nn.Linear(d, d), nf=nn.LayerNorm(d), ff=mlp(d, d, int(d * mlp_ratio)))))
+            self.layers.append(
+                nn.ModuleDict(
+                    dict(
+                        nq=nn.LayerNorm(d),
+                        nkv=nn.LayerNorm(d),
+                        q=nn.Linear(d, d),
+                        kv=nn.Linear(d, 2 * d),
+                        o=nn.Linear(d, d),
+                        nf=nn.LayerNorm(d),
+                        ff=mlp(d, d, int(d * mlp_ratio)),
+                    )
+                )
+            )
         self.norm = nn.LayerNorm(d)
         nn.init.normal_(self.empty, std=0.02)
 
     def bias(self, ent_xy, ent_mask, center, size):
         """[B, Q, K+1] additive attention bias: 0 inside the window, -(k*(r-1))^2 outside."""
-        rel = (ent_xy[:, None] - center[:, :, None]) / (size[:, :, None] / 2)  # [B, Q, K, 2]
+        rel = (ent_xy[:, None] - center[:, :, None]) / (
+            size[:, :, None] / 2
+        )  # [B, Q, K, 2]
         r = rel.abs().amax(-1)  # box distance in half-window units (<= 1 inside)
-        b = -(self.falloff * F.relu(r - 1)) ** 2
+        b = -((self.falloff * F.relu(r - 1)) ** 2)
         b = b.masked_fill(~ent_mask[:, None], float("-inf"))
-        return torch.cat([torch.zeros_like(b[..., :1]), b], -1)  # the empty token: always 0
+        return torch.cat(
+            [torch.zeros_like(b[..., :1]), b], -1
+        )  # the empty token: always 0
 
     def forward(self, ent_h, ent_xy, ent_mask, center, size, cells):
         """center, size: [B, Q, 2] normalized; cells: [B, 2] map cells per normalized unit."""
         B, Q = center.shape[:2]
-        size_cells = size * cells[:, None]  # physical size, so a cell means the same area on any map
+        size_cells = (
+            size * cells[:, None]
+        )  # physical size, so a cell means the same area on any map
         x = self.pos(center) + self.size_in(torch.log(size_cells / 16.0))
         kv_src = torch.cat([self.empty.expand(B, 1, -1), ent_h], 1)
-        bias = self.bias(ent_xy, ent_mask, center, size).to(x.dtype)[:, None]  # [B, 1, Q, K+1]
+        bias = self.bias(ent_xy, ent_mask, center, size).to(x.dtype)[
+            :, None
+        ]  # [B, 1, Q, K+1]
         H = self.heads
         for L in self.layers:
             q = L["q"](L["nq"](x)).view(B, Q, H, -1).transpose(1, 2)
             k, v = L["kv"](L["nkv"](kv_src)).view(B, -1, 2, H, q.shape[-1]).unbind(2)
-            a = F.scaled_dot_product_attention(q, k.transpose(1, 2), v.transpose(1, 2), attn_mask=bias)
+            a = F.scaled_dot_product_attention(
+                q, k.transpose(1, 2), v.transpose(1, 2), attn_mask=bias
+            )
             x = x + L["o"](a.transpose(1, 2).reshape(B, Q, -1))
             x = x + L["ff"](L["nf"](x))
         return self.norm(x)
 
 
 class StateEncoder(nn.Module):
-    def __init__(self, vocab, d=256, depth=6, heads=8, mlp_ratio=4.0, dropout=0.0, grid=16):
+    def __init__(
+        self, vocab, d=256, depth=6, heads=8, mlp_ratio=4.0, dropout=0.0, grid=16
+    ):
         super().__init__()
         self.d, self.grid = d, grid
         self.unit = nn.Embedding(vocab.n_units, d, padding_idx=0)
@@ -159,26 +194,41 @@ class StateEncoder(nn.Module):
         self.rel = nn.Embedding(N_REL, d)
         self.pos = PositionEncoder(d)
         self.ent_in = mlp(C_ENTITY, d)
-        self.grp_in = nn.Linear(C_GROUPS, d)  # control-group / selection membership bits
+        self.grp_in = nn.Linear(
+            C_GROUPS, d
+        )  # control-group / selection membership bits
         self.ord_in = mlp(C_ORDER, d)
         self.ply_in = mlp(C_PLAYER, d)
         self.time_ff = TimeFeatures()
         self.cls_in = mlp(self.time_ff.out_dim() + C_FORMAT, d)
         self.vis_in = mlp(C_VIS, d)
         self.cls = nn.Parameter(torch.zeros(1, 1, d))
-        layer = nn.TransformerEncoderLayer(d, heads, int(d * mlp_ratio), dropout, activation="gelu",
-                                           batch_first=True, norm_first=True)
+        layer = nn.TransformerEncoderLayer(
+            d,
+            heads,
+            int(d * mlp_ratio),
+            dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
         self.blocks = nn.TransformerEncoder(layer, depth, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(d)
         self.windows = WindowReadout(d, heads, self.pos)
         c = (torch.arange(grid) * 2 + 1) / grid - 1  # cell centers in [-1, 1]
         gy, gx = torch.meshgrid(c, c, indexing="ij")
-        self.register_buffer("grid_center", torch.stack([gx, gy], -1).view(-1, 2), persistent=False)
+        self.register_buffer(
+            "grid_center", torch.stack([gx, gy], -1).view(-1, 2), persistent=False
+        )
         nn.init.normal_(self.cls, std=0.02)
         nn.init.normal_(self.player_marker, std=0.02)
 
     def owner(self, b, g):
-        return self.team(b[f"{g}_team"]) + self.pcode(b[f"{g}_pcode"]) + self.rel(b[f"{g}_rel"])
+        return (
+            self.team(b[f"{g}_team"])
+            + self.pcode(b[f"{g}_pcode"])
+            + self.rel(b[f"{g}_rel"])
+        )
 
     def place(self, b, g):
         """A token's position embedding (subclasses may read map units, <g>_pos, instead)."""
@@ -187,8 +237,14 @@ class StateEncoder(nn.Module):
     def entity_tokens(self, b, g="ent"):
         """Input embedding of entities from their features (tokenize.entity_features). Also
         used by the action encoder for the units an action points at."""
-        tok = (self.unit(b[f"{g}_type"]) + self.owner(b, g) + self.place(b, g)
-               + self.ent_in(b[f"{g}_num"]) + self.ability(b[f"{g}_produce"]) + self.grp_in(b[f"{g}_groups"]))
+        tok = (
+            self.unit(b[f"{g}_type"])
+            + self.owner(b, g)
+            + self.place(b, g)
+            + self.ent_in(b[f"{g}_num"])
+            + self.ability(b[f"{g}_produce"])
+            + self.grp_in(b[f"{g}_groups"])
+        )
         if self.use_orders:  # off for checkpoints trained before orders were extracted
             tok = tok + self.ability(b[f"{g}_order"]) + self.ord_in(b[f"{g}_ord"])
         return tok
@@ -202,11 +258,28 @@ class StateEncoder(nn.Module):
         B = b["time"].shape[0]
         ent = self.entity_tokens(b)
         ups = b["ply_ups"] @ self.upgrade.weight  # sum of the done upgrades' embeddings
-        ply = (self.player_marker + self.race(b["ply_race"]) + self.owner(b, "ply")
-               + self.ply_in(b["ply_num"]) + ups)
-        cls = self.cls + self.cls_in(torch.cat([self.time_ff(b["time"]), b["format"]], -1))[:, None]
+        ply = (
+            self.player_marker
+            + self.race(b["ply_race"])
+            + self.owner(b, "ply")
+            + self.ply_in(b["ply_num"])
+            + ups
+        )
+        cls = (
+            self.cls
+            + self.cls_in(torch.cat([self.time_ff(b["time"]), b["format"]], -1))[
+                :, None
+            ]
+        )
         tokens = torch.cat([cls, ply, ent], 1)
-        mask = torch.cat([torch.ones(B, 1, dtype=torch.bool, device=ent.device), b["ply_mask"], b["ent_mask"]], 1)
+        mask = torch.cat(
+            [
+                torch.ones(B, 1, dtype=torch.bool, device=ent.device),
+                b["ply_mask"],
+                b["ent_mask"],
+            ],
+            1,
+        )
         return tokens, mask
 
     grad_ckpt = False  # recompute layer activations in backward (much less memory for many frames)
@@ -216,14 +289,22 @@ class StateEncoder(nn.Module):
         x, mask = self.embed(b)
         if self.grad_ckpt and self.training and torch.is_grad_enabled():
             from torch.utils.checkpoint import checkpoint
+
             for layer in self.blocks.layers:
-                x = checkpoint(layer, x, src_key_padding_mask=~mask, use_reentrant=False)
+                x = checkpoint(
+                    layer, x, src_key_padding_mask=~mask, use_reentrant=False
+                )
             x = self.norm(x)
         else:
             x = self.norm(self.blocks(x, src_key_padding_mask=~mask))
         P = b["ply_mask"].shape[1]
-        out = dict(cls=x[:, 0], players=x[:, 1:1 + P], player_mask=b["ply_mask"],
-                   units=x[:, 1 + P:], unit_mask=b["ent_mask"])
+        out = dict(
+            cls=x[:, 0],
+            players=x[:, 1 : 1 + P],
+            player_mask=b["ply_mask"],
+            units=x[:, 1 + P :],
+            unit_mask=b["ent_mask"],
+        )
         B = x.shape[0]
         center = self.grid_center.expand(B, -1, -1)
         size = torch.full_like(center, 2.0 / self.grid)
@@ -236,4 +317,6 @@ class StateEncoder(nn.Module):
 
     def read_windows(self, out, b, center, size):
         """Window slots for any (center, size) queries, reusing an encoded frame."""
-        return self.windows(out["units"], b["ent_xy"], out["unit_mask"], center, size, b["cells"])
+        return self.windows(
+            out["units"], b["ent_xy"], out["unit_mask"], center, size, b["cells"]
+        )

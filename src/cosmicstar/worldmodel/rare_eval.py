@@ -12,9 +12,13 @@ import torch
 from .grid_latent import IDX, NUM_BIN, NUM_CAT
 
 FLAGS = ("blip", "cloaked", "burrowed", "halluc", "engaged", "has_add_on")
-CATS = {"cloak:cloaked": ("cloak", "cloak_cloaked"), "cloak:detected": ("cloak", "cloak_detected"),
-        "inside:passenger": ("inside", "passenger"), "inside:in_gas": ("inside", "in_gas"),
-        "display:hidden": ("display", "display_hidden")}
+CATS = {
+    "cloak:cloaked": ("cloak", "cloak_cloaked"),
+    "cloak:detected": ("cloak", "cloak_detected"),
+    "inside:passenger": ("inside", "passenger"),
+    "inside:in_gas": ("inside", "in_gas"),
+    "display:hidden": ("display", "display_hidden"),
+}
 STATES = list(FLAGS) + list(CATS) + ["contained"]
 
 
@@ -44,8 +48,12 @@ class RareCounts:
         okb = ok.bool()
 
         def put(state, pred, truth):
-            self.c[state] += [float((pred & truth & okb).sum()), float((pred & ~truth & okb).sum()),
-                              float((~pred & truth & okb).sum())]
+            self.c[state] += [
+                float((pred & truth & okb).sum()),
+                float((pred & ~truth & okb).sum()),
+                float((~pred & truth & okb).sum()),
+            ]
+
         pb, tb = P_("bin") > 0, T_("bin") > 0.5
         for s in FLAGS:
             j = NUM_BIN.index(s)
@@ -56,7 +64,11 @@ class RareCounts:
         pr_t = out["_ptr_t"]
         has = pr_t < N
         hit = P_("ptr").argmax(-1) == pr_t
-        self.c["contained"] += [float((hit & has & okb).sum()), float((~hit & has & okb).sum()), float((~hit & has & okb).sum())]
+        self.c["contained"] += [
+            float((hit & has & okb).sum()),
+            float((~hit & has & okb).sum()),
+            float((~hit & has & okb).sum()),
+        ]
 
     def summary(self):
         """state -> (recall, precision, F1, units)."""

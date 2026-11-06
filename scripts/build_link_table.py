@@ -26,7 +26,9 @@ import re
 
 ABILITY = re.compile(r'<ability id="([^"]+)" index="(\d+)"')
 PRODUCES = re.compile(r'<(unit|upgrade) id="([^"]+)" ability="(\d+)" index="(\d+)"')
-UNIT_LINK = re.compile(r'<unit id="([^"]+)">\s*<meta [^>]*\bindex="(\d+)"')  # the file's own unit
+UNIT_LINK = re.compile(
+    r'<unit id="([^"]+)">\s*<meta [^>]*\bindex="(\d+)"'
+)  # the file's own unit
 
 
 def export_units(d):
@@ -61,7 +63,8 @@ def name_produced(items, family, makes, abil, loose=False, taken=()):
     enough: score each candidate by how many items sit at the same button (by button name or by
     the API's "made by"), and prefer abilities named after the producing unit.
     loose: also accept a button name that merely contains the item's name (the Nuke's button is
-    NukeArm); only used for links nothing else names, since it confuses e.g. CreepTumorBuild."""
+    NukeArm); only used for links nothing else names, since it confuses e.g. CreepTumorBuild.
+    """
     producers = {p for p, _, _, _ in items}
     cands = {n for n in family if any(n.startswith(p) for p in producers if p)}
 
@@ -72,17 +75,28 @@ def name_produced(items, family, makes, abil, loose=False, taken=()):
         a = abil.get(makes.get((kind, name)))
         if a and a.get("link_name"):
             cands.add(a["link_name"])
-        if loose:  # melee abilities only: campaign ones (SpectreNuke) are marked unavailable
-            cands.update(n for n, f in family.items()
-                         if same(f.get(cmd, {}).get("button_name"), name) and f[cmd].get("available"))
+        if (
+            loose
+        ):  # melee abilities only: campaign ones (SpectreNuke) are marked unavailable
+            cands.update(
+                n
+                for n, f in family.items()
+                if same(f.get(cmd, {}).get("button_name"), name)
+                and f[cmd].get("available")
+            )
 
     def score(n):
         hit = 0
         for _, kind, name, cmd in items:
             b = family[n].get(cmd)
-            if b and (same(b.get("button_name"), name) or b["ability_id"] == makes.get((kind, name))):
+            if b and (
+                same(b.get("button_name"), name)
+                or b["ability_id"] == makes.get((kind, name))
+            ):
                 hit += 1
-        own = hit > 0 and any(n.startswith(p) for p in producers if p)  # the producer's own ability
+        own = hit > 0 and any(
+            n.startswith(p) for p in producers if p
+        )  # the producer's own ability
         return own, hit
 
     best = sorted(cands - set(taken), key=lambda n: (score(n), n), reverse=True)
@@ -92,7 +106,9 @@ def name_produced(items, family, makes, abil, loose=False, taken=()):
 def build_table(export, rules):
     abil = {a["ability_id"]: a for a in rules["abilities"]}
     makes = {("unit", u["name"]): u.get("ability_id") for u in rules["units"]}
-    makes.update({("upgrade", u["name"]): u.get("ability_id") for u in rules["upgrades"]})
+    makes.update(
+        {("upgrade", u["name"]): u.get("ability_id") for u in rules["upgrades"]}
+    )
     family = collections.defaultdict(dict)  # link_name -> {link_index: AbilityData}
     for a in abil.values():
         if a.get("link_name"):
@@ -108,11 +124,19 @@ def build_table(export, rules):
             if produced:
                 unnamed.append((link, produced))
             continue  # otherwise only campaign / co-op things the API doesn't know
-        if direct and produced and name_produced(produced, family, makes, abil) not in (None, name):
-            problems.append(f"link {link}: named {name} but produces like {name_produced(produced, family, makes, abil)}")
+        if (
+            direct
+            and produced
+            and name_produced(produced, family, makes, abil) not in (None, name)
+        ):
+            problems.append(
+                f"link {link}: named {name} but produces like {name_produced(produced, family, makes, abil)}"
+            )
         links[link] = name
     for link, produced in unnamed:  # last resort, among the names no other link has
-        name = name_produced(produced, family, makes, abil, loose=True, taken=links.values())
+        name = name_produced(
+            produced, family, makes, abil, loose=True, taken=links.values()
+        )
         if name:
             links[link] = name
     taken = collections.defaultdict(list)
@@ -127,7 +151,12 @@ def build_table(export, rules):
             problems.append(f"link {link}: {name} has no API ability")
             continue
         for idx, a in family[name].items():
-            commands[f"{link}:{idx}"] = dict(name=name, index=idx, api=a["ability_id"], button=a.get("button_name", ""))
+            commands[f"{link}:{idx}"] = dict(
+                name=name,
+                index=idx,
+                api=a["ability_id"],
+                button=a.get("button_name", ""),
+            )
     return links, commands, problems
 
 
@@ -148,7 +177,9 @@ def main():
         build = index[key]["base_build"]
         rules = json.load(open(os.path.join(args.rules, key + ".json")))
         links, commands, problems = build_table(export_links(d), rules)
-        table[key] = dict(base_build=build, links=links, commands=commands, units=export_units(d))
+        table[key] = dict(
+            base_build=build, links=links, commands=commands, units=export_units(d)
+        )
         # cross-check against the replay votes for this build
         checked = disagree = 0
         api_name = {a["ability_id"]: a["link_name"] for a in rules["abilities"]}
@@ -160,9 +191,13 @@ def main():
             c = commands.get(f"{link}:{cmd}")
             if c is None or c["api"] != t["api"]:
                 disagree += 1
-                problems.append(f"vote {vkey}: replays say {api_name.get(t['api'])} ({t['votes']} votes), "
-                                f"export says {c and c['name']}")
-        print(f"{key}: {len(links)} links, {len(commands)} commands; votes checked {checked}, disagree {disagree}")
+                problems.append(
+                    f"vote {vkey}: replays say {api_name.get(t['api'])} ({t['votes']} votes), "
+                    f"export says {c and c['name']}"
+                )
+        print(
+            f"{key}: {len(links)} links, {len(commands)} commands; votes checked {checked}, disagree {disagree}"
+        )
         for p in problems:
             print("   ", p)
     json.dump(table, open(args.out, "w"), indent=0)

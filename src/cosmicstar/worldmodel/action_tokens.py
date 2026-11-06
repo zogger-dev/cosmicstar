@@ -38,22 +38,62 @@ LINKS = "data/worldmodel/ability_links.json"
 RULES = "data/worldmodel/rules"
 ENGINE_TAG_OFFSET = 1 << 32
 
-(A_PAD, A_CMD, A_REISSUE, A_SELECT, A_GROUP, A_CAMERA, A_CAMERA_SAVE, A_PING, A_TRADE,
- A_REQUEST, A_FULFILL, A_CANCEL, A_LEAVE) = range(13)
+(
+    A_PAD,
+    A_CMD,
+    A_REISSUE,
+    A_SELECT,
+    A_GROUP,
+    A_CAMERA,
+    A_CAMERA_SAVE,
+    A_PING,
+    A_TRADE,
+    A_REQUEST,
+    A_FULFILL,
+    A_CANCEL,
+    A_LEAVE,
+) = range(13)
 N_ACT_KINDS = 13
 FAM_PAD, FAM_UNK, FAM_SMART, FAM_FIRST = 0, 1, 2, 3
-N_BUTTONS = 32                   # button index + 1 (0 = no ability)
-TK_NONE, TK_POINT, TK_UNIT, TK_SNAPSHOT = ra.TARGET_NONE, ra.TARGET_POINT, ra.TARGET_UNIT, ra.TARGET_SNAPSHOT
+N_BUTTONS = 32  # button index + 1 (0 = no ability)
+TK_NONE, TK_POINT, TK_UNIT, TK_SNAPSHOT = (
+    ra.TARGET_NONE,
+    ra.TARGET_POINT,
+    ra.TARGET_UNIT,
+    ra.TARGET_SNAPSHOT,
+)
 N_GROUPS, N_GROUP_OPS, N_REMOVE, N_SUBGROUPS = 12, 7, 5, 33  # +1 each: 0 = n/a
-BURST = 6                        # loops: plain REPEATs this close to the last press are the same burst
-MAX_SELECTED = 32                # pointers kept per SELECT (the count keeps the full number)
-C_ACTION = 12                    # numeric features per token (see GameActions.window)
+BURST = 6  # loops: plain REPEATs this close to the last press are the same burst
+MAX_SELECTED = 32  # pointers kept per SELECT (the count keeps the full number)
+C_ACTION = 12  # numeric features per token (see GameActions.window)
 
-TOKEN_COLS = dict(loop=np.int32, player=np.int8, kind=np.int8, family=np.int32, button=np.int8,
-                  queued=np.bool_, smart=np.bool_, minimap=np.bool_, presses=np.int16,
-                  tkind=np.int8, x=np.float32, y=np.float32, uid=np.int32, snap=np.int64, snap_raw=np.int64,
-                  group=np.int8, gop=np.int8, remove=np.int8, subgroup=np.int8, n_add=np.int16, n_rem=np.int16,
-                  recipient=np.int8, minerals=np.int32, gas=np.int32, sel_start=np.int64)
+TOKEN_COLS = dict(
+    loop=np.int32,
+    player=np.int8,
+    kind=np.int8,
+    family=np.int32,
+    button=np.int8,
+    queued=np.bool_,
+    smart=np.bool_,
+    minimap=np.bool_,
+    presses=np.int16,
+    tkind=np.int8,
+    x=np.float32,
+    y=np.float32,
+    uid=np.int32,
+    snap=np.int64,
+    snap_raw=np.int64,
+    group=np.int8,
+    gop=np.int8,
+    remove=np.int8,
+    subgroup=np.int8,
+    n_add=np.int16,
+    n_rem=np.int16,
+    recipient=np.int8,
+    minerals=np.int32,
+    gas=np.int32,
+    sel_start=np.int64,
+)
 
 
 class ActionVocab:
@@ -73,9 +113,18 @@ class ActionVocab:
         """The link tables for a game: its own ruleset, or another ruleset of the same build."""
         t = self.table.get(meta.get("ruleset"))
         if t is None:
-            t = next((v for v in self.table.values() if v["base_build"] == meta.get("base_build")), None)
+            t = next(
+                (
+                    v
+                    for v in self.table.values()
+                    if v["base_build"] == meta.get("base_build")
+                ),
+                None,
+            )
         if t is None:
-            raise KeyError(f"no ability table for {meta.get('ruleset')} (build {meta.get('base_build')})")
+            raise KeyError(
+                f"no ability table for {meta.get('ruleset')} (build {meta.get('base_build')})"
+            )
         return t
 
     def unit_ids(self, meta):
@@ -99,10 +148,18 @@ class GameActions:
         links = {int(k): v for k, v in table["links"].items()}
         unit_links = {int(k): v for k, v in table["units"].items()}
         name_to_api = avocab.unit_ids(frames.meta)
-        tag_to_uid = {int(t): i for i, t in enumerate(frames.unit_tag)} if frames.unit_tag is not None else {}
+        tag_to_uid = (
+            {int(t): i for i, t in enumerate(frames.unit_tag)}
+            if frames.unit_tag is not None
+            else {}
+        )
 
         def uid_of(replay_tag):
-            return tag_to_uid.get(int(replay_tag) + ENGINE_TAG_OFFSET, -1) if replay_tag else -1
+            return (
+                tag_to_uid.get(int(replay_tag) + ENGINE_TAG_OFFSET, -1)
+                if replay_tag
+                else -1
+            )
 
         def snap_type(link):
             """(vocab index, raw API id) of a fogged target's unit type."""
@@ -115,8 +172,23 @@ class GameActions:
 
         def add(**kw):
             for k, dt in TOKEN_COLS.items():
-                default = np.nan if k in ("x", "y") else (False if dt is np.bool_ else 1 if k == "presses"
-                                                          else 0 if k in ("family", "button", "snap", "snap_raw") else -1)
+                default = (
+                    np.nan
+                    if k in ("x", "y")
+                    else (
+                        False
+                        if dt is np.bool_
+                        else (
+                            1
+                            if k == "presses"
+                            else (
+                                0
+                                if k in ("family", "button", "snap", "snap_raw")
+                                else -1
+                            )
+                        )
+                    )
+                )
                 cols[k].append(kw.get(k, default))
             cols["sel_start"][-1] = len(sel)
             return len(cols["kind"]) - 1
@@ -139,55 +211,126 @@ class GameActions:
             k, L, p = int(kind[i]), int(loop[i]), int(player[i])
             prev = last_raw.get(p)
             if k == ra.CMD:
-                link, cmd, fl = int(d["abil_link"][i]), int(d["abil_cmd"][i]), int(d["flags"][i])
-                ability = dict(family=FAM_SMART if link < 0 else self_family(avocab, links, link),
-                               button=0 if link < 0 else min(cmd, N_BUTTONS - 1) + 1,
-                               queued=bool(fl & ra.FLAG_QUEUED), smart=bool(fl & ra.FLAG_SMART),
-                               minimap=bool(fl & ra.FLAG_MINIMAP))
+                link, cmd, fl = (
+                    int(d["abil_link"][i]),
+                    int(d["abil_cmd"][i]),
+                    int(d["flags"][i]),
+                )
+                ability = dict(
+                    family=FAM_SMART if link < 0 else self_family(avocab, links, link),
+                    button=0 if link < 0 else min(cmd, N_BUTTONS - 1) + 1,
+                    queued=bool(fl & ra.FLAG_QUEUED),
+                    smart=bool(fl & ra.FLAG_SMART),
+                    minimap=bool(fl & ra.FLAG_MINIMAP),
+                )
                 last_cmd[p] = dict(ability, **target(i))
                 last_tok[p] = add(loop=L, player=p, kind=A_CMD, **last_cmd[p])
                 press_loop[p] = L
             elif k in (ra.CMD_POINT, ra.CMD_UNIT):
                 base = last_cmd.get(p, dict(family=FAM_UNK, button=0))
-                last_cmd[p] = dict({kk: v for kk, v in base.items() if kk not in ("tkind", "x", "y", "uid", "snap")},
-                                   **target(i), minimap=bool(int(d["flags"][i]) & ra.FLAG_MINIMAP) or base.get("minimap", False))
+                last_cmd[p] = dict(
+                    {
+                        kk: v
+                        for kk, v in base.items()
+                        if kk not in ("tkind", "x", "y", "uid", "snap")
+                    },
+                    **target(i),
+                    minimap=bool(int(d["flags"][i]) & ra.FLAG_MINIMAP)
+                    or base.get("minimap", False),
+                )
                 last_tok[p] = add(loop=L, player=p, kind=A_REISSUE, **last_cmd[p])
                 press_loop[p], awaiting[p] = L, L
             elif k == ra.REPEAT:
                 if awaiting.get(p) == L and prev in (ra.CMD_POINT, ra.CMD_UNIT):
-                    awaiting[p] = None  # the REPEAT that fires a retarget: already one token
-                elif p in last_tok and prev in (ra.CMD, ra.REPEAT, ra.CMD_POINT, ra.CMD_UNIT) \
-                        and L - press_loop.get(p, -BURST - 1) <= BURST:
+                    awaiting[p] = (
+                        None  # the REPEAT that fires a retarget: already one token
+                    )
+                elif (
+                    p in last_tok
+                    and prev in (ra.CMD, ra.REPEAT, ra.CMD_POINT, ra.CMD_UNIT)
+                    and L - press_loop.get(p, -BURST - 1) <= BURST
+                ):
                     cols["presses"][last_tok[p]] += 1  # held / mashed hotkey
                 else:
-                    last_tok[p] = add(loop=L, player=p, kind=A_REISSUE, **last_cmd.get(p, dict(family=FAM_UNK)))
+                    last_tok[p] = add(
+                        loop=L,
+                        player=p,
+                        kind=A_REISSUE,
+                        **last_cmd.get(p, dict(family=FAM_UNK)),
+                    )
                 press_loop[p] = L
             elif k == ra.SELECT:
-                tags = d["add_tag"][add_start[i]:add_start[i + 1]]
+                tags = d["add_tag"][add_start[i] : add_start[i + 1]]
                 n_rem = rem_start[i + 1] - rem_start[i]
-                add(loop=L, player=p, kind=A_SELECT, group=int(d["group"][i]) + 1,
-                    remove=int(d["select_remove"][i]) + 1, subgroup=min(int(d["subgroup"][i]), N_SUBGROUPS - 2) + 1, n_add=len(tags), n_rem=n_rem)
+                add(
+                    loop=L,
+                    player=p,
+                    kind=A_SELECT,
+                    group=int(d["group"][i]) + 1,
+                    remove=int(d["select_remove"][i]) + 1,
+                    subgroup=min(int(d["subgroup"][i]), N_SUBGROUPS - 2) + 1,
+                    n_add=len(tags),
+                    n_rem=n_rem,
+                )
                 sel.extend(uid_of(t) for t in tags[:MAX_SELECTED])
             elif k == ra.GROUP:
-                add(loop=L, player=p, kind=A_GROUP, group=int(d["group"][i]) + 1, gop=int(d["group_op"][i]) + 1)
+                add(
+                    loop=L,
+                    player=p,
+                    kind=A_GROUP,
+                    group=int(d["group"][i]) + 1,
+                    gop=int(d["group_op"][i]) + 1,
+                )
             elif k == ra.CAMERA:
-                add(loop=L, player=p, kind=A_CAMERA, x=float(d["cam_x"][i]), y=float(d["cam_y"][i]))
+                add(
+                    loop=L,
+                    player=p,
+                    kind=A_CAMERA,
+                    x=float(d["cam_x"][i]),
+                    y=float(d["cam_y"][i]),
+                )
             elif k == ra.CAMERA_SAVE:
-                add(loop=L, player=p, kind=A_CAMERA_SAVE, group=int(d["group"][i]) + 1,
-                    x=float(d["cam_x"][i]), y=float(d["cam_y"][i]))
+                add(
+                    loop=L,
+                    player=p,
+                    kind=A_CAMERA_SAVE,
+                    group=int(d["group"][i]) + 1,
+                    x=float(d["cam_x"][i]),
+                    y=float(d["cam_y"][i]),
+                )
             elif k == ra.PING:
                 t = target(i)
-                t.update(x=float(d["tx"][i]), y=float(d["ty"][i]))  # a ping always has a point
+                t.update(
+                    x=float(d["tx"][i]), y=float(d["ty"][i])
+                )  # a ping always has a point
                 if t["tkind"] == TK_UNIT and t.get("uid", -1) < 0:
                     t["snap"], t["snap_raw"] = snap_type(d["snap_link"][i])
                 elif t["tkind"] != TK_UNIT:
                     t["tkind"] = TK_POINT
-                add(loop=L, player=p, kind=A_PING, minimap=bool(int(d["flags"][i]) & ra.FLAG_MINIMAP), **t)
+                add(
+                    loop=L,
+                    player=p,
+                    kind=A_PING,
+                    minimap=bool(int(d["flags"][i]) & ra.FLAG_MINIMAP),
+                    **t,
+                )
             elif k == ra.TRADE:
-                add(loop=L, player=p, kind=A_TRADE, recipient=int(d["recipient"][i]),
-                    minerals=int(d["minerals"][i]), gas=int(d["gas"][i]))
+                add(
+                    loop=L,
+                    player=p,
+                    kind=A_TRADE,
+                    recipient=int(d["recipient"][i]),
+                    minerals=int(d["minerals"][i]),
+                    gas=int(d["gas"][i]),
+                )
             elif k == ra.REQUEST:
-                add(loop=L, player=p, kind=A_REQUEST, minerals=int(d["minerals"][i]), gas=int(d["gas"][i]))
+                add(
+                    loop=L,
+                    player=p,
+                    kind=A_REQUEST,
+                    minerals=int(d["minerals"][i]),
+                    gas=int(d["gas"][i]),
+                )
             elif k == ra.REQUEST_FULFILL:
                 add(loop=L, player=p, kind=A_FULFILL)
             elif k == ra.REQUEST_CANCEL:
@@ -197,7 +340,9 @@ class GameActions:
             last_raw[p] = k
         self.tok = {k: np.asarray(v, dtype=TOKEN_COLS[k]) for k, v in cols.items()}
         self.sel_uid = np.asarray(sel, np.int64)
-        self.sel_end = np.append(self.tok["sel_start"][1:], len(self.sel_uid)).astype(np.int64)  # token i owns [start, end)
+        self.sel_end = np.append(self.tok["sel_start"][1:], len(self.sel_uid)).astype(
+            np.int64
+        )  # token i owns [start, end)
         self.n_raw = len(kind)
 
     def __len__(self):
@@ -214,10 +359,18 @@ class GameActions:
             if m.any():
                 rows[m] = fr.rows_of(int(ff), uids[m])
                 miss = m & (rows < 0)
-                alias = getattr(fr, "alias", None)  # the combined view: the same unit in the other player's view
+                alias = getattr(
+                    fr, "alias", None
+                )  # the combined view: the same unit in the other player's view
                 if miss.any() and alias is not None:
-                    al = np.where(uids[miss] < len(alias), alias[np.clip(uids[miss], 0, len(alias) - 1)], -1)
-                    rows[miss] = np.where(al >= 0, fr.rows_of(int(ff), np.maximum(al, 0)), -1)
+                    al = np.where(
+                        uids[miss] < len(alias),
+                        alias[np.clip(uids[miss], 0, len(alias) - 1)],
+                        -1,
+                    )
+                    rows[miss] = np.where(
+                        al >= 0, fr.rows_of(int(ff), np.maximum(al, 0)), -1
+                    )
                     miss = m & (rows < 0)
                 if miss.any() and ff + 1 < len(fr):
                     rows[miss] = fr.rows_of(int(ff) + 1, uids[miss])
@@ -237,12 +390,23 @@ class GameActions:
         loop. t_loop: the sample's present (times are in seconds relative to it).
         owners: the sample's owner map (same codes as the state tokens)."""
         tk, fr = self.tok, self.fr
-        idx = np.where((tk["loop"] >= lo) & (tk["loop"] < hi) & ((tk["player"] == only) if only else True))[0]
+        idx = np.where(
+            (tk["loop"] >= lo)
+            & (tk["loop"] < hi)
+            & ((tk["player"] == only) if only else True)
+        )[0]
         n = len(idx)
         neutral = (CODE_NEUTRAL, CODE_NEUTRAL, 0)
-        own = np.array([owners.get(int(s), neutral) for s in tk["player"][idx]], np.int64).reshape(-1, 3)
-        rec = np.array([owners.get(int(s), neutral) if s >= 0 else neutral for s in tk["recipient"][idx]],
-                       np.int64).reshape(-1, 3)
+        own = np.array(
+            [owners.get(int(s), neutral) for s in tk["player"][idx]], np.int64
+        ).reshape(-1, 3)
+        rec = np.array(
+            [
+                owners.get(int(s), neutral) if s >= 0 else neutral
+                for s in tk["recipient"][idx]
+            ],
+            np.int64,
+        ).reshape(-1, 3)
         xy = np.stack([tk["x"][idx], tk["y"][idx]], 1)
         has_xy = np.isfinite(xy).all(1)
         loops = tk["loop"][idx]
@@ -254,8 +418,16 @@ class GameActions:
         # pointers: units added to a selection
         s0, s1 = tk["sel_start"][idx], self.sel_end[idx]
         s_ev = np.repeat(np.arange(n), s1 - s0)
-        s_uid = self.sel_uid[np.concatenate([np.arange(a, b) for a, b in zip(s0, s1)])] if n else np.zeros(0, np.int64)
-        srow = self._pointer_rows(s_uid, loops[s_ev]) if len(s_uid) else np.zeros(0, np.int64)
+        s_uid = (
+            self.sel_uid[np.concatenate([np.arange(a, b) for a, b in zip(s0, s1)])]
+            if n
+            else np.zeros(0, np.int64)
+        )
+        srow = (
+            self._pointer_rows(s_uid, loops[s_ev])
+            if len(s_uid)
+            else np.zeros(0, np.int64)
+        )
         keep = srow >= 0
         sel = fr.entity_features(srow[keep], owners, prefix="sel")
         sel["sel_event"] = s_ev[keep]
@@ -270,15 +442,27 @@ class GameActions:
 
         summarized = [only] if only else fr.slots
         slot_index = {s: i for i, s in enumerate(summarized)}
-        num = np.stack([
-            has_xy, tk["queued"][idx], tk["smart"][idx], tk["minimap"][idx],
-            _log(tk["presses"][idx] - 1.0, 2.0),
-            _log(tk["n_add"][idx].clip(0).astype(np.float32), 3.0),
-            _log(tk["n_rem"][idx].clip(0).astype(np.float32), 3.0),
-            _log(tk["minerals"][idx].clip(0).astype(np.float32), 8.0),
-            _log(tk["gas"][idx].clip(0).astype(np.float32), 8.0),
-            tk["recipient"][idx] >= 0, tok_ok, (tk["uid"][idx] >= 0) & ~tok_ok,  # pointer missing
-        ], 1).astype(np.float32).reshape(-1, C_ACTION)
+        num = (
+            np.stack(
+                [
+                    has_xy,
+                    tk["queued"][idx],
+                    tk["smart"][idx],
+                    tk["minimap"][idx],
+                    _log(tk["presses"][idx] - 1.0, 2.0),
+                    _log(tk["n_add"][idx].clip(0).astype(np.float32), 3.0),
+                    _log(tk["n_rem"][idx].clip(0).astype(np.float32), 3.0),
+                    _log(tk["minerals"][idx].clip(0).astype(np.float32), 8.0),
+                    _log(tk["gas"][idx].clip(0).astype(np.float32), 8.0),
+                    tk["recipient"][idx] >= 0,
+                    tok_ok,
+                    (tk["uid"][idx] >= 0) & ~tok_ok,  # pointer missing
+                ],
+                1,
+            )
+            .astype(np.float32)
+            .reshape(-1, C_ACTION)
+        )
         out = dict(
             act_kind=tk["kind"][idx].astype(np.int64),
             act_family=tk["family"][idx].astype(np.int64),
@@ -287,15 +471,23 @@ class GameActions:
             act_group=tk["group"][idx].clip(0).astype(np.int64),
             act_gop=tk["gop"][idx].clip(0).astype(np.int64),
             act_remove=tk["remove"][idx].clip(0).astype(np.int64),
-            act_team=own[:, 0], act_pcode=own[:, 1],
-            act_rteam=rec[:, 0], act_rpcode=rec[:, 1],
+            act_team=own[:, 0],
+            act_pcode=own[:, 1],
+            act_rteam=rec[:, 0],
+            act_rpcode=rec[:, 1],
             act_snap=tk["snap"][idx].astype(np.int64),
             act_rsnap=tk["snap_raw"][idx].astype(np.int64),
-            act_xy=np.where(has_xy[:, None], fr.normalize_xy(np.nan_to_num(xy)), 0).astype(np.float32),
+            act_xy=np.where(
+                has_xy[:, None], fr.normalize_xy(np.nan_to_num(xy)), 0
+            ).astype(np.float32),
             act_num=num,
-            act_t=(loops - t_loop).astype(np.float32),  # game loops relative to the present
+            act_t=(loops - t_loop).astype(
+                np.float32
+            ),  # game loops relative to the present
             act_seg=(np.searchsorted(bounds, loops, side="right") - 1).astype(np.int64),
-            act_player=np.array([slot_index.get(int(s), 0) for s in tk["player"][idx]], np.int64),
+            act_player=np.array(
+                [slot_index.get(int(s), 0) for s in tk["player"][idx]], np.int64
+            ),
             act_tgt_ok=tok_ok,
             # one summary per (segment, player): when each segment starts, who the players are
             seg_t=(np.asarray(bounds) - t_loop).astype(np.float32),  # game loops
@@ -303,7 +495,11 @@ class GameActions:
             sum_pcode=np.array([owners[s][1] for s in summarized], np.int64),
             ruleset=fr.meta.get("ruleset", ""),
             # state unit ids the window's commands touched (selected or targeted), for diagnostics
-            touched_uid=np.unique(np.concatenate([s_uid, tk["uid"][idx].astype(np.int64)])) if n else np.zeros(0, np.int64),
+            touched_uid=(
+                np.unique(np.concatenate([s_uid, tk["uid"][idx].astype(np.int64)]))
+                if n
+                else np.zeros(0, np.int64)
+            ),
         )
         out.update(tgt)
         out.update(sel)
@@ -315,42 +511,90 @@ def self_family(avocab, links, link):
     return avocab.family.get(name, FAM_UNK) if name else FAM_UNK
 
 
-ACT_KEYS = ("kind", "family", "button", "tkind", "group", "gop", "remove", "team", "pcode", "rteam",
-            "rpcode", "snap", "rsnap", "xy", "num", "t", "seg", "player", "tgt_ok")
-ENT_KEYS = ("type", "rtype", "rproduce", "rorder", "team", "pcode", "rel", "produce", "order", "ord", "xy", "pos", "num", "groups")
+ACT_KEYS = (
+    "kind",
+    "family",
+    "button",
+    "tkind",
+    "group",
+    "gop",
+    "remove",
+    "team",
+    "pcode",
+    "rteam",
+    "rpcode",
+    "snap",
+    "rsnap",
+    "xy",
+    "num",
+    "t",
+    "seg",
+    "player",
+    "tgt_ok",
+)
+ENT_KEYS = (
+    "type",
+    "rtype",
+    "rproduce",
+    "rorder",
+    "team",
+    "pcode",
+    "rel",
+    "produce",
+    "order",
+    "ord",
+    "xy",
+    "pos",
+    "num",
+    "groups",
+)
 
 
 def collate_actions(windows):
     """Pads action windows into a batch.
 
     act_*: [B, N] padded (act_mask True for real tokens); tgt_*: [B, N] target pointers;
-    sel_*: [M] flat, sel_event = flat token index (b * N + i) each selected unit belongs to."""
+    sel_*: [M] flat, sel_event = flat token index (b * N + i) each selected unit belongs to.
+    """
     import torch
+
     B = len(windows)
     N = max(max((len(w["act_kind"]) for w in windows), default=0), 1)
     out = {}
     mask = np.zeros((B, N), bool)
     for b, w in enumerate(windows):
-        mask[b, :len(w["act_kind"])] = True
+        mask[b, : len(w["act_kind"])] = True
     out["act_mask"] = torch.from_numpy(mask)
     for g, keys in (("act", ACT_KEYS), ("tgt", ENT_KEYS)):
         for k in keys:
             arrs = [w[f"{g}_{k}"] for w in windows]
             buf = np.zeros((B, N) + arrs[0].shape[1:], arrs[0].dtype)
             for b, a in enumerate(arrs):
-                buf[b, :len(a)] = a
+                buf[b, : len(a)] = a
             out[f"{g}_{k}"] = torch.from_numpy(buf)
     for k in ENT_KEYS:
-        out[f"sel_{k}"] = torch.from_numpy(np.concatenate([w[f"sel_{k}"] for w in windows]))
-    out["sel_event"] = torch.from_numpy(np.concatenate([w["sel_event"] + b * N for b, w in enumerate(windows)]))
-    out["sel_sample"] = out["sel_event"] // N                 # flat selected unit -> its window
-    out["act_ruleset"] = [w["ruleset"] for w in windows]      # per window (strings; left alone by data.to)
+        out[f"sel_{k}"] = torch.from_numpy(
+            np.concatenate([w[f"sel_{k}"] for w in windows])
+        )
+    out["sel_event"] = torch.from_numpy(
+        np.concatenate([w["sel_event"] + b * N for b, w in enumerate(windows)])
+    )
+    out["sel_sample"] = out["sel_event"] // N  # flat selected unit -> its window
+    out["act_ruleset"] = [
+        w["ruleset"] for w in windows
+    ]  # per window (strings; left alone by data.to)
     P = max(len(w["sum_team"]) for w in windows)
     pm = np.zeros((B, P), bool)
     team, pcode = np.zeros((B, P), np.int64), np.zeros((B, P), np.int64)
     for b, w in enumerate(windows):
         n = len(w["sum_team"])
         pm[b, :n], team[b, :n], pcode[b, :n] = True, w["sum_team"], w["sum_pcode"]
-    out["sum_mask"], out["sum_team"], out["sum_pcode"] = torch.from_numpy(pm), torch.from_numpy(team), torch.from_numpy(pcode)
-    out["seg_t"] = torch.from_numpy(np.stack([w["seg_t"] for w in windows]))  # same segment count per sample
+    out["sum_mask"], out["sum_team"], out["sum_pcode"] = (
+        torch.from_numpy(pm),
+        torch.from_numpy(team),
+        torch.from_numpy(pcode),
+    )
+    out["seg_t"] = torch.from_numpy(
+        np.stack([w["seg_t"] for w in windows])
+    )  # same segment count per sample
     return out
