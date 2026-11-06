@@ -64,7 +64,7 @@ from .physics_data import (
 from .tokenize import C_GROUPS, N_BUFF_IDS, N_EFFECT_IDS, N_RAW_ABILITY_IDS, PC_KEYS
 
 I = {n: i for i, n in enumerate(RAW_NUMS)}
-C_PLY = 13  # player numbers: PC_KEYS and the camera's x, y, known
+C_PLY = 14  # player numbers: PC_KEYS, the camera's x, y, known, and supply left
 # place on the map: sin and cos of x and y at wavelengths from 4 to 256 map units
 MAP_WAVES = 6
 N_FLAGS = 16  # flags, flags2 bits

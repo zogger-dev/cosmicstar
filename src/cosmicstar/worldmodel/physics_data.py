@@ -493,9 +493,11 @@ class Game:
         )
 
     def _players(self, t0, L, swap):
-        """[L, 2, C_PLY]: each player's PC_KEYS numbers and camera, from their own
-        view."""
-        out = np.zeros((L, 2, len(PC_KEYS) + 3), np.float32)
+        """[L, 2, C_PLY]: each player's PC_KEYS numbers, camera, and supply left (cap -
+        used, / 16, below 0 when over the cap): bfloat16 resolves it finely near 0, where
+        being blocked is, and the log of supply used resolves only 1.5 at 150. From
+        their own view."""
+        out = np.zeros((L, 2, len(PC_KEYS) + 4), np.float32)
         for pi, s in enumerate((1, 2)):
             at = 1 - pi if swap else pi
             _, fr = self.views[s]
@@ -511,6 +513,10 @@ class Game:
                         .astype(np.float32)
                     )
                     out[lo - t0 : hi - t0, at, j] = np.log1p(np.maximum(v, 0)) / 8
+                    if k == "food_cap":
+                        cap = v
+                    if k == "food_used":
+                        out[lo - t0 : hi - t0, at, len(PC_KEYS) + 3] = (cap - v) / 16
                 for j, k in enumerate(("cam_x", "cam_y")):
                     v = (
                         b.column(k)
