@@ -271,7 +271,7 @@ def evaluate(model, games, windows, seqs, L, workers):
     model.record_pos = True
     logs, pos, n = (
         collections.Counter(),
-        collections.defaultdict(lambda: np.zeros(3)),
+        collections.defaultdict(list),
         0,
     )
     with ThreadPoolExecutor(workers) as pool, torch.random.fork_rng(devices=[0]):
@@ -291,17 +291,28 @@ def evaluate(model, games, windows, seqs, L, workers):
             for k, v in lg.items():
                 logs[k] += float(v)
             for k, v in model.pos_eval.items():
-                pos[k] += v
+                pos[k].append(v)
             n += 1
     model.enc.grad_ckpt, model.record_pos = grad_ckpt, False
     out = {k: round(v / n, 4) for k, v in logs.items()}
-    out["position"] = {
-        k: dict(
-            rows=int(c), model=round(e / max(c, 1), 5), copy=round(d / max(c, 1), 5)
-        )
-        for k, (c, e, d) in pos.items()
-    }
+    out["position"] = {k: position_stats(v) for k, v in pos.items()}
     return out
+
+
+def position_stats(parts):
+    """Mean, root mean square and 95th and 99th percentiles of the model's and copy's
+    per-row errors, map units per loop."""
+    stats = {"rows": int(sum(len(e) for e, _ in parts))}
+    for name, i in (("model", 0), ("copy", 1)):
+        e = np.concatenate([p[i] for p in parts]).astype(np.float64)
+        if not len(e):
+            e = np.zeros(1)
+        p95, p99 = np.percentile(e, [95, 99])
+        stats[name] = round(float(e.mean()), 5)
+        stats[name + "_rms"] = round(float(np.sqrt((e**2).mean())), 5)
+        stats[name + "_p95"] = round(float(p95), 5)
+        stats[name + "_p99"] = round(float(p99), 5)
+    return stats
 
 
 def main():

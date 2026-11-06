@@ -1315,8 +1315,8 @@ class Physics(nn.Module):
         return total, logs
 
     def _position_errors(self, pred, tpos, own, crit, larva, keep):
-        """For evaluation: {kind of row: (rows, sum of model error, sum of copy error)},
-        map units per loop, the rows and kinds of scripts/physics_baselines.py."""
+        """For evaluation: {kind of row: (model errors, copy errors)}, one per row, map
+        units per loop, the rows and kinds of scripts/physics_baselines.py."""
         step = tpos.norm(dim=-1) * POS_SCALE
         err = (pred - tpos).norm(dim=-1) * POS_SCALE
         neutral = own == NEUTRAL
@@ -1331,13 +1331,7 @@ class Physics(nn.Module):
             "other neutral": neutral & ~crit,
         }
         return {
-            k: np.array(
-                [
-                    float((v & keep).sum()),
-                    float(err[v & keep].sum()),
-                    float(step[v & keep].sum()),
-                ]
-            )
+            k: (err[v & keep].cpu().numpy(), step[v & keep].cpu().numpy())
             for k, v in kinds.items()
         }
 
