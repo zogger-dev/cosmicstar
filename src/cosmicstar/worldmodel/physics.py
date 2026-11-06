@@ -67,10 +67,10 @@ I = {n: i for i, n in enumerate(RAW_NUMS)}
 C_PLY = 13  # player numbers: PC_KEYS and the camera's x, y, known
 # place on the map: sin and cos of x and y at wavelengths from 4 to 256 map units
 MAP_WAVES = 6
+N_FLAGS = 16  # flags, flags2 bits
 EFF_WAVES = 6  # an effect's age: sin and cos at wavelengths from 4 to 1024 loops
 # embedded numbers per row, see row_numbers
-ROW_NUMS = len(RAW_NUMS) + 8 + 4 * MAP_WAVES
-N_FLAGS = 16  # flags, flags2 bits
+ROW_NUMS = len(RAW_NUMS) + 8 + 4 * MAP_WAVES + N_FLAGS
 MAX_BIRTHS, MARGIN = 64, 2  # birth count classes; extra queries per frame
 POS_SCALE = 0.29  # a fast unit's per-loop move, map units
 POS_BOOST = 4.0
@@ -126,6 +126,12 @@ class RoPE1D(nn.Module):
         return loops[..., None].float() * self.omega
 
 
+def left_to_go(feat, j):
+    """feat with its progress column j as 1 - progress: bfloat16 resolves values near 0
+    finely and near 1 to 0.004, and completion is the moment that matters."""
+    return torch.cat([feat[:, :j], 1 - feat[:, j : j + 1], feat[:, j + 1 :]], 1)
+
+
 def effect_numbers(b):
     """[B, F, X, 2 + 2 * EFF_WAVES]: radius, and age in loops as log and as sin and cos
     at wavelengths from 4 to 1024 loops, so a delay such as a storm's ticks or a bile's
@@ -157,7 +163,7 @@ def row_numbers(b):
         g("energy") / 200,
         log(hpm),
         log(shm),
-        g("build"),
+        1 - g("build"),  # left to go: bfloat16 is fine near 0, where completion is
         log(g("contents")),
         g("harvesters") / 16,
         g("ideal_harvesters") / 16,
@@ -182,6 +188,11 @@ def row_numbers(b):
         (g("cloak") == k) for k in (0, 1, 2, 3)
     ]
     out += [b["inside"] == 1, b["inside"] == 2, ~b["alive"], b["parent_row"] >= 0]
+    # flags, flags2: hallucinated, powered, burrowed, selected and the rest, as bits
+    bits = g("flags").long() | (g("flags2").long() << 8)
+    out += list(
+        ((bits[..., None] >> torch.arange(N_FLAGS, device=n.device)) & 1).unbind(-1)
+    )
     # where on the map, in map units: map knowledge (ramps, chokes) is tied to place
     w = (
         2
@@ -597,7 +608,7 @@ class PhysicsEncoder(nn.Module):
             "ord",
             b,
             self.ability(b["ord_abil"])
-            + self.bag_in["ord"](b["ord_feat"])
+            + self.bag_in["ord"](left_to_go(b["ord_feat"], 3))
             + self.bag_slot["ord"](b["ord_slot"])
             + self.code_in["order"](pointed(o_b, b["ord_trow"])),
         )
@@ -605,7 +616,7 @@ class PhysicsEncoder(nn.Module):
             "prod",
             b,
             self.ability(b["prod_abil"])
-            + self.bag_in["prod"](b["prod_feat"])
+            + self.bag_in["prod"](left_to_go(b["prod_feat"], 0))
             + self.bag_slot["prod"](b["prod_slot"]),
         )
         ids = ids + self._bag("buff", b, self.buff(b["buff_id"]))
