@@ -1,13 +1,13 @@
-"""Rare-state evaluation set (2026-11-01): fixed frames from the held-out caches (held-out games and
-held-out maps), chosen to contain each rare entity state, so its recall / F1 is measured on enough
-units. Random evaluation frames almost never contain them: a blip appears in ~0.6% of view-frames,
-cloaked / detected units in fewer.
+"""Rare-state evaluation set (2026-11-01): fixed frames from the held-out caches
+(held-out games and held-out maps), chosen to contain each rare entity state, so its
+recall / F1 is measured on enough units. Random evaluation frames almost never contain
+them: a blip appears in ~0.6% of view-frames, cloaked / detected units in fewer.
 
-States: the binary flags blip, cloaked, burrowed, halluc, engaged, has_add_on; the categorical
-states cloak:cloaked, cloak:detected, inside:passenger, inside:in_gas, display:hidden; units inside a
-container (the container pointer). Up to --per_state frames each (player views and the combined
-view), with fixed player codes. Written as one pickle: {"frames": [...], "tags": [[state, ...]],
-"counts": {state: units}}.
+States: the binary flags blip, cloaked, burrowed, halluc, engaged, has_add_on; the
+categorical states cloak:cloaked, cloak:detected, inside:passenger, inside:in_gas,
+display:hidden; units inside a container (the container pointer). Up to --per_state
+frames each (player views and the combined view), with fixed player codes. Written as
+one pickle: {"frames": [...], "tags": [[state, ...]], "counts": {state: units}}.
 
     python scripts/build_rare_eval.py --cache data/worldmodel/frame_cache --out data/worldmodel/rare_eval.pkl
 """
@@ -43,9 +43,8 @@ def main():
         if all(got[s] >= args.per_state for s in want):
             break
         w = c.read(int(i))
-        for fr in w[
-            rng.randint(len(w))
-        ]:  # one frame of the entry (a window's frames are near-duplicates), its 3 views
+        # one frame of the entry (a window's frames are near-duplicates), its 3 views
+        for fr in w[rng.randint(len(w))]:
             st = states_of(fr)
             need = [s for s in want if st[s] > 0 and got[s] < args.per_state]
             if not need:

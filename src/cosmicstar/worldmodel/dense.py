@@ -1,10 +1,11 @@
-"""Dense windowed map encoder (2026-10-31): the pyramid rebuilt from dense, tensor-core-friendly
-parts. The sparse local attention of pyramid.py (neighbor shifts, pair searches, segment softmax)
-kept the GPU memory-bound (~300 W of 600, 5.3 s/step; torch.compile only reached 4.1 s).
+"""Dense windowed map encoder (2026-10-31): the pyramid rebuilt from dense,
+tensor-core-friendly parts. The sparse local attention of pyramid.py (neighbor shifts,
+pair searches, segment softmax) kept the GPU memory-bound (~300 W of 600, 5.3 s/step;
+torch.compile only reached 4.1 s).
 
-Map: the grid is cropped to the playable area (tokenize.GameFrames.grid_origin) and embedded per
-cell into one minimap (PyramidEncoder.minimap: static layers + each player's visible / seen /
-creep with their player code). Then
+Map: the grid is cropped to the playable area (tokenize.GameFrames.grid_origin) and
+embedded per cell into one minimap (PyramidEncoder.minimap: static layers + each
+player's visible / seen / creep with their player code). Then
 
     stem: GELU, 2 ResNet blocks                                         (1 map unit per cell)
     for s in 1, 2, 4, 8, 16 map units per cell:
@@ -18,15 +19,17 @@ creep with their player code). Then
     output: [CLS, players, units, effects, the 16-unit cells]; every level's map is kept in
     "maps" (for a later full-resolution decoder)
 
-No pair biases (2026-10-31): a learned geometric bias inside the kernel (from the gap between
-bodies, and between a body and a cell's square) cost ~40% of the full-resolution block on CUDA
-cores, even in its cheapest form (fixed per-head scales, learned per-query strengths). Rotary
-angles down to 1/8 map unit with learned q / k already give a learned function of the offset,
-and the radius is in each entity's features; the tight-passage evaluation checks what's lost.
+No pair biases (2026-10-31): a learned geometric bias inside the kernel (from the gap
+between bodies, and between a body and a cell's square) cost ~40% of the full-resolution
+block on CUDA cores, even in its cheapest form (fixed per-head scales, learned per-query
+strengths). Rotary angles down to 1/8 map unit with learned q / k already give a learned
+function of the offset, and the radius is in each entity's features; the tight-passage
+evaluation checks what's lost.
 
-Positions: rotary angles at wavelengths 0.125-512 map units, entity position embeddings from
-map units at octaves 0.125-512 (encoder.MapFourier), so the scale is the same on every map and
-resolves 1/8 of a cell. Widths stay d everywhere (cells, entities, globals)."""
+Positions: rotary angles at wavelengths 0.125-512 map units, entity position embeddings
+from map units at octaves 0.125-512 (encoder.MapFourier), so the scale is the same on
+every map and resolves 1/8 of a cell. Widths stay d everywhere (cells, entities,
+globals)."""
 
 import torch
 import torch.nn.functional as F
@@ -44,18 +47,20 @@ _flex = torch.compile(flex_attention, dynamic=True)
 
 
 class CellNorm(nn.LayerNorm):
-    """LayerNorm over each cell's channels on [B, C, H, W] (a view for channels-last maps). Each
-    cell is normalized by itself: GroupNorm's statistics spanned the whole canvas, padding
-    included, so a frame's output depended on the largest map in its batch."""
+    """LayerNorm over each cell's channels on [B, C, H, W] (a view for channels-last
+    maps). Each cell is normalized by itself: GroupNorm's statistics spanned the whole
+    canvas, padding included, so a frame's output depended on the largest map in its
+    batch."""
 
     def forward(self, x):
         return super().forward(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
 
 class ResBlock(nn.Module):
-    """ResNet basic block on [B, C, H, W]: conv 3 x 3, norm, GELU, conv 3 x 3, norm, + x, GELU.
-    m [B, 1, H, W]: the frame's own cells; padding is zeroed between the convs too (a norm turns
-    a zero cell into its bias, which the second conv would read at the map's edge)."""
+    """ResNet basic block on [B, C, H, W]: conv 3 x 3, norm, GELU, conv 3 x 3, norm, +
+    x, GELU. m [B, 1, H, W]: the frame's own cells; padding is zeroed between the convs
+    too (a norm turns a zero cell into its bias, which the second conv would read at the
+    map's edge)."""
 
     def __init__(self, c):
         super().__init__()
@@ -68,8 +73,9 @@ class ResBlock(nn.Module):
 
 
 class Down(nn.Module):
-    """2 x 2 downsample with a projection shortcut: conv 2 x 2 stride 2 (a learned merge of each
-    2 x 2 block) + linear(average of the block), as ResNet bridges a resolution change.
+    """2 x 2 downsample with a projection shortcut: conv 2 x 2 stride 2 (a learned merge
+    of each 2 x 2 block) + linear(average of the block), as ResNet bridges a resolution
+    change.
     """
 
     def __init__(self, c):
@@ -82,9 +88,9 @@ class Down(nn.Module):
 
 
 class WindowBlock(nn.Module):
-    """One attention block over [globals, entities, cells (window-major)]: shared q / k / v, a
-    joint softmax per query (FlexAttention: block mask for the windows, score_mod for validity),
-    then separate MLPs for cells and for entities / globals."""
+    """One attention block over [globals, entities, cells (window-major)]: shared q / k
+    / v, a joint softmax per query (FlexAttention: block mask for the windows, score_mod
+    for validity), then separate MLPs for cells and for entities / globals."""
 
     def __init__(self, d, heads, mlp_ratio=4.0):
         super().__init__()
@@ -95,7 +101,8 @@ class WindowBlock(nn.Module):
         self.me, self.men = mlp(d, d, int(d * mlp_ratio)), nn.LayerNorm(d)
 
     def forward(self, x, ctx):
-        """x [B, L, d]; ctx: n0 (first cell index), ang [B, L, dh / 2], valid [B, L] (keys), block_mask."""
+        """x [B, L, d]; ctx: n0 (first cell index), ang [B, L, dh / 2], valid [B, L]
+        (keys), block_mask."""
         B, L, d = x.shape
         n0 = ctx["n0"]
         h = torch.cat([self.ne(x[:, :n0]), self.nc(x[:, n0:])], 1)
@@ -128,8 +135,9 @@ class WindowBlock(nn.Module):
 
 
 class DenseEncoder(PyramidEncoder):
-    """See the module docstring. Shares the token parts (entities with their lists, players,
-    effects, the minimap embedding) with PyramidEncoder; replaces the map pyramid."""
+    """See the module docstring. Shares the token parts (entities with their lists,
+    players, effects, the minimap embedding) with PyramidEncoder; replaces the map
+    pyramid."""
 
     def __init__(
         self,
@@ -192,14 +200,16 @@ class DenseEncoder(PyramidEncoder):
         self._masks = {}
 
     def place(self, b, g):
-        """Entity / effect / pointer positions from map units (the same scale on every map)."""
+        """Entity / effect / pointer positions from map units (the same scale on every
+        map)."""
         return self.pos_mu(b[f"{g}_pos"]) if f"{g}_pos" in b else self.pos(b[f"{g}_xy"])
 
     def _block_mask(self, n0, L, dev):
-        """[globals + entities (n0, a multiple of BLOCK), cells (window-major, L - n0, a multiple of
-        BLOCK)]: the dense rows and columns are full blocks; a cell block sees the dense blocks
-        fully and itself partly (each cell its WIN x WIN window). Built from the structure (the
-        generic builder evaluates every pair: 18 s at level 1). Cached per shape."""
+        """[globals + entities (n0, a multiple of BLOCK), cells (window-major, L - n0, a
+        multiple of BLOCK)]: the dense rows and columns are full blocks; a cell block
+        sees the dense blocks fully and itself partly (each cell its WIN x WIN window).
+        Built from the structure (the generic builder evaluates every pair: 18 s at
+        level 1). Cached per shape."""
         key = (n0, L, str(dev))
         if key not in self._masks:
             if len(self._masks) > 64:
@@ -232,8 +242,8 @@ class DenseEncoder(PyramidEncoder):
 
     @staticmethod
     def _to_windows(C, valid):
-        """[B, d, H, W] -> window-major tokens [B, n, d] (H, W padded to multiples of WIN) and their
-        validity; returns the padded size for the way back."""
+        """[B, d, H, W] -> window-major tokens [B, n, d] (H, W padded to multiples of
+        WIN) and their validity; returns the padded size for the way back."""
         B, d, H, W = C.shape
         Hp, Wp = -(-H // WIN) * WIN, -(-W // WIN) * WIN
         C = F.pad(C, (0, Wp - W, 0, Hp - H))
@@ -281,8 +291,9 @@ class DenseEncoder(PyramidEncoder):
         )  # world (0, 0) of the canvas, in playable-centered units
         grid = b["grid"]
         on_map = (b["on_map"] if "on_map" in b else grid[:, ON_MAP : ON_MAP + 1]) > 0
-        # cells outside the frame's own (cropped) map are zeroed after every map step, so what a
-        # frame computes never depends on how much padding its batch-mates added
+        # cells outside the frame's own (cropped) map are zeroed after every map step,
+        # so what a frame computes never depends on how much padding its batch-mates
+        # added
         own = lambda s_: (
             (F.max_pool2d(on_map.float(), s_, s_) if s_ > 1 else on_map.float()) > 0
         ).to(grid.dtype)

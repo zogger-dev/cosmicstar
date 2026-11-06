@@ -4,12 +4,12 @@ the recipients: each row of the action table is the same for every view.
 
 The engine reports each command with the exact loop it was issued at (Action.game_loop),
 its API ability id and its target; the replay has the loop, its own (link, cmd) ability
-numbering and the same target. A CMD row with a target pairs with an engine command at the
-same loop and target (points within 0.5, unit tags exact, no target: no target); a REPEAT
-row with the engine command of the same API ability as the last paired one; a CMD_POINT /
-CMD_UNIT row with the engine command at its new target (the REPEAT that follows it then
-finds its command used). Within a loop both sides are in issue order and each engine
-command is used once.
+numbering and the same target. A CMD row with a target pairs with an engine command at
+the same loop and target (points within 0.5, unit tags exact, no target: no target); a
+REPEAT row with the engine command of the same API ability as the last paired one; a
+CMD_POINT / CMD_UNIT row with the engine command at its new target (the REPEAT that
+follows it then finds its command used). Within a loop both sides are in issue order and
+each engine command is used once.
 """
 
 import collections
@@ -37,8 +37,8 @@ def same_target(acts, i, target, tx, ty, target_tag):
 
 
 def match(acts, slot, pov):
-    """pov: a player-view state file's arrays (cmd_*, unit_tag). Returns (cmd_event[C]: the
-    action-table row each engine command executes, -1 if none; stats)."""
+    """pov: a player-view state file's arrays (cmd_*, unit_tag). Returns (cmd_event[C]:
+    the action-table row each engine command executes, -1 if none; stats)."""
     loops, abil, target = pov["cmd_loop"], pov["cmd_abil"], pov["cmd_target"]
     tx, ty, tid, tags = (
         pov["cmd_tx"],

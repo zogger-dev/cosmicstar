@@ -4,26 +4,28 @@ One token per thing a player did (raw events: replay_actions.py):
 
     CMD        a new command: ability (family + button; right-click = Smart), flags, target
     REISSUE    the player's last command executed again:
-                 - a retarget: CMD_POINT / CMD_UNIT changes the last command's target and the
-                   REPEAT that comes with it fires it (one token, the REPEAT is folded in)
+                 - a retarget: CMD_POINT / CMD_UNIT changes the last command's target
+                   and the REPEAT that comes with it fires it (one token, the REPEAT is
+                   folded in)
                  - a plain REPEAT: same command, same target
     SELECT     selection change: the added units (pointers), how many, how units were removed
     GROUP      control group operation + number
     CAMERA, CAMERA_SAVE, PING, TRADE, REQUEST, FULFILL, CANCEL, LEAVE
 
-A held or mashed hotkey (a CMD / REISSUE followed by plain REPEATs within BURST loops, with
-nothing else from that player in between) stays one token with a press count: "Drone x7".
-Each press is a separate event on disk; the folding happens only here, so the raw stream
-stays lossless for a future control decoder.
+A held or mashed hotkey (a CMD / REISSUE followed by plain REPEATs within BURST loops,
+with nothing else from that player in between) stays one token with a press count:
+"Drone x7". Each press is a separate event on disk; the folding happens only here, so
+the raw stream stays lossless for a future control decoder.
 
-Units an action refers to (command targets, pinged units, the units added to a selection)
-are pointers: the unit's own state features at the latest frame at or before the action
-(GameFrames.entity_features), embedded by the state encoder like any entity. Fogged snapshots
-carry no tag; they get their unit type and position instead.
+Units an action refers to (command targets, pinged units, the units added to a
+selection) are pointers: the unit's own state features at the latest frame at or before
+the action (GameFrames.entity_features), embedded by the state encoder like any entity.
+Fogged snapshots carry no tag; they get their unit type and position instead.
 
-Abilities are named per ruleset from the Editor exports (data/worldmodel/ability_links.json):
-(family, button), e.g. ("BarracksTrain", 0) = Marine. The family and button vocabularies are
-shared across builds, so link numbers that move between patches don't matter.
+Abilities are named per ruleset from the Editor exports
+(data/worldmodel/ability_links.json): (family, button), e.g. ("BarracksTrain", 0) =
+Marine. The family and button vocabularies are shared across builds, so link numbers
+that move between patches don't matter.
 """
 
 import json
@@ -110,7 +112,8 @@ class ActionVocab:
         self._unit_ids = {}
 
     def ruleset_table(self, meta):
-        """The link tables for a game: its own ruleset, or another ruleset of the same build."""
+        """The link tables for a game: its own ruleset, or another ruleset of the same
+        build."""
         t = self.table.get(meta.get("ruleset"))
         if t is None:
             t = next(
@@ -123,7 +126,8 @@ class ActionVocab:
             )
         if t is None:
             raise KeyError(
-                f"no ability table for {meta.get('ruleset')} (build {meta.get('base_build')})"
+                f"no ability table for {meta.get('ruleset')} (build"
+                f" {meta.get('base_build')})"
             )
         return t
 
@@ -138,7 +142,8 @@ class ActionVocab:
 
 
 class GameActions:
-    """One game's action tokens (all players, time order), built once from the raw events."""
+    """One game's action tokens (all players, time order), built once from the raw
+    events."""
 
     def __init__(self, path, frames, avocab):
         with np.load(path) as z:
@@ -349,8 +354,8 @@ class GameActions:
         return len(self.tok["kind"])
 
     def _pointer_rows(self, uids, loops):
-        """Unit rows for pointers: the latest frame at or before each action (or the next
-        frame, for units created in between); -1 where the unit isn't found."""
+        """Unit rows for pointers: the latest frame at or before each action (or the
+        next frame, for units created in between); -1 where the unit isn't found."""
         fr = self.fr
         f = np.clip(np.searchsorted(fr.loops, loops, side="right") - 1, 0, len(fr) - 1)
         rows = np.full(len(uids), -1, np.int64)
@@ -379,15 +384,15 @@ class GameActions:
     def window(self, lo, hi, bounds, t_loop, owners, only=None, static_pointers=False):
         """Tokens with lo <= loop < hi, as encoder inputs for one sample.
 
-        only: a slot whose actions are the only ones kept (a player's view: they don't see
-        anyone else's, not even their teammate's); then there's one summary per segment, theirs.
-        static_pointers: the units a command points at (targets, selections) keep only what the
-        player did (which unit: type and owner, and where it was clicked), not the unit's state
-        at that moment (hp, energy, progress). For actions in the interval being predicted,
-        that state is the future.
+        only: a slot whose actions are the only ones kept (a player's view: they don't
+        see anyone else's, not even their teammate's); then there's one summary per
+        segment, theirs. static_pointers: the units a command points at (targets,
+        selections) keep only what the player did (which unit: type and owner, and where
+        it was clicked), not the unit's state at that moment (hp, energy, progress). For
+        actions in the interval being predicted, that state is the future.
 
-        bounds: segment start loops (ascending); a token's segment is the last bound <= its
-        loop. t_loop: the sample's present (times are in seconds relative to it).
+        bounds: segment start loops (ascending); a token's segment is the last bound <=
+        its loop. t_loop: the sample's present (times are in seconds relative to it).
         owners: the sample's owner map (same codes as the state tokens)."""
         tk, fr = self.tok, self.fr
         idx = np.where(
@@ -489,12 +494,14 @@ class GameActions:
                 [slot_index.get(int(s), 0) for s in tk["player"][idx]], np.int64
             ),
             act_tgt_ok=tok_ok,
-            # one summary per (segment, player): when each segment starts, who the players are
+            # one summary per (segment, player): when each segment starts, who the
+            # players are
             seg_t=(np.asarray(bounds) - t_loop).astype(np.float32),  # game loops
             sum_team=np.array([owners[s][0] for s in summarized], np.int64),
             sum_pcode=np.array([owners[s][1] for s in summarized], np.int64),
             ruleset=fr.meta.get("ruleset", ""),
-            # state unit ids the window's commands touched (selected or targeted), for diagnostics
+            # state unit ids the window's commands touched (selected or targeted), for
+            # diagnostics
             touched_uid=(
                 np.unique(np.concatenate([s_uid, tk["uid"][idx].astype(np.int64)]))
                 if n
@@ -554,7 +561,8 @@ def collate_actions(windows):
     """Pads action windows into a batch.
 
     act_*: [B, N] padded (act_mask True for real tokens); tgt_*: [B, N] target pointers;
-    sel_*: [M] flat, sel_event = flat token index (b * N + i) each selected unit belongs to.
+    sel_*: [M] flat, sel_event = flat token index (b * N + i) each selected unit belongs
+    to.
     """
     import torch
 

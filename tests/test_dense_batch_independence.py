@@ -1,6 +1,7 @@
-"""A frame's encoding must not depend on its batch-mates: encode a frame from a small map alone,
-then batched with a frame from a much larger map (more canvas padding, more entity padding), and
-compare its outputs. Run directly: python tests/test_dense_batch_independence.py (CUDA).
+"""A frame's encoding must not depend on its batch-mates: encode a frame from a small
+map alone, then batched with a frame from a much larger map (more canvas padding, more
+entity padding), and compare its outputs. Run directly: python
+tests/test_dense_batch_independence.py (CUDA).
 """
 
 import json
@@ -13,8 +14,10 @@ from cosmicstar.worldmodel.data import to
 from cosmicstar.worldmodel.dense import DenseEncoder
 from cosmicstar.worldmodel.tokenize import GameFrames, collate
 
-SMALL = "data/games/1v1/95841/ea9d28118a7d7253/051a0621324c4123.p1.cst"  # Taito Citadel, 138 x 138 playable
-LARGE = "data/games/1v1/95841/e854e11f57f13367/014daa87317de353.p1.cst"  # Mothership, 166 x 166 playable
+# Taito Citadel, 138 x 138 playable
+SMALL = "data/games/1v1/95841/ea9d28118a7d7253/051a0621324c4123.p1.cst"
+# Mothership, 166 x 166 playable
+LARGE = "data/games/1v1/95841/e854e11f57f13367/014daa87317de353.p1.cst"
 VOCAB = "data/worldmodel/runs/direct_20261031_132847/vocab.json"
 
 
@@ -35,8 +38,9 @@ def main():
     n = int(alone["mask"][0].sum())
     ea, em = alone["tokens"][0][alone["mask"][0]], mixed["tokens"][0][mixed["mask"][0]]
     print(
-        f"canvas alone {tuple(collate([fa])['grid'].shape[2:])}, mixed {tuple(collate([fa, fb])['grid'].shape[2:])}; "
-        f"real tokens {n} / {int(mixed['mask'][0].sum())}"
+        f"canvas alone {tuple(collate([fa])['grid'].shape[2:])}, mixed"
+        f" {tuple(collate([fa, fb])['grid'].shape[2:])}; real tokens {n} /"
+        f" {int(mixed['mask'][0].sum())}"
     )
     err = (ea - em).abs().max().item()
     print(f"max abs difference of the small map's real output tokens: {err:.2e}")

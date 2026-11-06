@@ -89,7 +89,8 @@ def _lookup(table, arr):
 
 
 def unit_info(unit_data_path):
-    """Categories, and the unit types that produce things (structures, eggs, cocoons)."""
+    """Categories, and the unit types that produce things (structures, eggs,
+    cocoons)."""
     if not os.path.exists(unit_data_path):
         return {}, []
     cats, producers = {}, []

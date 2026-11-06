@@ -9,35 +9,38 @@ It becomes one vector per thing, of two kinds:
     players   one per player: bank, income, workers, supply, army value, race, upgrades
 
 plus frame-level inputs (game time, game format) that go into the encoder's CLS, and per
-grid cell what the viewer can see (share of the cell visible now / ever seen; all 1 for the
-observer).
+grid cell what the viewer can see (share of the cell visible now / ever seen; all 1 for
+the observer).
 
 A player's view (extract_states.py --views players) shows what that player knows: fog,
 snapshots of remembered structures, allies' units without their private details. Tracker
-stats and upgrades are kept for the viewer only (other players' economy isn't on screen).
+stats and upgrades are kept for the viewer only (other players' economy isn't on
+screen).
 
-Layout-2 additions (2026-10-31, the pyramid encoder): each entity also carries its facing,
-radius, weapon cooldown, engaged target, upgrade levels, buffs, detection and radar range,
-cargo, display / cloak state and its list-valued state pooled into its token (the full order
-queue, the production queue, buffs, available abilities, rally points). Units inside other
-units are rows of their own with a pointer to their container: passengers of transports,
-bunkers and command centers (from the extraction's passenger lists) and workers inside gas
-buildings (synthesized while they're out of sight harvesting). Add-ons point at their
-building. Effects (storm, bile, ...) are tokens of their own. Players carry player_common,
-the score details, units lost, the camera and its saved positions, the subgroup and the last
-command. The map grids (visibility, creep, pathing, placement, height) go to the encoder at
-one cell per map unit.
+Layout-2 additions (2026-10-31, the pyramid encoder): each entity also carries its
+facing, radius, weapon cooldown, engaged target, upgrade levels, buffs, detection and
+radar range, cargo, display / cloak state and its list-valued state pooled into its
+token (the full order queue, the production queue, buffs, available abilities, rally
+points). Units inside other units are rows of their own with a pointer to their
+container: passengers of transports, bunkers and command centers (from the extraction's
+passenger lists) and workers inside gas buildings (synthesized while they're out of
+sight harvesting). Add-ons point at their building. Effects (storm, bile, ...) are
+tokens of their own. Players carry player_common, the score details, units lost, the
+camera and its saved positions, the subgroup and the last command. The map grids
+(visibility, creep, pathing, placement, height) go to the encoder at one cell per map
+unit.
 
 The combined view (CombinedFrames, 2026-10-31): there is no observer extraction; the
 full-information view is the two player views side by side, not merged: every entity and
-effect token of both views (a unit both players see is two tokens, a snapshot one player keeps
-of minerals the other saw destroyed stays a token), each marked with the view it came from
-(ent_src / eff_src: that viewer's player code) and its relation as that viewer sees it.
-Attention sorts out what's true. Players carry both players' private parts. The map grid
-carries visibility, seen and creep layers per player (in player-slot order, like the player
-tokens; ply_gridok says whose are filled: the viewer's in a player view, both in the combined
-view); the encoder embeds each player's layers with that player's code and sums them into one
-minimap, so "seen by this player, not by that one" is a feature it can learn.
+effect token of both views (a unit both players see is two tokens, a snapshot one player
+keeps of minerals the other saw destroyed stays a token), each marked with the view it
+came from (ent_src / eff_src: that viewer's player code) and its relation as that viewer
+sees it. Attention sorts out what's true. Players carry both players' private parts. The
+map grid carries visibility, seen and creep layers per player (in player-slot order,
+like the player tokens; ply_gridok says whose are filled: the viewer's in a player view,
+both in the combined view); the encoder embeds each player's layers with that player's
+code and sums them into one minimap, so "seen by this player, not by that one" is a
+feature it can learn.
 
 Ownership is a role, never an identity, and works for any game format:
     team code    random per sample from a pool of 8 (same code = same team)
@@ -151,9 +154,9 @@ PC_KEYS = (
     "warp_gate_count",
     "larva_count",
 )
-# player numbers: tracker stats (9), player_common (10), score details (78), then units lost (log), whether the
-# private parts are known, camera xy (normalized), subgroup, last command: age (log loops), has a point, x, y,
-# targets a unit
+# player numbers: tracker stats (9), player_common (10), score details (78), then units
+# lost (log), whether the private parts are known, camera xy (normalized), subgroup,
+# last command: age (log loops), has a point, x, y, targets a unit
 N_STATS = 9
 C_PLAYER = N_STATS + len(PC_KEYS) + len(SC_KEYS) + 2 + 2 + 1 + 5
 C_ENTITY, C_FORMAT, C_VIS = len(ENTITY_NUMS), 4, 2
@@ -175,9 +178,14 @@ GAS_GAP_LOOPS = 64  # longest out-of-sight harvest gap bridged (~2.9 s)
 # list-valued entity state pooled into the token: name -> number of item features
 BAGS = dict(ord=5, prod=2, buff=1, abil=1, rally=3)
 N_BUFF_IDS, N_RAW_ABILITY_IDS, N_EFFECT_IDS = 512, 4096, 64
-C_GROUPS = 11  # the unit's membership in its owner's control groups 0-9 and active selection (10), from the
-# extraction's selection tracker (grp_*): the memory a 2.5 s window cannot rebuild from events
-C_ORDER = 6  # the entity's current order: has one, target offset (x, y), targets a unit, progress, queue length
+# the unit's membership in its owner's control groups 0-9 and active selection (10),
+# from the
+C_GROUPS = 11
+# extraction's selection tracker (grp_*): the memory a 2.5 s window cannot rebuild from
+# events
+# the entity's current order: has one, target offset (x, y), targets a unit, progress,
+# queue length
+C_ORDER = 6
 GRID = 16  # the encoder's grid (G x G over the playable area)
 STAT_KEYS = (
     "minerals",
@@ -235,7 +243,8 @@ class GameFrames:
         self.known = (
             {self.viewer} if self.viewer else set()
         )  # players whose private state is in the view
-        # the engine's executed commands of the viewer, with recipients (state unit ids, ragged by start)
+        # the engine's executed commands of the viewer, with recipients (state unit ids,
+        # ragged by start)
         self.cmd = (
             {
                 k: d[f"cmd_{k}"]
@@ -281,7 +290,8 @@ class GameFrames:
             np.float32,
         )
         self._visibility(d)
-        self.lc_family = None  # [F, P] ability family of each player's last command (set_command_families)
+        # [F, P] ability family of each player's last command (set_command_families)
+        self.lc_family = None
 
     def __len__(self):
         return len(self.loops)
@@ -298,9 +308,9 @@ class GameFrames:
     )
 
     def _lists(self, d):
-        """Each row's ragged lists as (start, count) columns, so rows can be added and reordered;
-        the list arrays themselves are kept for the bags (orders, production, buffs, abilities,
-        rally points) and the passengers."""
+        """Each row's ragged lists as (start, count) columns, so rows can be added and
+        reordered; the list arrays themselves are kept for the bags (orders, production,
+        buffs, abilities, rally points) and the passengers."""
         u = self.u
         self.lists = {}
         for name, arr in self.LISTS.items():
@@ -336,7 +346,8 @@ class GameFrames:
             L["pass_"] = dict(id=d["pass_id"], type=d["pass_type"], hp=d["pass_hp"])
 
     def _row_lookup(self):
-        """(frame, unit id) -> row, for resolving the links between units of one frame."""
+        """(frame, unit id) -> row, for resolving the links between units of one
+        frame."""
         u = self.u
         key = (u["fidx"].astype(np.int64) << 32) | u["id"].astype(np.int64)
         order = np.argsort(key, kind="stable")
@@ -351,12 +362,13 @@ class GameFrames:
         return np.where((keys[i] == q) & (np.asarray(ids) >= 0), order[i], -1)
 
     def _contained(self, d):
-        """Rows for units inside other units, each with a pointer (parent id) to its container:
-        passengers (the extraction's passenger lists: transports, bunkers, command centers, ...)
-        sit at the container's position with the passenger flag; workers inside gas buildings,
-        which the observation drops while they harvest, are bridged between their last and next
-        sighting when their order was the gas building, with the in-gas flag. Add-ons get their
-        building as parent. Rows are then reordered by frame."""
+        """Rows for units inside other units, each with a pointer (parent id) to its
+        container: passengers (the extraction's passenger lists: transports, bunkers,
+        command centers, ...) sit at the container's position with the passenger flag;
+        workers inside gas buildings, which the observation drops while they harvest,
+        are bridged between their last and next sighting when their order was the gas
+        building, with the in-gas flag. Add-ons get their building as parent. Rows are
+        then reordered by frame."""
         u, n = self.u, len(self.u["id"])
         u["parent"] = np.full(n, -1, np.int32)
         u["inside"] = np.zeros(n, np.int8)  # 1 passenger, 2 in a gas building
@@ -380,7 +392,8 @@ class GameFrames:
             pid = P["id"][items].astype(np.int32)
             onmap = self._find(look, u["fidx"][rows], pid) >= 0
             rows, items, pid = rows[~onmap], items[~onmap], pid[~onmap]
-            # max hp of a passenger: its own value when it was on the map, else the largest seen for its type
+            # max hp of a passenger: its own value when it was on the map, else the
+            # largest seen for its type
             hpmax = self._max_hp_by_id(pid, P["type"][items])
             new.append(
                 dict(
@@ -401,7 +414,8 @@ class GameFrames:
         if new:
             self._append_rows(new)
 
-    # a passenger row starts as a copy of its transport's: these columns are the transport's own state
+    # a passenger row starts as a copy of its transport's: these columns are the
+    # transport's own state
     PASSENGER_RESET = dict(
         shield=0.0,
         shield_max=0.0,
@@ -455,9 +469,9 @@ class GameFrames:
         return out
 
     def _gas_gaps(self, look):
-        """Workers out of sight for at most GAS_GAP_LOOPS whose first order before the gap
-        targeted a gas building that exists through the gap: one row per missing frame at the
-        building's position."""
+        """Workers out of sight for at most GAS_GAP_LOOPS whose first order before the
+        gap targeted a gas building that exists through the gap: one row per missing
+        frame at the building's position."""
         u = self.u
         if "ord" not in self.lists:
             return None
@@ -508,8 +522,9 @@ class GameFrames:
         )
 
     def _append_rows(self, new):
-        """Adds rows copied from their source rows with the given columns overridden (lists
-        emptied: a contained unit's orders and the like aren't observed), then reorders by frame.
+        """Adds rows copied from their source rows with the given columns overridden
+        (lists emptied: a contained unit's orders and the like aren't observed), then
+        reorders by frame.
         """
         u = self.u
         add = {k: [] for k in u}
@@ -537,8 +552,8 @@ class GameFrames:
         ).astype(np.int64)
 
     def _links(self):
-        """Pointers resolved to rows: parent_row (container / building) and the engaged target's
-        offset, per row (rows of the same frame)."""
+        """Pointers resolved to rows: parent_row (container / building) and the engaged
+        target's offset, per row (rows of the same frame)."""
         u = self.u
         look = self._row_lookup()
         u["parent_row"] = self._find(look, u["fidx"], u["parent"]).astype(np.int64)
@@ -570,9 +585,9 @@ class GameFrames:
         )
 
     def _grids(self, d):
-        """Map layers at one cell per map unit, rows = y (verified against unit positions):
-        per frame visibility (0 hidden, 1 fogged, 2 visible) and creep bits; static pathing,
-        placement and terrain height."""
+        """Map layers at one cell per map unit, rows = y (verified against unit
+        positions): per frame visibility (0 hidden, 1 fogged, 2 visible) and creep bits;
+        static pathing, placement and terrain height."""
         W, H = self.meta["map_size"]
         self.map_wh = (int(W), int(H))
         self.vis_raw = d["vis"] if "vis" in d.files else None
@@ -595,16 +610,16 @@ class GameFrames:
 
     @property
     def grid_origin(self):
-        """World (x, y) of the grid's cell (0, 0): the playable area's corner rounded down to a
-        multiple of 16 (the grid is cropped to the playable area; cell boundaries stay on the
-        world's 16-unit lines)."""
+        """World (x, y) of the grid's cell (0, 0): the playable area's corner rounded
+        down to a multiple of 16 (the grid is cropped to the playable area; cell
+        boundaries stay on the world's 16-unit lines)."""
         x0, y0 = self.meta["playable"][:2]
         return np.array([x0 // 16 * 16, y0 // 16 * 16], np.int64)
 
     def grid(self, f):
-        """[C_GRID, h, w] uint8 layers of frame f (height raw 0-255, the rest 0/1), cropped to the
-        playable area from grid_origin. Visible, seen and creep are the viewer's, in the viewer's
-        player-slot layers (the rest zero)."""
+        """[C_GRID, h, w] uint8 layers of frame f (height raw 0-255, the rest 0/1),
+        cropped to the playable area from grid_origin. Visible, seen and creep are the
+        viewer's, in the viewer's player-slot layers (the rest zero)."""
         ox, oy = self.grid_origin
         x1, y1 = self.meta["playable"][2:]
         return self._full_grid(f)[:, oy:y1, ox:x1]
@@ -632,9 +647,9 @@ class GameFrames:
         return out
 
     def _player_extras(self, d):
-        """[F, P, ...] player_common, score details (viewer only: private), units lost per player
-        (from the deaths and the owners' last rows), the camera, its saved positions, the subgroup
-        and the last command."""
+        """[F, P, ...] player_common, score details (viewer only: private), units lost
+        per player (from the deaths and the owners' last rows), the camera, its saved
+        positions, the subgroup and the last command."""
         F, P = self.F, len(self.slots)
         self.pextra = np.zeros((F, P, C_PLAYER - N_STATS), np.float32)
         self.cam = np.zeros((F, P, 2), np.float32)
@@ -660,10 +675,12 @@ class GameFrames:
         self.pextra[:, :, base + 2 : base + 4] = np.where(
             known[None, :, None], (self.cam - self.center) / self.half, 0
         )
-        # units lost per player: deaths in the view, owner from the unit's last row before it died
+        # units lost per player: deaths in the view, owner from the unit's last row
+        # before it died
         if "dead_id" in d.files and len(d["dead_id"]):
             ds = d["dead_frame_start"]
-            # frame of each death (a death after the last frame's offset counts in the last frame)
+            # frame of each death (a death after the last frame's offset counts in the
+            # last frame)
             dfr = np.clip(
                 np.searchsorted(ds, np.arange(len(d["dead_id"])), side="right") - 1,
                 0,
@@ -680,7 +697,8 @@ class GameFrames:
                 c = np.cumsum(np.bincount(dfr[own == slot], minlength=F))
                 self.pextra[:, pi, base] = _log(c.astype(np.float32), 8.0)
         self.pextra[:, :, base + 1] = known[None]
-        # interface memory per player (the extraction keeps the viewer's: player axis is the tracked players)
+        # interface memory per player (the extraction keeps the viewer's: player axis is
+        # the tracked players)
         if "cam_save" in d.files and "grp_player" in d.files:
             tracked = [int(s) for s in d["grp_player"]]
             for ti, slot in enumerate(tracked):
@@ -715,8 +733,8 @@ class GameFrames:
                     )
 
     def set_command_families(self, family_of_link):
-        """Maps the last-command ability links to action families (needs the ruleset's link
-        table, which the action side holds)."""
+        """Maps the last-command ability links to action families (needs the ruleset's
+        link table, which the action side holds)."""
         self.lc_family = (
             np.vectorize(
                 lambda l: family_of_link(int(l)) if l >= 0 else 0, otypes=[np.int64]
@@ -726,10 +744,11 @@ class GameFrames:
         )
 
     def _production(self, d):
-        """What each producer (structure, egg, cocoon) is producing: the first queue entry,
-        its progress, the second entry's progress (non-zero only when two run at once, e.g.
-        a reactor) and the queue length. Production is state (resources committed, a timer
-        running); other units' orders are intent, which the state leaves out."""
+        """What each producer (structure, egg, cocoon) is producing: the first queue
+        entry, its progress, the second entry's progress (non-zero only when two run at
+        once, e.g. a reactor) and the queue length. Production is state (resources
+        committed, a timer running); other units' orders are intent, which the state
+        leaves out."""
         u, n = self.u, len(self.u["id"])
         if "prod" in self.lists:  # current extractor: production queues only
             start, count = u["prod_s"], u["prod_n"]
@@ -763,9 +782,10 @@ class GameFrames:
             u["queue"] = np.where(producer, u["n_orders"], 0)
 
     def _orders(self, d):
-        """The unit's first order, its current intent: the ability (vocab index) and C_ORDER
-        numbers (has an order, target offset from the unit in normalized map units, targets a
-        unit, progress, log queue length). Zeros for extractions without orders."""
+        """The unit's first order, its current intent: the ability (vocab index) and
+        C_ORDER numbers (has an order, target offset from the unit in normalized map
+        units, targets a unit, progress, log queue length). Zeros for extractions
+        without orders."""
         u, n = self.u, len(self.u["id"])
         u["order"] = np.zeros(n, np.int64)
         u["order_raw"] = np.zeros(n, np.int32)
@@ -790,9 +810,9 @@ class GameFrames:
         u["ord"][:, 4] = np.where(has, d["ord_progress"][first], 0)
         u["ord"][:, 5] = np.log1p(count) / 2
 
-    # unit columns the model and probes read, in the narrowest type that holds them; the rest
-    # (height, facing, cooldowns, ragged-list indices, ...) is dropped at load: memory bounds
-    # how many games (and player views) fit in the pool
+    # unit columns the model and probes read, in the narrowest type that holds them; the
+    # rest (height, facing, cooldowns, ragged-list indices, ...) is dropped at load:
+    # memory bounds how many games (and player views) fit in the pool
     KEEP = dict(
         id=np.int32,
         type=np.int16,
@@ -879,8 +899,9 @@ class GameFrames:
             self.stats[ok, pi] = feat[idx[ok]]
 
     def _visibility(self, d, grid=GRID):
-        """vis[f, cell] = (share of the cell visible now, share ever seen), cells row-major over
-        the playable area like the encoder's grid. The observer sees everything."""
+        """vis[f, cell] = (share of the cell visible now, share ever seen), cells
+        row-major over the playable area like the encoder's grid. The observer sees
+        everything."""
         F = len(self.loops)
         if "vis" not in d.files:
             self.vis = None
@@ -918,8 +939,9 @@ class GameFrames:
         Without augment, codes follow team order and slot order; with augment they're
         drawn at random from the pool, so a code never means anything beyond "same
         team" / "same player" within this sample. codes = (team permutation, player
-        permutation) uses given draws: samples that are compared with each other (a batch
-        with in-batch negatives) must share them, or the codes alone tell the samples apart.
+        permutation) uses given draws: samples that are compared with each other (a
+        batch with in-batch negatives) must share them, or the codes alone tell the
+        samples apart.
         """
         rng = rng or np.random
         teams = sorted({p["team"] for p in self.players})
@@ -959,8 +981,8 @@ class GameFrames:
     # ------------------------------------------------------------ one frame
 
     def entity_features(self, rows, owners, prefix="ent"):
-        """Encoder inputs for the given unit rows (any rows, any frames): what an entity token
-        is made of. Shared by frames and by actions that point at units."""
+        """Encoder inputs for the given unit rows (any rows, any frames): what an entity
+        token is made of. Shared by frames and by actions that point at units."""
         u = self.u
         hp, hpm = u["hp"][rows], u["hp_max"][rows]
         sh, shm = u["shield"][rows], u["shield_max"][rows]
@@ -1072,9 +1094,9 @@ class GameFrames:
         ]
 
     def bags(self, rows):
-        """List-valued state of the given rows, flattened: {name: (row index into rows, item id,
-        item features)}. Item ids: ability vocab index (orders, production), raw buff id, raw
-        ability id (available abilities), 0 (rally points)."""
+        """List-valued state of the given rows, flattened: {name: (row index into rows,
+        item id, item features)}. Item ids: ability vocab index (orders, production),
+        raw buff id, raw ability id (available abilities), 0 (rally points)."""
         u, L, out = self.u, self.lists, {}
         rows = np.asarray(rows)
 
@@ -1201,7 +1223,8 @@ class GameFrames:
         )
 
     def rows_of(self, f, ids):
-        """Unit rows in frame f for state unit ids; -1 where the unit isn't in that frame."""
+        """Unit rows in frame f for state unit ids; -1 where the unit isn't in that
+        frame."""
         if f not in self._rows_cache:
             if len(self._rows_cache) > 512:
                 self._rows_cache.clear()
@@ -1217,8 +1240,9 @@ class GameFrames:
         return np.where(sid[i] == ids, srow[i], -1)
 
     def _sources(self, rows, owners, ent, eff, f):
-        """Each token's source view as that viewer's player code (CODE_NEUTRAL: no single
-        viewer); in the combined view, relations as the source viewer sees them."""
+        """Each token's source view as that viewer's player code (CODE_NEUTRAL: no
+        single viewer); in the combined view, relations as the source viewer sees
+        them."""
         code = lambda slot: owners[slot][1] if slot in owners else CODE_NEUTRAL
         if "src" not in self.u or self.eff is None:
             n_e = len(eff["eff_type"])
@@ -1250,8 +1274,9 @@ class GameFrames:
         return out
 
     def groups(self, f, rows):
-        """[len(rows), C_GROUPS] membership bits of the frame's units in control groups 0-9 and the
-        active selection (10), every player's (a unit is only in its owner's), zeros without data.
+        """[len(rows), C_GROUPS] membership bits of the frame's units in control groups
+        0-9 and the active selection (10), every player's (a unit is only in its
+        owner's), zeros without data.
         """
         out = np.zeros((len(rows), C_GROUPS), np.float32)
         if self.grp is None:
@@ -1277,9 +1302,9 @@ class GameFrames:
         )
         ply_num = np.concatenate([self.stats[f, p_idx], self.pextra[f, p_idx]], -1)
         ply_ups = self.ups[f, p_idx]
-        if (
-            self.viewer
-        ):  # a player sees only their own economy and upgrades (the combined view: everyone's)
+        # a player sees only their own economy and upgrades (the combined view:
+        # everyone's)
+        if self.viewer:
             hide = np.array([self.slots[i] != self.viewer for i in p_idx])
             ply_num[:, :N_STATS] = np.where(hide[:, None], 0, ply_num[:, :N_STATS])
             ply_ups = np.where(hide[:, None], 0, ply_ups)
@@ -1375,7 +1400,8 @@ class GameFrames:
             bags=self.bags(rows),
             grid=self.grid(f),
             center=self.center,
-            half=self.half,  # playable half-extents, map units (the grid latent's geometry)
+            # playable half-extents, map units (the grid latent's geometry)
+            half=self.half,
             vis=vis,
             ruleset=self.meta.get("ruleset", ""),
             ply_upnames=[
@@ -1512,13 +1538,14 @@ def collate(frames):
 
 
 class CombinedFrames(GameFrames):
-    """The full-information view of a 1v1 game: its two player views side by side (no observer
-    extraction, no merging). Every row and effect of both views is kept, with u["src"] /
-    eff["src"] = the slot whose view it came from: a unit both players see is two rows, each as
-    that player sees it. Unit ids stay per view (the second view's are offset), so each row's
-    future is its own view's. A replay pointer resolves to the unit's row in either view
-    (alias: the same engine tag in the other view). Players: both players' private parts from
-    their own views. Grid: each view's layers in its player's slots.
+    """The full-information view of a 1v1 game: its two player views side by side (no
+    observer extraction, no merging). Every row and effect of both views is kept, with
+    u["src"] / eff["src"] = the slot whose view it came from: a unit both players see is
+    two rows, each as that player sees it. Unit ids stay per view (the second view's are
+    offset), so each row's future is its own view's. A replay pointer resolves to the
+    unit's row in either view (alias: the same engine tag in the other view). Players:
+    both players' private parts from their own views. Grid: each view's layers in its
+    player's slots.
 
     a, b: the two GameFrames (same frames)."""
 
@@ -1541,7 +1568,8 @@ class CombinedFrames(GameFrames):
         self.id_off = int(
             max(len(a.unit_tag), a.u["id"].max() + 1 if len(a.u["id"]) else 0)
         )
-        # rows: both views', frame by frame; the second view's ids, list starts and parent rows offset
+        # rows: both views', frame by frame; the second view's ids, list starts and
+        # parent rows offset
         u = {}
         na = len(a.u["id"])
         for k in a.u:
@@ -1575,7 +1603,8 @@ class CombinedFrames(GameFrames):
             for name in a.lists
             if name in b.lists
         }
-        # engine tags: id -> tag over both id ranges; alias: a unit's id in the other view
+        # engine tags: id -> tag over both id ranges; alias: a unit's id in the other
+        # view
         tag = np.zeros(self.id_off + len(b.unit_tag), np.uint64)
         tag[: len(a.unit_tag)] = a.unit_tag
         tag[self.id_off :] = b.unit_tag
@@ -1616,7 +1645,8 @@ class CombinedFrames(GameFrames):
             ).astype(np.int64)
         else:
             self.eff = None
-        # players: everyone's tracker stats and upgrades; private parts from the owner's view
+        # players: everyone's tracker stats and upgrades; private parts from the owner's
+        # view
         self.stats, self.ups = a.stats, np.maximum(a.ups, b.ups)
         self.pextra, self.cam = a.pextra.copy(), a.cam.copy()
         self.cam_save, self.cam_save_ok, self.lc_link = (
@@ -1639,7 +1669,8 @@ class CombinedFrames(GameFrames):
             if a.vis is not None and b.vis is not None
             else None
         )
-        # control groups and selections: both players' (the tracker axis is the views' tracked players)
+        # control groups and selections: both players' (the tracker axis is the views'
+        # tracked players)
         self.grp = self._join_groups(a, b)
 
     def _join_groups(self, a, b):

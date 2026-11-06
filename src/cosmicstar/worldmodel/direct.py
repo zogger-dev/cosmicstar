@@ -1,12 +1,13 @@
-"""Direct state-space prediction: the state at t (+ the commands in [t, t+k)) -> each entity's
-state at t+k, read by probes, for every horizon k (in game loops) up to 56 loops (2.5 s).
+"""Direct state-space prediction: the state at t (+ the commands in [t, t+k)) -> each
+entity's state at t+k, read by probes, for every horizon k (in game loops) up to 56
+loops (2.5 s).
 
-Why not JEPA at this level: SC2 state is already an abstraction (a list of entities with exact
-attributes), so regressing it wastes no capacity on unpredictable detail, needs no target
-encoder and cannot collapse. Given everyone's commands the engine is deterministic, so the
-only uncertainty in the observer view is the commands themselves; a latent z per (sample,
-player) absorbs them when they are withheld (action dropout) and should carry nothing when
-they are given. That gap is the first thing to measure.
+Why not JEPA at this level: SC2 state is already an abstraction (a list of entities with
+exact attributes), so regressing it wastes no capacity on unpredictable detail, needs no
+target encoder and cannot collapse. Given everyone's commands the engine is
+deterministic, so the only uncertainty in the observer view is the commands themselves;
+a latent z per (sample, player) absorbs them when they are withheld (action dropout) and
+should carry nothing when they are given. That gap is the first thing to measure.
 
 Pieces (scripts/train_direct.py wires them):
 
@@ -23,8 +24,9 @@ Pieces (scripts/train_direct.py wires them):
     PriorHead         p(z | present, commands or "withheld") as a mixture of Gaussians, in the
                       format of latent.py so its KL / sampling helpers apply
 
-Two-hot targets (MuZero style) make a unit that may go left or right a bimodal prediction
-instead of a blur between; the expected value of the distribution is the point estimate.
+Two-hot targets (MuZero style) make a unit that may go left or right a bimodal
+prediction instead of a blur between; the expected value of the distribution is the
+point estimate.
 """
 
 import math
@@ -46,9 +48,9 @@ N_EXIT = 3
 
 
 class RoPE2D(nn.Module):
-    """Rotary positions over the plane: half of each head's pairs rotate with x, half with y,
-    at wavelengths from `lo` to `hi` map units (geometric). Tokens without a place (CLS,
-    players) sit at the origin, as RoPE-ViT does with its class token."""
+    """Rotary positions over the plane: half of each head's pairs rotate with x, half
+    with y, at wavelengths from `lo` to `hi` map units (geometric). Tokens without a
+    place (CLS, players) sit at the origin, as RoPE-ViT does with its class token."""
 
     def __init__(self, dh, lo=2.0, hi=256.0):
         super().__init__()
@@ -73,8 +75,8 @@ class RoPE2D(nn.Module):
 
 
 class Block(nn.Module):
-    """Pre-norm transformer block: self-attention with 2D RoPE, optional cross-attention to a
-    memory (no positions), MLP."""
+    """Pre-norm transformer block: self-attention with 2D RoPE, optional cross-attention
+    to a memory (no positions), MLP."""
 
     def __init__(self, d, heads, rope, mlp_ratio=4.0, cross=False):
         super().__init__()
@@ -114,17 +116,17 @@ class Block(nn.Module):
 
 
 def positions(b):
-    """Map positions in map units of the token sequence [CLS, players, entities]: zeros for
-    CLS and players, the entities' normalized xy times the playable half-extent."""
+    """Map positions in map units of the token sequence [CLS, players, entities]: zeros
+    for CLS and players, the entities' normalized xy times the playable half-extent."""
     B, P = b["ply_mask"].shape
     ent = b["ent_xy"] * b["cells"][:, None]
     return torch.cat([ent.new_zeros(B, 1 + P, 2), ent], 1)
 
 
 class RoPEEncoder(StateEncoder):
-    """The state encoder's embedding (unit / owner / position / numbers / production / order
-    tables) under RoPE self-attention. Returns the full token sequence; no grid or window
-    readouts (this model predicts state, not slots)."""
+    """The state encoder's embedding (unit / owner / position / numbers / production /
+    order tables) under RoPE self-attention. Returns the full token sequence; no grid or
+    window readouts (this model predicts state, not slots)."""
 
     def __init__(self, vocab, d=256, depth=6, heads=8, mlp_ratio=4.0, ruleset=None):
         super().__init__(vocab, d, depth=1, heads=heads, mlp_ratio=mlp_ratio)
@@ -133,7 +135,8 @@ class RoPEEncoder(StateEncoder):
         self.layers = nn.ModuleList(
             [Block(d, heads, self.rope, mlp_ratio) for _ in range(depth)]
         )
-        # types from the game's balance data (worldmodel/ruleset.py) instead of the learned tables
+        # types from the game's balance data (worldmodel/ruleset.py) instead of the
+        # learned tables
         self.ruleset = ruleset
         if ruleset is not None:
             del self.unit, self.ability, self.upgrade
@@ -142,8 +145,9 @@ class RoPEEncoder(StateEncoder):
             )
 
     def _rs_batch(self, b, g):
-        """The rulesets of the samples the group g belongs to: the frame's own for entities,
-        the window's for action pointers (collate_actions carries them as act_ruleset).
+        """The rulesets of the samples the group g belongs to: the frame's own for
+        entities, the window's for action pointers (collate_actions carries them as
+        act_ruleset).
         """
         return b["ruleset"] if g == "ent" else b["act_ruleset"]
 
@@ -250,7 +254,8 @@ class RoPEEncoder(StateEncoder):
 
 
 class DirectPredictor(nn.Module):
-    """Encoded present (+ z added to the tokens by the caller) -> per-token state at t + k."""
+    """Encoded present (+ z added to the tokens by the caller) -> per-token state at t +
+    k."""
 
     def __init__(self, d=256, depth=4, heads=8, mlp_ratio=4.0):
         super().__init__()
@@ -267,8 +272,9 @@ class DirectPredictor(nn.Module):
         nn.init.normal_(self.null, std=0.02)
 
     def forward(self, x, mask, ang, hor_loops, mem, mem_mask):
-        """x [B, T, d], mask [B, T], ang [B, T, dh/2], hor_loops [B] game loops, mem [B, N, d] action
-        tokens with mem_mask [B, N] (False everywhere when commands are withheld)."""
+        """x [B, T, d], mask [B, T], ang [B, T, dh/2], hor_loops [B] game loops, mem [B,
+        N, d] action tokens with mem_mask [B, N] (False everywhere when commands are
+        withheld)."""
         B = x.shape[0]
         x = x + self.hor_in(self.time(hor_loops))[:, None].to(x.dtype)
         mem = torch.cat([self.null.expand(B, -1, -1).to(mem.dtype), mem], 1)
@@ -311,9 +317,10 @@ def soft_ce(logits, target):
 
 
 class Probes(nn.Module):
-    """Per-entity readouts at t + k, as changes from t where the quantity is continuous (so
-    "nothing happens" is the same target for every unit): position offsets in map units over
-    [-pos_range, pos_range], hp / shield / energy / build-progress fraction changes over [-1, 1].
+    """Per-entity readouts at t + k, as changes from t where the quantity is continuous
+    (so "nothing happens" is the same target for every unit): position offsets in map
+    units over [-pos_range, pos_range], hp / shield / energy / build-progress fraction
+    changes over [-1, 1].
     """
 
     POS_BINS, FRAC_BINS = 81, 65
@@ -346,9 +353,9 @@ class Probes(nn.Module):
         return {k: head(h).float() for k, head in self.heads.items()}
 
     def losses(self, out, tgt, mask):
-        """out: the heads' logits [B, N, *]; tgt: dict of targets [B, N] (exit class, dx, dy,
-        fractions, order index); mask [B, N] real entities. Returns per-head mean losses, the
-        attribute heads over entities present at t + k."""
+        """out: the heads' logits [B, N, *]; tgt: dict of targets [B, N] (exit class,
+        dx, dy, fractions, order index); mask [B, N] real entities. Returns per-head
+        mean losses, the attribute heads over entities present at t + k."""
         m = mask.float()
         present = m * (tgt["exit"] == EXIT_PRESENT).float()
         avg = lambda x, w: (x * w).sum() / w.sum().clamp(min=1)
@@ -380,8 +387,8 @@ class Probes(nn.Module):
         return L
 
     def point(self, out):
-        """Point estimates from the heads: exit class, dx / dy / fractions as expectations,
-        order as argmax."""
+        """Point estimates from the heads: exit class, dx / dy / fractions as
+        expectations, order as argmax."""
         R = self.pos_range
         est = dict(
             exit=out["exit"].argmax(-1),
@@ -396,9 +403,10 @@ class Probes(nn.Module):
 
 class PriorHead(nn.Module):
     """p(z | input) as a mixture of K diagonal Gaussians, in latent.py's dict format
-    (logits [B, P, K], mu / lv [B, P, K, d_z]). The input is whatever the caller assembles per
-    (sample, player): here the present's CLS and player slot, the player's command summary (or
-    zeros) and a flag embedding saying whether commands were given."""
+    (logits [B, P, K], mu / lv [B, P, K, d_z]). The input is whatever the caller
+    assembles per (sample, player): here the present's CLS and player slot, the player's
+    command summary (or zeros) and a flag embedding saying whether commands were
+    given."""
 
     def __init__(self, d_in, d_z, K=1, hidden=None):
         super().__init__()

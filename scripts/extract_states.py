@@ -6,11 +6,11 @@ Observing as a player instead hides private details of everyone else's units eve
 fog off (production and its progress, add-ons, cargo; undetected cloaked units come
 back with owner 0 and no HP), so observer mode is the only complete view. Commands
 aren't extracted here: they come from the replay's own command events (see
-unit_tag below for linking them to these units). Unit orders (move, attack, gather, train,
-...) and their targets are kept (ord_*): they are the part of the coming change that is
-already decided, so a single frame with them is close to a Markov state. Output is one
-packed state file (.cst, worldmodel/statefile.py: per-unit deltas + zstd, read with
-statefile.load) per replay in --out:
+unit_tag below for linking them to these units). Unit orders (move, attack, gather,
+train, ...) and their targets are kept (ord_*): they are the part of the coming change
+that is already decided, so a single frame with them is close to a Markov state. Output
+is one packed state file (.cst, worldmodel/statefile.py: per-unit deltas + zstd, read
+with statefile.load) per replay in --out:
 
     frame_loop[F]            game loop of each frame
     frame_start[F+1]         unit rows of frame f are u_*[frame_start[f]:frame_start[f+1]]
@@ -51,13 +51,14 @@ statefile.load) per replay in --out:
 Not here: creep (an observer's creep map is always empty; creep's sources - hatcheries,
 tumors, overlords - are in the state) and commands (from the replay's own events).
 
-Every player's view of the replay is extracted (observed_player_id = slot, fog on), exactly as
-the engine shows it to that player, to the games tree (worldmodel/corpus.py):
+Every player's view of the replay is extracted (observed_player_id = slot, fog on),
+exactly as the engine shows it to that player, to the games tree (worldmodel/corpus.py):
 data/games/<format>/<build>/<map>/<id>.p<slot>.cst, next to the game's action table
 (<id>.acts.npz) and its extraction sidecar (<id>.meta.json: per view the layout, step,
-substep, stats, extractor commit; a failed view leaves <id>.p<slot>.fail.json). The observer
-view (fog off) is extracted only with --observer, for its neutrals; it reports no orders, production,
-passengers or effects, so a player's own units come from that player's view. Each view has the layout above plus:
+substep, stats, extractor commit; a failed view leaves <id>.p<slot>.fail.json). The
+observer view (fog off) is extracted only with --observer, for its neutrals; it reports
+no orders, production, passengers or effects, so a player's own units come from that
+player's view. Each view has the layout above plus:
 
     vis[F, H, W]             the player's visibility map per frame (0 never seen, 1 fogged,
                              2 visible; the engine's own map_state)
@@ -83,8 +84,8 @@ passengers or effects, so a player's own units come from that player's view. Eac
                              leader type per group, the selection panel's unit types), for
                              validating grp_* (needs the feature layer on)
 
-Layout 2 (meta["layout"] == 2, 2026-10-30): everything else the raw API reports, nothing left
-on the table for the model to need later:
+Layout 2 (meta["layout"] == 2, 2026-10-30): everything else the raw API reports, nothing
+left on the table for the model to need later:
 
     u_flags2                 F2_ACTIVE (a structure that is doing something), F2_BLIP (radar
                              blip), F2_ONSCREEN (on the observed player's screen)
@@ -128,33 +129,37 @@ on the table for the model to need later:
                              names plus minerals_killed_army, vespene_lost_economy,
                              minerals_used_in_progress_technology, ...; see stat_name)
 
-Nothing is derived or masked here: other players' private details, snapshots of structures in
-fog and undetected cloaked units are whatever the engine reports for that player.
+Nothing is derived or masked here: other players' private details, snapshots of
+structures in fog and undetected cloaked units are whatever the engine reports for that
+player.
 
 The engine's client keeps a unit that left the player's vision in the observation for 47
-observation *requests*, not game loops (measured: 2.1 s at one request per loop, 8.4 s at one
-per 4 loops, longer still at 8), so a player view stepped several loops per observation leaks
-enemy movement through the fog. --substep 1 (the default for player views) requests an
-observation every loop and discards the intermediate ones unparsed, which reproduces the
-loop-by-loop observation exactly (verified on 200 s of one game, all three views: visible
-units identical at every loop) for ~15% more time. Observer views have no fog and skip it.
-Snapshot units (display 2) carry client-assigned tags that differ between runs.
+observation *requests*, not game loops (measured: 2.1 s at one request per loop, 8.4 s
+at one per 4 loops, longer still at 8), so a player view stepped several loops per
+observation leaks enemy movement through the fog. --substep 1 (the default for player
+views) requests an observation every loop and discards the intermediate ones unparsed,
+which reproduces the loop-by-loop observation exactly (verified on 200 s of one game,
+all three views: visible units identical at every loop) for ~15% more time. Observer
+views have no fog and skip it. Snapshot units (display 2) carry client-assigned tags
+that differ between runs.
 
 Unit tags are mapped to small per-replay ids (u_id); anything that points at a unit
 (add-ons, engaged targets, passengers, deaths) uses the same ids (-1 = none).
 
-Parsing: observations are protobuf; the pure-Python parser was 44% of the frame time. Run
-scripts/regen_s2proto.py once per environment to rewrite the s2clientprotocol bindings in the
-modern style, and the workers use the C++ (upb) parser automatically (protobuf_impl).
+Parsing: observations are protobuf; the pure-Python parser was 44% of the frame time.
+Run scripts/regen_s2proto.py once per environment to rewrite the s2clientprotocol
+bindings in the modern style, and the workers use the C++ (upb) parser automatically
+(protobuf_impl).
 
-Request costs (measured, 200 s of a game, upb): step calls are nearly free whatever their
-size (4 x step(1) costs the same as step(4)); each observation request costs ~2 ms of engine
-time (it serializes the raw observation) and parsing it ~0.1 ms; a RequestPing is cheap but
-does NOT advance the client's fog timers, only observation requests do. So for a player view
-the per-loop observation is required anyway (see --substep), and keeping and parsing every one
-of them (--step 1) costs about the same as discarding three of four: ~16 s per 200 s of game
-plus our own per-frame processing. The Windows client has no headless mode; its window is
-minimized after launch (minimize_client_window), which made stepping ~20% faster.
+Request costs (measured, 200 s of a game, upb): step calls are nearly free whatever
+their size (4 x step(1) costs the same as step(4)); each observation request costs ~2 ms
+of engine time (it serializes the raw observation) and parsing it ~0.1 ms; a RequestPing
+is cheap but does NOT advance the client's fog timers, only observation requests do. So
+for a player view the per-loop observation is required anyway (see --substep), and
+keeping and parsing every one of them (--step 1) costs about the same as discarding
+three of four: ~16 s per 200 s of game plus our own per-frame processing. The Windows
+client has no headless mode; its window is minimized after launch
+(minimize_client_window), which made stepping ~20% faster.
 
 Usage:
     python scripts/extract_states.py --format 1v1 --step 4 --workers 12     # every 1v1 game not yet done
@@ -177,8 +182,9 @@ import numpy as np
 
 LPS = 22.4
 EXCLUDED_BUILDS = {97364, 97425, 97563}  # patch 5.0.16, reverted
-# Importing the Wine run config registers it with pysc2: on Linux the Windows client runs under
-# Wine/Proton from a Lutris prefix (cosmicstar/envs/wine_run_config.py; SC2PATH overrides).
+# Importing the Wine run config registers it with pysc2: on Linux the Windows client
+# runs under Wine/Proton from a Lutris prefix (cosmicstar/envs/wine_run_config.py;
+# SC2PATH overrides).
 from cosmicstar.envs.wine_run_config import (
     battlenet_cache_dirs,
     sc2_install_dir,
@@ -193,7 +199,8 @@ BALANCE_DIR = (
     "data/worldmodel/balance"  # Editor exports per ruleset (export_balance.py)
 )
 CACHE_DIRS = battlenet_cache_dirs(SC2_DIR)
-FETCH_MISSING = True  # fetch a replay's missing map/mods from the depot into CACHE_DIRS[0] (--no_fetch off)
+# fetch a replay's missing map/mods from the depot into CACHE_DIRS[0] (--no_fetch off)
+FETCH_MISSING = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 U_DTYPES = dict(  # one row per (frame, unit)
@@ -238,7 +245,8 @@ U_DTYPES = dict(  # one row per (frame, unit)
     rally_start=np.int64,
     ab_start=np.int64,
 )
-R_DTYPES = dict(  # ragged: unit row i owns [<x>_start[i], <x>_start[i+1]) (the last row: to the end)
+# ragged: unit row i owns [<x>_start[i], <x>_start[i+1]) (the last row: to the end)
+R_DTYPES = dict(
     prod_abil=np.int16,
     prod_progress=np.float16,
     b_id=np.int16,
@@ -259,14 +267,17 @@ R_DTYPES = dict(  # ragged: unit row i owns [<x>_start[i], <x>_start[i+1]) (the 
 E_DTYPES = dict(
     type=np.int16, owner=np.int8, x=np.float32, y=np.float32, radius=np.float16
 )
-# per-frame ragged tables from the raw observation's player block (row i of frame f: [<x>_frame_start[f], ...[f+1]))
+# per-frame ragged tables from the raw observation's player block (row i of frame f:
+# [<x>_frame_start[f], ...[f+1]))
 PW_DTYPES = dict(
     x=np.float32, y=np.float32, radius=np.float16, id=np.int32
 )  # power sources (pylons, warp prisms)
 RD_DTYPES = dict(
     x=np.float32, y=np.float32, radius=np.float16
 )  # radar rings (sensor towers)
-CMD_DTYPES = dict(  # player views: the engine's executed commands (recipients: cmd_unit, ragged by cmd_start)
+# player views: the engine's executed commands (recipients: cmd_unit, ragged by
+# cmd_start)
+CMD_DTYPES = dict(
     loop=np.int32,
     frame=np.int32,
     abil=np.int32,
@@ -278,7 +289,8 @@ CMD_DTYPES = dict(  # player views: the engine's executed commands (recipients: 
     start=np.int64,
 )
 
-# Unit flags packed into u_flags (F_SELECTED: the observed player's selection, player views only).
+# Unit flags packed into u_flags (F_SELECTED: the observed player's selection, player
+# views only).
 F_FLYING, F_BURROWED, F_CLOAKED, F_HALLUC, F_SNAPSHOT, F_POWERED, F_SELECTED = (
     1,
     2,
@@ -288,12 +300,15 @@ F_FLYING, F_BURROWED, F_CLOAKED, F_HALLUC, F_SNAPSHOT, F_POWERED, F_SELECTED = (
     32,
     64,
 )
+# u_flags2: is_active (a structure doing something), radar blip, on the player's screen
 F2_ACTIVE, F2_BLIP, F2_ONSCREEN = (
     1,
     2,
     4,
-)  # u_flags2: is_active (a structure doing something), radar blip, on the player's screen
-LAYOUT = 3  # meta["layout"]: 2 = everything the raw API reports (rally, score, player_common, abilities, ...); 3 = and per-frame pathable, buildable
+)
+# meta["layout"]: 2 = everything the raw API reports (rally, score, player_common,
+# abilities, ...); 3 = and per-frame pathable, buildable
+LAYOUT = 3
 
 PLAYER_STATS = {  # tracker PlayerStats field -> output name (food is fixed point /4096)
     "m_scoreValueMineralsCurrent": "minerals",
@@ -312,8 +327,9 @@ PLAYER_STATS = {  # tracker PlayerStats field -> output name (food is fixed poin
 
 
 def stat_name(key):
-    """m_scoreValueMineralsLostArmy -> minerals_lost_army (the tracker's other stats: killed,
-    lost, friendly fire, used current / in progress, per army / economy / technology).
+    """m_scoreValueMineralsLostArmy -> minerals_lost_army (the tracker's other stats:
+    killed, lost, friendly fire, used current / in progress, per army / economy /
+    technology).
     """
     key = (
         key[len("m_scoreValue") :]
@@ -354,8 +370,8 @@ def run_config_for(info):
 
 
 def map_path(map_hash, handles=None):
-    """The cached map archive; with the replay's handles and FETCH_MISSING, fetches the map and
-    any missing mod from the depot first."""
+    """The cached map archive; with the replay's handles and FETCH_MISSING, fetches the
+    map and any missing mod from the depot first."""
     p = depot.find_cached(CACHE_DIRS, map_hash, "s2ma")
     if (
         handles
@@ -365,7 +381,8 @@ def map_path(map_hash, handles=None):
             or any(depot.find_cached(CACHE_DIRS, h, ext) is None for ext, h in handles)
         )
     ):
-        # a cached map with an uncached mod (a tournament's balance mod) fails to launch too
+        # a cached map with an uncached mod (a tournament's balance mod) fails to launch
+        # too
         depot.ensure_cached(handles, CACHE_DIRS, log=lambda m: print(m, flush=True))
         p = depot.find_cached(CACHE_DIRS, map_hash, "s2ma")
     return p
@@ -415,14 +432,21 @@ STRUCTURE = 8  # Attribute.Structure
 # (orbital, lair, hive, baneling, overseer, warp gate...). Excludes structures' other
 # orders: lift/land, root/uproot, depot lower, tumor spread, attack, move, recharge.
 PRODUCTION = re.compile(r"Train|Research|AddOns|UpgradeTo|MorphTo|MorphBuilding", re.I)
-# `kill -USR1 <worker pid>` prints every thread's Python stack to the worker's stderr (the
-# workers' stderr goes to <out>/workers.log): the tool for a worker that sits on a stuck engine
+# `kill -USR1 <worker pid>` prints every thread's Python stack to the worker's stderr
+# (the workers' stderr goes to <out>/workers.log): the tool for a worker that sits on a
+# stuck engine
 if hasattr(faulthandler, "register") and hasattr(__import__("signal"), "SIGUSR1"):
     faulthandler.register(__import__("signal").SIGUSR1, all_threads=True)
 LAUNCH_LOCK = os.path.join(tempfile.gettempdir(), "cosmicstar_sc2_launch.lock")
-ENGINE_TIMEOUT = 90  # seconds a worker waits for the engine to launch and start the replay (map load included)
-STEP_TIMEOUT = 30  # seconds for any request once the replay runs (a step or observation normally takes milliseconds)
-LAUNCH_SETTLE = 8  # seconds the launch lock is held after the replay started, for the engine's shared temp files
+# seconds a worker waits for the engine to launch and start the replay (map load
+# included)
+ENGINE_TIMEOUT = 90
+# seconds for any request once the replay runs (a step or observation normally takes
+# milliseconds)
+STEP_TIMEOUT = 30
+# seconds the launch lock is held after the replay started, for the engine's shared temp
+# files
+LAUNCH_SETTLE = 8
 
 
 class launch_lock:
@@ -470,7 +494,8 @@ class launch_lock:
 
 
 def tracker_lifecycle(path, until):
-    """Engine tag -> loop of each unit's birth/init and death, from the replay's own log."""
+    """Engine tag -> loop of each unit's birth/init and death, from the replay's own
+    log."""
     import mpyq
 
     a = mpyq.MPQArchive(path)
@@ -506,18 +531,21 @@ class DesyncCheck:
             d = self.died.get(t)
             if d is not None and loop > d + self.grace:
                 raise RuntimeError(
-                    f"desync at {loop / LPS:.0f}s: unit {t} died at {d / LPS:.0f}s in the replay but is alive"
+                    f"desync at {loop / LPS:.0f}s: unit {t} died at {d / LPS:.0f}s in"
+                    " the replay but is alive"
                 )
             b = self.born.get(t)
             if b is None or b > loop + self.grace:
                 raise RuntimeError(
-                    f"desync at {loop / LPS:.0f}s: unit {t} isn't in the replay's unit log"
+                    f"desync at {loop / LPS:.0f}s: unit {t} isn't in the replay's"
+                    " unit log"
                 )
 
 
 class TypedList:
-    """A growing column held as typed arrays instead of Python objects: append, extend and len as a list, np.asarray
-    for the whole. Python lists of a long game's available abilities alone reached about 7 GB at one frame per loop.
+    """A growing column held as typed arrays instead of Python objects: append, extend
+    and len as a list, np.asarray for the whole. Python lists of a long game's available
+    abilities alone reached about 7 GB at one frame per loop.
     """
 
     def __init__(self, dtype, flush=1 << 16):
@@ -546,7 +574,8 @@ class TypedList:
         return self.n
 
     def take(self):
-        """What's held, as one array, and let it go; the count keeps running (ragged offsets stay absolute)."""
+        """What's held, as one array, and let it go; the count keeps running (ragged
+        offsets stay absolute)."""
         out = np.asarray(self)
         self.chunks = []
         return out
@@ -580,9 +609,10 @@ ARROW_FRAMES = (
 
 
 class ArrowView:
-    """Streams a view to <view>.units.arrow (one row per unit, ragged lists as list columns) and <view>.frames.arrow (one
-    row per frame: loop, grids, the player block), a record batch per ARROW_FRAMES frames, zstd per buffer. Unit columns are
-    deltas from the batch's first frame on (worldmodel/arrow_state.py)."""
+    """Streams a view to <view>.units.arrow (one row per unit, ragged lists as list
+    columns) and <view>.frames.arrow (one row per frame: loop, grids, the player block),
+    a record batch per ARROW_FRAMES frames, zstd per buffer. Unit columns are deltas
+    from the batch's first frame on (worldmodel/arrow_state.py)."""
 
     def __init__(self, out_path):
         import pyarrow as pa
@@ -676,10 +706,11 @@ def extract(
     acts_path=None,
     arrow=False,
 ):
-    """Plays one replay and saves every frame (see the module doc). perspective 0: observer,
-    fog off; a player slot: as that player sees it (fog on); ui: also the engine's control group
-    and selection panel summaries (ui_*), which need the feature layer on; abilities: query the
-    abilities each unit can use right now at every frame (ab_*: the only cooldown signal).
+    """Plays one replay and saves every frame (see the module doc). perspective 0:
+    observer, fog off; a player slot: as that player sees it (fog on); ui: also the
+    engine's control group and selection panel summaries (ui_*), which need the feature
+    layer on; abilities: query the abilities each unit can use right now at every frame
+    (ab_*: the only cooldown signal).
     """
     from pysc2.lib import protocol
     from s2clientprotocol import query_pb2, sc2api_pb2 as sc_pb
@@ -707,8 +738,9 @@ def extract(
             ids[tag] = len(ids)
         return ids[tag]
 
-    # Player views: the engine's executed commands with their recipients (every observation,
-    # the per-loop ones included) and its per-frame control group / selection panel summary.
+    # Player views: the engine's executed commands with their recipients (every
+    # observation, the per-loop ones included) and its per-frame control group /
+    # selection panel summary.
     cmd = {k: [] for k in CMD_DTYPES}
     cmd_tags = []  # recipients' engine tags, flat; mapped to ids at the end
     cmd["start"].append(0)
@@ -766,8 +798,9 @@ def extract(
     dead = TypedList(np.int32)
     frame_loop, frame_start, eff_start, dead_start = [], [0], [0], [0]
     vis, creep, pathable, buildable = [], [], [], []  # player views only
-    # layout 2: the observed player's block per frame (player_common, score details, camera; the
-    # observer's are the engine's placeholders), and the raw player block's ragged tables
+    # layout 2: the observed player's block per frame (player_common, score details,
+    # camera; the observer's are the engine's placeholders), and the raw player block's
+    # ragged tables
     pc = collections.defaultdict(lambda: TypedList(np.float32))  # pc_<field>[F]
     sc = collections.defaultdict(
         lambda: TypedList(np.float32)
@@ -815,7 +848,8 @@ def extract(
         flushed[0] = f1
 
     def take_player(obs, raw):
-        # every declared field (unset ones read as 0), so the per-frame columns stay aligned
+        # every declared field (unset ones read as 0), so the per-frame columns stay
+        # aligned
         for fd in obs.player_common.DESCRIPTOR.fields:
             if fd.name != "player_id":
                 pc[fd.name].append(getattr(obs.player_common, fd.name))
@@ -845,10 +879,11 @@ def extract(
         pu_start.append(len(pu))
 
     def available_abilities(units):
-        """unit tag -> the abilities it can use right now (resource costs ignored): a used Blink,
-        Stim or bile is missing until its cooldown ends. One query per frame for the observed
-        player's visible units; the engine answers nothing for units the observer doesn't control
-        (tested: 0 rows for all three owners), so the observer view skips the query."""
+        """unit tag -> the abilities it can use right now (resource costs ignored): a
+        used Blink, Stim or bile is missing until its cooldown ends. One query per frame
+        for the observed player's visible units; the engine answers nothing for units
+        the observer doesn't control (tested: 0 rows for all three owners), so the
+        observer view skips the query."""
         if not abilities or ab_failed[0] or perspective == 0:
             return {}
         tags = [u.tag for u in units if u.display_type == 1 and u.alliance == 1]
@@ -875,14 +910,17 @@ def extract(
         return {r.unit_tag: r.abilities for r in resp.abilities}
 
     if perspective == 0:
-        substep = 0  # no fog in the observer view: the per-loop observation requests are pointless there
-    # pysc2's default controller timeout is 6 hours: a hung engine (seen at startup when the
-    # prefix's wineserver was rebooting) would park the worker for the day. ENGINE_TIMEOUT makes
-    # it a "timed out" error, which run_worker retries.
-    # One launch at a time, through the replay start: eight Proton launches at once each run
-    # Proton's prefix setup, which restarts the prefix's wineserver under the others (the losers
-    # hang at the umu.exe stage), and the map load below must not overlap either. Once running,
-    # engines are concurrent; after the first wave they rarely collide.
+        # no fog in the observer view: the per-loop observation requests are pointless
+        # there
+        substep = 0
+    # pysc2's default controller timeout is 6 hours: a hung engine (seen at startup when
+    # the prefix's wineserver was rebooting) would park the worker for the day.
+    # ENGINE_TIMEOUT makes it a "timed out" error, which run_worker retries.
+    # One launch at a time, through the replay start: eight Proton launches at once each
+    # run Proton's prefix setup, which restarts the prefix's wineserver under the others
+    # (the losers hang at the umu.exe stage), and the map load below must not overlap
+    # either. Once running, engines are concurrent; after the first wave they rarely
+    # collide.
     lock = launch_lock()
     lock.__enter__()
     try:
@@ -901,8 +939,10 @@ def extract(
                 raw_affects_selection=False,
             )
             if perspective:
-                # the minimap at the map's own size: pathable and buildable per frame, as this player knows them. The
-                # smallest screen, since no screen layer is kept. ui_data (control groups, selection panel) needs the layer on too.
+                # the minimap at the map's own size: pathable and buildable per frame,
+                # as this player knows them. The smallest screen, since no screen layer
+                # is kept. ui_data (control groups, selection panel) needs the layer on
+                # too.
                 opts.feature_layer.width = 24
                 opts.feature_layer.resolution.x = opts.feature_layer.resolution.y = 16
                 (
@@ -910,19 +950,21 @@ def extract(
                     opts.feature_layer.minimap_resolution.y,
                 ) = info["map_cells"]
             req = sc_pb.RequestStartReplay(
-                # observer: fog off, everything; a player: that player's view, fog on (module doc)
+                # observer: fog off, everything; a player: that player's view, fog on
+                # (module doc)
                 replay_data=data,
                 observed_player_id=perspective,
                 disable_fog=perspective == 0,
                 options=opts,
             )
             if not current:
-                # the map passed in, not looked up by handle: by handle the older engine sometimes
-                # tries to validate / download the dependency through Battle.net, fails without a
-                # session and the replay is over the moment it starts (7 of 10 games in one batch,
-                # 2026-10-30, the same map both working and failing). The launch lock is held through
-                # this because with map_data SC2 writes a shared temp map file that concurrent
-                # starts can pick up from each other (InvalidReplayData or a desync).
+                # the map passed in, not looked up by handle: by handle the older engine
+                # sometimes tries to validate / download the dependency through
+                # Battle.net, fails without a session and the replay is over the moment
+                # it starts (7 of 10 games in one batch, 2026-10-30, the same map both
+                # working and failing). The launch lock is held through this because
+                # with map_data SC2 writes a shared temp map file that concurrent starts
+                # can pick up from each other (InvalidReplayData or a desync).
                 req.map_data = open(mp, "rb").read()
             c.start_replay(req)
             c._client._sock.settimeout(
@@ -932,15 +974,17 @@ def extract(
                 c.data_raw()
             )  # this game's own rules decide what counts as production
             if c.status == protocol.Status.ended:
-                # the game is over the moment it starts, intermittently per start (the same game
-                # passes on another try; 2026-10-30): the start response still says in_replay,
-                # the ended status arrives with the next responses. Retried by run_worker.
+                # the game is over the moment it starts, intermittently per start (the
+                # same game passes on another try; 2026-10-30): the start response still
+                # says in_replay, the ended status arrives with the next responses.
+                # Retried by run_worker.
                 raise RuntimeError("replay ended at start")
             gi = c.game_info()
-            # The engine keeps reading its launch map from the shared temp folder (TempLaunchMap~N,
-            # TempKeyFrameP*) after start_replay returns; a start queued right behind it collided
-            # and was refused with InvalidReplayData (bursts, 2026-10-30). The lock is held through
-            # the first requests and a settle time so the next start begins on a quiet folder.
+            # The engine keeps reading its launch map from the shared temp folder
+            # (TempLaunchMap~N, TempKeyFrameP*) after start_replay returns; a start
+            # queued right behind it collided and was refused with InvalidReplayData
+            # (bursts, 2026-10-30). The lock is held through the first requests and a
+            # settle time so the next start begins on a quiet folder.
             if not os.environ.get(
                 "WINEPREFIX"
             ):  # shared base prefix only; pool prefixes share no temp files
@@ -967,7 +1011,8 @@ def extract(
         info["map_size"] = [sr.map_size.x, sr.map_size.y]
         if perspective and info["map_cells"] != info["map_size"]:
             raise RuntimeError(
-                f"the replay says the map is {info['map_cells']}, the engine {info['map_size']}"
+                f"the replay says the map is {info['map_cells']}, the engine"
+                f" {info['map_size']}"
             )
         info["start_locations"] = [
             [pt.x, pt.y] for pt in sr.start_locations
@@ -987,16 +1032,19 @@ def extract(
         while loop < until:
             try:
                 if substep and substep < step:
-                    # The client keeps a unit that left the player's vision in the observation for 47
-                    # observation *requests* (measured: 2.1 s at 1 loop per request, 8.4 s at 4, longer
-                    # at 8), so stepping several loops per observation leaks enemy movement through the
-                    # fog. An observation is requested every substep loops and, except for the commands
-                    # and deaths it reports, discarded; only every --step loops is one parsed in full and kept.
+                    # The client keeps a unit that left the player's vision in the
+                    # observation for 47 observation *requests* (measured: 2.1 s at 1
+                    # loop per request, 8.4 s at 4, longer at 8), so stepping several
+                    # loops per observation leaks enemy movement through the fog. An
+                    # observation is requested every substep loops and, except for the
+                    # commands and deaths it reports, discarded; only every --step loops
+                    # is one parsed in full and kept.
                     for _ in range(step // substep - 1):
                         c.step(substep)
-                        # pysc2's observe, not a raw websocket write / recv: the raw path hung mid-game
-                        # (worker blocked in recv, engine idle; reproduced on 93333 within a minute,
-                        # 2026-10-30). The response is parsed either way (~0.1 ms with upb).
+                        # pysc2's observe, not a raw websocket write / recv: the raw
+                        # path hung mid-game (worker blocked in recv, engine idle;
+                        # reproduced on 93333 within a minute, 2026-10-30). The response
+                        # is parsed either way (~0.1 ms with upb).
                         ob = c.observe()
                         if (
                             perspective
@@ -1017,9 +1065,10 @@ def extract(
                     c.step(step)
                 o = c.observe()
             except protocol.ProtocolError as ex:
-                # The replay is over (a player's view ends when that player leaves the game; the
-                # engine's status turns ended and the next step is refused). pysc2 words it
-                # "`step` called while in state: Status.ended", older texts said "already ended".
+                # The replay is over (a player's view ends when that player leaves the
+                # game; the engine's status turns ended and the next step is refused).
+                # pysc2 words it "`step` called while in state: Status.ended", older
+                # texts said "already ended".
                 if "already ended" in str(ex) or "Status.ended" in str(ex):
                     if frame_loop:  # frames were extracted: the game ended, keep them
                         break
@@ -1037,9 +1086,9 @@ def extract(
             avail = available_abilities(raw.units)
             take_player(o.observation, raw)
             for u in raw.units:
-                if (
-                    arrow and not perspective and u.owner != NEUTRAL
-                ):  # the observer pass is only for the neutrals; the players' views have the rest
+                # the observer pass is only for the neutrals; the players' views have
+                # the rest
+                if arrow and not perspective and u.owner != NEUTRAL:
                     continue
                 cols["id"].append(uid(u.tag))
                 cols["type"].append(u.unit_type)
@@ -1088,7 +1137,8 @@ def extract(
                 cols["cargo_max"].append(u.cargo_space_max)
                 cols["detect_range"].append(u.detect_range)
                 cols["radar_range"].append(u.radar_range)
-                # Rally points (structures): where produced units go; town halls have two (units, workers)
+                # Rally points (structures): where produced units go; town halls have
+                # two (units, workers)
                 cols["rally_start"].append(len(rag["rally_x"]))
                 for r in u.rally_targets:
                     rag["rally_x"].append(r.point.x if r.HasField("point") else np.nan)
@@ -1099,7 +1149,8 @@ def extract(
                 for ab in avail.get(u.tag, ()):
                     rag["ab_id"].append(ab.ability_id)
                     rag["ab_point"].append(ab.requires_point)
-                # Production queue (producers only); other units' orders are intent, not state.
+                # Production queue (producers only); other units' orders are intent, not
+                # state.
                 cols["prod_start"].append(len(rag["prod_abil"]))
                 if u.unit_type in producers:
                     for od in u.orders:
@@ -1113,7 +1164,8 @@ def extract(
                     rag["pass_id"].append(uid(pas.tag))
                     rag["pass_type"].append(pas.unit_type)
                     rag["pass_hp"].append(pas.health)
-                # Orders in queue order (production included): what the unit was told to do.
+                # Orders in queue order (production included): what the unit was told to
+                # do.
                 cols["ord_start"].append(len(rag["ord_abil"]))
                 for od in u.orders:
                     rag["ord_abil"].append(od.ability_id)
@@ -1135,9 +1187,9 @@ def extract(
                     eff["x"].append(pt.x)
                     eff["y"].append(pt.y)
                     eff["radius"].append(e.radius)
-            # Only units that have been seen: the engine also reports deaths of short-lived
-            # internal units (spawned and destroyed between frames, absent from the
-            # replay's own unit log), which aren't game units.
+            # Only units that have been seen: the engine also reports deaths of
+            # short-lived internal units (spawned and destroyed between frames, absent
+            # from the replay's own unit log), which aren't game units.
             dead.extend(ids[t] for t in raw.event.dead_units if t in ids)
             frame_loop.append(loop)
             n_rows += len(cols["id"])
@@ -1191,9 +1243,10 @@ def extract(
                 ui_panel.append(panel)
                 ui_sel.extend(types)
                 ui_sel_start.append(len(ui_sel))
-            # a player still sees snapshots of enemy structures that died in the fog, so in a
-            # player view only the player's own units are checked against the replay's log; the observer
-            # keeps showing neutrals the replay has recorded as dead (mined out, destroyed), so not those
+            # a player still sees snapshots of enemy structures that died in the fog, so
+            # in a player view only the player's own units are checked against the
+            # replay's log; the observer keeps showing neutrals the replay has recorded
+            # as dead (mined out, destroyed), so not those
             desync.check(
                 loop,
                 [
@@ -1203,8 +1256,9 @@ def extract(
                     or (not perspective and u.owner != NEUTRAL)
                 ],
             )
-            # The game is decided once every player of some team has a result (left or lost);
-            # one player leaving a team game doesn't end it (their ally plays on).
+            # The game is decided once every player of some team has a result (left or
+            # lost); one player leaving a team game doesn't end it (their ally plays
+            # on).
             done_players |= {r.player_id for r in o.player_result}
             if any(members <= done_players for members in teams.values()):
                 info["end"] = dict(
@@ -1311,9 +1365,10 @@ def extract(
     for tag, i in ids.items():
         tags[i] = tag
     arrays.update(unit_tag=tags, meta=np.asarray(json.dumps(info)))
-    # Control groups and selection per frame from the replay's own events (every player in the
-    # observer view, the observed one in a player view), the latter checked against the engine's
-    # summaries, selection and recipients (worldmodel/selection_tracker.py)
+    # Control groups and selection per frame from the replay's own events (every player
+    # in the observer view, the observed one in a player view), the latter checked
+    # against the engine's summaries, selection and recipients
+    # (worldmodel/selection_tracker.py)
     from cosmicstar.worldmodel import replay_actions, selection_tracker
 
     acts = replay_actions.parse(path)
@@ -1353,8 +1408,9 @@ def extract(
 
 
 def installed_builds():
-    """Base builds we have an engine for, in the install or the side install with the older
-    builds (wine_run_config.installed_builds; the run config picks the install per build).
+    """Base builds we have an engine for, in the install or the side install with the
+    older builds (wine_run_config.installed_builds; the run config picks the install per
+    build).
     """
     from cosmicstar.envs import wine_run_config
 
@@ -1376,12 +1432,13 @@ def build_manifest(
     observer=False,
 ):
     """One job per (game, player view) still to extract, from the replay tree's index
-    (corpus.py): the format's games on installed base builds, long enough, with their map
-    cached (fetched from the depot unless --no_fetch) and a ruleset the Editor could export
-    (any_ruleset: those too; their abilities can't be named, which only matters for the action
-    vocabulary). A view already extracted with this layout, step and substep is done (redo: do it
-    again); a view with a fail file is left alone (retry_failed: try again). Returns (jobs,
-    {reason: count of skipped games or views})."""
+    (corpus.py): the format's games on installed base builds, long enough, with their
+    map cached (fetched from the depot unless --no_fetch) and a ruleset the Editor could
+    export (any_ruleset: those too; their abilities can't be named, which only matters
+    for the action vocabulary). A view already extracted with this layout, step and
+    substep is done (redo: do it again); a view with a fail file is left alone
+    (retry_failed: try again). Returns (jobs, {reason: count of skipped games or
+    views})."""
     have = installed_builds()
     exported = os.path.join(BALANCE_DIR, "status.json")
     exported = (
@@ -1467,8 +1524,9 @@ def build_manifest(
     return jobs, dict(skipped)
 
 
-# The engine's view of slot 4 crashes at the game's first research order (worldmodel/README.md);
-# that view is skipped (the 2v2 composition from the teammate's view was dropped with the 1v1 focus).
+# The engine's view of slot 4 crashes at the game's first research order
+# (worldmodel/README.md); that view is skipped (the 2v2 composition from the teammate's
+# view was dropped with the 1v1 focus).
 CRASHING_VIEWS = {4}
 
 
@@ -1493,7 +1551,8 @@ def available_gb():
 
 
 def kill_prefix_processes(prefix):
-    """SIGKILL everything running in a Wine prefix (the engine and Proton's helpers), found by their environment."""
+    """SIGKILL everything running in a Wine prefix (the engine and Proton's helpers),
+    found by their environment."""
     root = prefix.rstrip("/")
     root = root[: -len("/pfx")] if root.endswith("/pfx") else root
     want = (
@@ -1510,7 +1569,8 @@ def kill_prefix_processes(prefix):
 
 
 def newest_claim(job_list, pids):
-    """(job, pid) of the most recently started game among those workers are still playing."""
+    """(job, pid) of the most recently started game among those workers are still
+    playing."""
     best = None
     for j in job_list:
         c = j["out"] + ".claim"
@@ -1529,9 +1589,10 @@ def newest_claim(job_list, pids):
 
 
 def minimize_client_window(pid, tries=20):
-    """Windows only: minimizes the client's window once it exists. The Windows client has no
-    headless mode (-displayMode 0 only means windowed) and keeps rendering; minimized, the
-    engine stepped ~20% faster in a side-by-side test (5.8 vs 7.1 ms per 4-loop frame).
+    """Windows only: minimizes the client's window once it exists. The Windows client
+    has no headless mode (-displayMode 0 only means windowed) and keeps rendering;
+    minimized, the engine stepped ~20% faster in a side-by-side test (5.8 vs 7.1 ms per
+    4-loop frame).
     """
     if sys.platform != "win32":
         return 0
@@ -1559,12 +1620,13 @@ def minimize_client_window(pid, tries=20):
 
 
 def protobuf_impl():
-    """The protobuf implementation for the workers: upb (the C++ parser, ~150x faster per
-    observation, which made parsing 44% of the frame time in pure Python) when the installed
-    s2clientprotocol bindings are in the modern style written by scripts/regen_s2proto.py,
-    else pure Python (the wheel's old-style modules can't load under upb). The environment
-    variable PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION overrides. Output is identical either way
-    (checked on a game: every array equal, NaN-aware)."""
+    """The protobuf implementation for the workers: upb (the C++ parser, ~150x faster
+    per observation, which made parsing 44% of the frame time in pure Python) when the
+    installed s2clientprotocol bindings are in the modern style written by
+    scripts/regen_s2proto.py, else pure Python (the wheel's old-style modules can't load
+    under upb). The environment variable PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+    overrides. Output is identical either way (checked on a game: every array equal,
+    NaN-aware)."""
     if os.environ.get("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"):
         return os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"]
     import s2clientprotocol
@@ -1583,7 +1645,8 @@ def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
     flags.FLAGS(sys.argv[:1])
     commit = os.environ.get("COSMICSTAR_COMMIT", "")
     for j in jobs:
-        # done earlier in this run (another worker) or before it: skip, unless the job says redo
+        # done earlier in this run (another worker) or before it: skip, unless the job
+        # says redo
         if (os.path.exists(j["out"]) and not j.get("redo")) or not claim(j):
             continue
         os.makedirs(os.path.dirname(j["out"]), exist_ok=True)
@@ -1636,13 +1699,14 @@ def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
                 )
                 break
             except Exception as ex:
-                # replay starts fail in bursts while another instance fetches data for a map it
-                # hasn't seen (InvalidReplayData); they pass once it's cached, so wait and retry.
-                # The client also stalls past pysc2's 120 s websocket timeout now and then
-                # (seen once in 12 games under Wine; the game passed alone), so retry those too,
-                # and under Proton with several instances launching, the websocket of one is lost
-                # or never comes up (ConnectError / ConnectionError / WebSocketConnectionClosed:
-                # 6 of 12 player views with 4 workers, 2026-10-30); those passed alone as well.
+                # replay starts fail in bursts while another instance fetches data for a
+                # map it hasn't seen (InvalidReplayData); they pass once it's cached, so
+                # wait and retry. The client also stalls past pysc2's 120 s websocket
+                # timeout now and then (seen once in 12 games under Wine; the game
+                # passed alone), so retry those too, and under Proton with several
+                # instances launching, the websocket of one is lost or never comes up
+                # (ConnectError / ConnectionError / WebSocketConnectionClosed: 6 of 12
+                # player views with 4 workers, 2026-10-30); those passed alone as well.
                 if (
                     any(
                         k in repr(ex)
@@ -1704,8 +1768,9 @@ def run_worker(jobs, step, until, substep=0, ui=False, abilities=True):
                     flush=True,
                 )
                 break
-        # the claim stays until the run ends (main removes them): a view that finished or failed
-        # must not be picked up again by the next worker walking the same job list
+        # the claim stays until the run ends (main removes them): a view that finished
+        # or failed must not be picked up again by the next worker walking the same job
+        # list
 
 
 def main():
@@ -1759,9 +1824,11 @@ def main():
         "--substep",
         type=int,
         default=1,
-        help="request an observation every this many loops (discarded "
-        "unparsed) and keep one every --step loops; without it a player view leaks enemy movement through "
-        "the fog (module doc)",
+        help=(
+            "request an observation every this many loops (discarded unparsed) and keep"
+            " one every --step loops; without it a player view leaks enemy movement"
+            " through the fog (module doc)"
+        ),
     )
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument(
@@ -1788,8 +1855,7 @@ def main():
     ap.add_argument(
         "--no_abilities",
         action="store_true",
-        help="skip the per-frame available-abilities query (ab_*, the "
-        "cooldown signal)",
+        help="skip the per-frame available-abilities query (ab_*, the cooldown signal)",
     )
     ap.add_argument(
         "--ui",
@@ -1812,9 +1878,11 @@ def main():
     ap.add_argument(
         "--arrow",
         action="store_true",
-        help="stream each view's units and frames to <view>.units.arrow and "
-        "<view>.frames.arrow as it plays, the observer view's neutrals only; the rest (groups, effects, deaths, "
-        "...) stays in the .cst",
+        help=(
+            "stream each view's units and frames to <view>.units.arrow and"
+            " <view>.frames.arrow as it plays, the observer view's neutrals only; the"
+            " rest (groups, effects, deaths, ...) stays in the .cst"
+        ),
     )
     ap.add_argument(
         "--mem_low",
@@ -1861,7 +1929,8 @@ def main():
     logs = os.path.join(args.games, "logs")
     os.makedirs(logs, exist_ok=True)
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    # resuming: claims left by an interrupted run (no output, no partial file) are free again
+    # resuming: claims left by an interrupted run (no output, no partial file) are free
+    # again
     for c in glob.glob(os.path.join(args.games, "**", "*.claim"), recursive=True):
         out_path = c[: -len(".claim")]
         if os.path.exists(out_path + ".tmp"):
@@ -1917,8 +1986,9 @@ def main():
         indent=1,
     )
     print(
-        f"run {run_id}: {len(jobs)} views of {len({j['id'] for j in jobs})} games to extract ({args.format or 'all formats'}; "
-        f"layout {LAYOUT}, step {args.step}, substep {args.substep}); skipped: {skipped}",
+        f"run {run_id}: {len(jobs)} views of {len({j['id'] for j in jobs})} games to"
+        f" extract ({args.format or 'all formats'}; layout {LAYOUT}, step {args.step},"
+        f" substep {args.substep}); skipped: {skipped}",
         flush=True,
     )
     env = dict(os.environ)
@@ -1930,8 +2000,9 @@ def main():
     if sys.platform != "win32" and args.no_prefix_pool:
         from cosmicstar.envs import wine_run_config as _wrc
 
-        # the engine's shared temp folder (launch maps, key frames of every start): stale files
-        # from killed engines pile up there; nothing runs in the prefix yet, so clear it
+        # the engine's shared temp folder (launch maps, key frames of every start):
+        # stale files from killed engines pile up there; nothing runs in the prefix yet,
+        # so clear it
         _wrc.clear_shared_temp(
             log=lambda m: print(json.dumps(dict(note=m)), flush=True)
         )
@@ -1980,7 +2051,8 @@ def main():
             )
 
         def stop_newest(procs, stopped):
-            """The memory governor: the most recent game goes back in the queue; its worker waits for memory."""
+            """The memory governor: the most recent game goes back in the queue; its
+            worker waits for memory."""
             found = newest_claim(job_list, {p.pid: k for k, p in procs.items()})
             if found is None:
                 return
@@ -2055,9 +2127,8 @@ def main():
         if not left:
             continue
         print(json.dumps(dict(build=build, todo=len(left))), flush=True)
-        for j in left[
-            :3
-        ]:  # warm-up, alone, until one succeeds (a fresh output, not a redo job's old one)
+        # warm-up, alone, until one succeeds (a fresh output, not a redo job's old one)
+        for j in left[:3]:
             t_warm = time.time()
             run([j], 1)
             if os.path.exists(j["out"]) and os.path.getmtime(j["out"]) >= t_warm - 1:

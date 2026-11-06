@@ -1,10 +1,11 @@
-"""The state file format (.cst): the extractor's arrays, transformed so that zstd sees mostly
-zeros, in one file with a JSON header and one compressed blob per array.
+"""The state file format (.cst): the extractor's arrays, transformed so that zstd sees
+mostly zeros, in one file with a JSON header and one compressed blob per array.
 
 A state file is a dict of numpy arrays (scripts/extract_states.py lists them). Stored as
-plain per-array zlib (np.savez_compressed) a median pro player view is 8.6 MB; the same arrays
-are 3.2 MB here, bit-exact, in 0.4 s either way (zlib: 1.6 s to write; 2026-10-31,
-worldmodel/README.md "Packed state files"). Three lossless transforms do the work:
+plain per-array zlib (np.savez_compressed) a median pro player view is 8.6 MB; the same
+arrays are 3.2 MB here, bit-exact, in 0.4 s either way (zlib: 1.6 s to write;
+2026-10-31, worldmodel/README.md "Packed state files"). Three lossless transforms do the
+work:
 
     delta_id    unit columns (one value per unit row): each value minus the same unit's value
                 in the previous frame, matched by u_id, so a unit that stands still is zeros.
@@ -33,11 +34,12 @@ import numpy as np
 MAGIC = b"CSTATE1\n"
 VERSION = 1
 FIXED = 4096  # the engine's fixed-point scale for positions, hp, shield, energy, ...
-LEVEL = 9  # zstd level: 3.2 MB / 0.4 s on the median view; 19 gives ~12% less for 15x the time
+# zstd level: 3.2 MB / 0.4 s on the median view; 19 gives ~12% less for 15x the time
+LEVEL = 9
 XOR_KEYS = ("vis", "creep")
-# unit columns stored without delta_id: u_id is needed to decode the others, and raw is its best
-# form anyway (the engine's row order is only half stable frame to frame, so row-aligned or
-# consecutive deltas are bigger; 632 KB of the 3.2 MB)
+# unit columns stored without delta_id: u_id is needed to decode the others, and raw is
+# its best form anyway (the engine's row order is only half stable frame to frame, so
+# row-aligned or consecutive deltas are bigger; 632 KB of the 3.2 MB)
 NO_DELTA = ("u_id",)
 
 
@@ -51,7 +53,8 @@ def _zstd():
 
 
 def prev_rows(u_id, frame_start):
-    """For every unit row, the row of the same unit in the previous frame, -1 if none."""
+    """For every unit row, the row of the same unit in the previous frame, -1 if
+    none."""
     n_units = int(u_id.max()) + 1 if len(u_id) else 0
     prev = np.full(len(u_id), -1, np.int64)
     pos = np.full(n_units, -1, np.int64)
@@ -66,8 +69,9 @@ def prev_rows(u_id, frame_start):
 
 
 def _to_ints(v):
-    """A unit column as an integer array of the same width (fixed point for exact float32,
-    bit patterns otherwise). Returns (ints, how) with how in fixed | bits | int."""
+    """A unit column as an integer array of the same width (fixed point for exact
+    float32, bit patterns otherwise). Returns (ints, how) with how in fixed | bits |
+    int."""
     if v.dtype == np.float32:
         fixed = np.round(v.astype(np.float64) * FIXED)
         if (
@@ -96,7 +100,8 @@ def _from_ints(ints, how, dtype):
 
 
 def encode_delta(cols, prev):
-    """{name: int column} -> the same minus the previous frame's row (wrapping), batched."""
+    """{name: int column} -> the same minus the previous frame's row (wrapping),
+    batched."""
     out = {}
     has = prev >= 0
     src = prev[has]
@@ -206,8 +211,8 @@ def save(path, arrays, level=LEVEL):
 
 
 class StateFile:
-    """A .cst file: arrays decoded on first access and cached. Mirrors NpzFile's interface
-    (files, [], in, keys, iteration, context manager, close)."""
+    """A .cst file: arrays decoded on first access and cached. Mirrors NpzFile's
+    interface (files, [], in, keys, iteration, context manager, close)."""
 
     def __init__(self, path):
         self.path = path
@@ -281,7 +286,8 @@ class StateFile:
         return v
 
     def _decode_deltas(self):
-        """All delta_id columns in one pass over the frames (one pass costs the same for 1 or 27)."""
+        """All delta_id columns in one pass over the frames (one pass costs the same for
+        1 or 27)."""
         names = [
             k
             for k, e in self.arrays.items()

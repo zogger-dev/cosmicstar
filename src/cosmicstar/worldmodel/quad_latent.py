@@ -1,6 +1,7 @@
-"""Fixed map pyramid (2026-11-01, DESIGN_grid_latent.md "Fixed pyramid"): one grid from the map down to
-the latent, by halving the map: 128 x 128, 64, 32, 16 norm tokens over a square of the map's longest
-playable side. The 16 x 16 level is the latent; there is no separate step onto it.
+"""Fixed map pyramid (2026-11-01, DESIGN_grid_latent.md "Fixed pyramid"): one grid from
+the map down to the latent, by halving the map: 128 x 128, 64, 32, 16 norm tokens over a
+square of the map's longest playable side. The 16 x 16 level is the latent; there is no
+separate step onto it.
 
 Three kinds of token share a level's attention:
 
@@ -10,15 +11,18 @@ Three kinds of token share a level's attention:
              tokens, their playable layer false (zeros where the cache has no terrain)
     entity   entities and effects, kept individually at every level
 
-128, 64, 32: 3 ResNet blocks on the norm tokens, then 3 attention blocks. Each 4 x 4 window of norm
-tokens attends jointly with the lattice and entity tokens whose centers fall inside it, and reads the
-globals; the middle block's windows slide by 2 cells. Each global attends over all of that level's tokens,
-so globals read and write at every layer. A 2 x 2 merge leads to the next level.
+128, 64, 32: 3 ResNet blocks on the norm tokens, then 3 attention blocks. Each 4 x 4
+window of norm tokens attends jointly with the lattice and entity tokens whose centers
+fall inside it, and reads the globals; the middle block's windows slide by 2 cells. Each
+global attends over all of that level's tokens, so globals read and write at every
+layer. A 2 x 2 merge leads to the next level.
 
-16: 3 ResNet blocks, then full attention over norm tokens, entities and globals (no lattice: too many
-tokens). The latent is [CLS, players, 16 x 16 norm tokens], taken out after the last block.
+16: 3 ResNet blocks, then full attention over norm tokens, entities and globals (no
+lattice: too many tokens). The latent is [CLS, players, 16 x 16 norm tokens], taken out
+after the last block.
 
-Window sizes vary with clumps, so windows are padded by size group, never to the fullest window.
+Window sizes vary with clumps, so windows are padded by size group, never to the fullest
+window.
 """
 
 import torch
@@ -55,9 +59,10 @@ MAX_SCORES = 1.5e8  # attention scores per head in one call: larger groups are s
 
 
 def attend(q, k, v, mask):
-    """One softmax per query over the keys mask [B, K] allows. FlexAttention when training (its backward is
-    far faster: a third of the step went to SDPA's); without gradient SDPA, the same numbers (5e-7), since
-    FlexAttention's no-gradient path fails to compile inside these parts."""
+    """One softmax per query over the keys mask [B, K] allows. FlexAttention when
+    training (its backward is far faster: a third of the step went to SDPA's); without
+    gradient SDPA, the same numbers (5e-7), since FlexAttention's no-gradient path fails
+    to compile inside these parts."""
     if not torch.is_grad_enabled():
         return F.scaled_dot_product_attention(q, k, v, attn_mask=mask[:, None, None])
 
@@ -68,7 +73,8 @@ def attend(q, k, v, mask):
 
 
 def window_of(ij, S, slide):
-    """ij [..., 2] (norm token x, y) -> window id; n ids per side (a slid grid has cut-short windows at the edges)."""
+    """ij [..., 2] (norm token x, y) -> window id; n ids per side (a slid grid has
+    cut-short windows at the edges)."""
     n = (S + slide + WIN - 1) // WIN
     w = (ij + slide) // WIN
     return w[..., 1] * n + w[..., 0], n * n
@@ -76,8 +82,9 @@ def window_of(ij, S, slide):
 
 @torch.no_grad()
 def window_sets(win, member, n_win):
-    """win [B, T] window ids, member [B, T] -> the windows grouped by size, as a list of (tok, dest, frame, m):
-    flat token positions, their places in a rows x cap padded tensor, each row's frame, which places are real.
+    """win [B, T] window ids, member [B, T] -> the windows grouped by size, as a list of
+    (tok, dest, frame, m): flat token positions, their places in a rows x cap padded
+    tensor, each row's frame, which places are real.
     """
     B, T = win.shape
     idx = torch.nonzero(member.reshape(-1), as_tuple=True)[0]
@@ -118,7 +125,8 @@ class QuadPre(nn.Module):
         self.qkv = nn.Linear(d, 3 * d)
 
     def forward(self, xe, xm, ang):
-        """xe [B, n0, d] (globals, entities), xm [B, M, d] (map tokens), ang [B, T, dh / 2] -> q, k, v [B, T, H, dh]."""
+        """xe [B, n0, d] (globals, entities), xm [B, M, d] (map tokens), ang [B, T, dh /
+        2] -> q, k, v [B, T, H, dh]."""
         h = torch.cat([self.ne(xe), self.nc(xm)], 1)
         B, T, _ = h.shape
         q, k, v = self.qkv(h).view(B, T, 3, self.H, self.dh).unbind(2)
@@ -126,11 +134,13 @@ class QuadPre(nn.Module):
 
 
 class WinAttend(nn.Module):
-    """One size group of windows: each row's tokens and the globals, one joint softmax per token."""
+    """One size group of windows: each row's tokens and the globals, one joint softmax
+    per token."""
 
     def forward(self, qf, kf, vf, gk, gv, gm, tok, dest, frame, m):
-        """qf, kf, vf [B T, H, dh]; gk, gv [B, g0, H, dh], gm [B, g0]; tok, dest (see window_sets); frame [rows];
-        m [rows, cap] -> the windows' tokens' results, in tok's order."""
+        """qf, kf, vf [B T, H, dh]; gk, gv [B, g0, H, dh], gm [B, g0]; tok, dest (see
+        window_sets); frame [rows]; m [rows, cap] -> the windows' tokens' results, in
+        tok's order."""
         rows, cap = m.shape
         H, dh = qf.shape[1:]
         pad = (
@@ -156,7 +166,8 @@ class GlobalAttend(nn.Module):
 
 
 class QuadPost(nn.Module):
-    """The attention's result into the tokens, then separate MLPs for map tokens and for entities / globals."""
+    """The attention's result into the tokens, then separate MLPs for map tokens and for
+    entities / globals."""
 
     def __init__(self, d, mlp_ratio):
         super().__init__()
@@ -172,9 +183,10 @@ class QuadPost(nn.Module):
 
 
 class QuadBlock(nn.Module):
-    """One attention block of a windowed level: per window, a joint softmax over its tokens and the
-    globals; per global, one over everything. Its parts compile; this loop over the size groups stays
-    Python, since the number of groups changes with every batch."""
+    """One attention block of a windowed level: per window, a joint softmax over its
+    tokens and the globals; per global, one over everything. Its parts compile; this
+    loop over the size groups stays Python, since the number of groups changes with
+    every batch."""
 
     def __init__(self, d, heads, mlp_ratio=4.0):
         super().__init__()
@@ -182,7 +194,8 @@ class QuadBlock(nn.Module):
         self.post = QuadPost(d, mlp_ratio)
 
     def forward(self, x, g0, n0, ang, valid, sets):
-        """x [B, T, d]: [globals (g0), entities, map tokens (from n0)]; ang [B, T, dh / 2]; valid [B, T]."""
+        """x [B, T, d]: [globals (g0), entities, map tokens (from n0)]; ang [B, T, dh /
+        2]; valid [B, T]."""
         B, T, d = x.shape
         xe, xm = x[:, :n0], x[:, n0:]
         q, k, v = self.pre(xe, xm, ang)
@@ -208,8 +221,9 @@ class QuadBlock(nn.Module):
 
 
 class QuadEncoder(GridEncoder):
-    """See the module docstring. Shares the token parts, the player index, the viewer code and the map
-    view embedding with GridEncoder. Reads the square lattice from grid_latent.map_views.
+    """See the module docstring. Shares the token parts, the player index, the viewer
+    code and the map view embedding with GridEncoder. Reads the square lattice from
+    grid_latent.map_views.
     """
 
     def __init__(
@@ -272,7 +286,8 @@ class QuadEncoder(GridEncoder):
         )
 
     def compile_parts(self):
-        """Everything that compiles. Not the window grouping (shapes that depend on the data) nor the loops over levels."""
+        """Everything that compiles. Not the window grouping (shapes that depend on the
+        data) nor the loops over levels."""
         for m in self.modules():
             if type(m).__name__ in (
                 "ResBlock",
@@ -288,7 +303,8 @@ class QuadEncoder(GridEncoder):
         self.seed_norm = torch.compile(self.seed_norm, dynamic=True)
 
     def seed_norm(self, L, lp, lv, half):
-        """The norm tokens at the top level: their place and the mean of the lattice cells inside them."""
+        """The norm tokens at the top level: their place and the mean of the lattice
+        cells inside them."""
         B, D = L.shape[0], L.shape[1]
         size, centers = geometry(half, TOP)
         seg = (
@@ -312,7 +328,8 @@ class QuadEncoder(GridEncoder):
         return N0.view(B, TOP, TOP, D).permute(0, 3, 1, 2)
 
     def lattice(self, b):
-        """The real map cells over the square: [B, d, Q, Q], after the minimap and the stem."""
+        """The real map cells over the square: [B, d, Q, Q], after the minimap and the
+        stem."""
         x = self.grid_static(b["lat_grid"])
         h = self.grid_mix(
             F.gelu(
@@ -347,7 +364,8 @@ class QuadEncoder(GridEncoder):
         )
 
         def lat_geom(s, Q):
-            """A lattice level of s map units per cell: cell centers (square-centered) and which are in the square."""
+            """A lattice level of s map units per cell: cell centers (square-centered)
+            and which are in the square."""
             c = (torch.arange(Q, device=dev, dtype=torch.float32) + 0.5) * s
             xy = torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(
                 1, Q * Q, 2

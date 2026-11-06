@@ -1,11 +1,13 @@
-"""Trains the physics model (worldmodel/physics.py, DESIGN_physics.md) on the Arrow store.
+"""Trains the physics model (worldmodel/physics.py, DESIGN_physics.md) on the Arrow
+store.
 
     python scripts/train_physics.py --seqs 6 --frames 56 --accum 4 --steps 40000
     python scripts/train_physics.py --measure      # peak memory at the largest windows, a few steps, nothing saved
     python scripts/train_physics.py --resume RUN/model_step2000.pt --run RUN              # carries on from a checkpoint
     python scripts/train_physics.py --resume RUN/model_step2000.pt --run RUN --eval_only  # the full evaluation of a checkpoint, then exits
 
-Quick validation every --val_every updates goes to the log. The full evaluation pauses training after each checkpoint, and goes to the log and RUN/eval.jsonl.
+Quick validation every --val_every updates goes to the log. The full evaluation pauses
+training after each checkpoint, and goes to the log and RUN/eval.jsonl.
 """
 
 import argparse
@@ -20,7 +22,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-# the cap below needs segments that grow; PyTorch 2.15's pool of compile workers crashes on this machine, and one thread avoids it
+# the cap below needs segments that grow; PyTorch 2.15's pool of compile workers crashes
+# on this machine, and one thread avoids it
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 
@@ -53,8 +56,9 @@ def patch_of(base):
 
 
 def of_patch(bases, patch):
-    """The games of one patch (patch empty: all). Rules change between patches and the model has no rules input yet, so training mixing two
-    patches would learn a blend of both: Ghost life, Spire cost and the like."""
+    """The games of one patch (patch empty: all). Rules change between patches and the
+    model has no rules input yet, so training mixing two patches would learn a blend of
+    both: Ghost life, Spire cost and the like."""
     return {g: b for g, b in bases.items() if not patch or patch_of(b) == patch}
 
 
@@ -93,7 +97,8 @@ class Games:
 
 
 def warm_compile(model, games, ids, L):
-    """Compile on two windows. Compiling holds several GB until the next collection, and a full pass has no room for that. No optimizer step: this changes no weights."""
+    """Compile on two windows. Compiling holds several GB until the next collection, and
+    a full pass has no room for that. No optimizer step: this changes no weights."""
     rng = np.random.default_rng()
     b = physics_data.collate(
         [games.read(ids[rng.integers(len(ids))], -1, L, False) for _ in range(2)],
@@ -108,14 +113,17 @@ def warm_compile(model, games, ids, L):
         model(b)
     del b, loss
     gc.collect()
-    gc.freeze()  # what stays, compiled code above all, is left out of every later collection: 0.3 s a pass otherwise
+    # what stays, compiled code above all, is left out of every later collection: 0.3 s
+    # a pass otherwise
+    gc.freeze()
 
 
 def _read_passes(
     q, bases, vocab_path, map_ids, seqs, L, workers, chosen, plan_kw, start
 ):
-    """The reader process: the passes of the epoch plan (epochs.Plan) into q, from pass `start` counted from the first epoch, so a resumed run
-    carries on where it stopped. chosen: a fixed list of (game, frame) instead, cycled seqs at a time.
+    """The reader process: the passes of the epoch plan (epochs.Plan) into q, from pass
+    `start` counted from the first epoch, so a resumed run carries on where it stopped.
+    chosen: a fixed list of (game, frame) instead, cycled seqs at a time.
     """
     vocab = Vocab(json.load(open(vocab_path)))
     games = Games(bases, vocab, ActionVocab(), map_ids=map_ids)
@@ -176,8 +184,11 @@ def batches(
     prefetch=4,
     chosen=None,
 ):
-    """Passes of windows from a process of their own: reading on threads here took the interpreter from the training thread, about 1.1 s of idle GPU each time 16 windows were read.
-    A thread here holds passes ready, since the reader hands one over late while its own threads are reading. chosen: a fixed list of (game, frame) to cycle instead of random ones.
+    """Passes of windows from a process of their own: reading on threads here took the
+    interpreter from the training thread, about 1.1 s of idle GPU each time 16 windows
+    were read. A thread here holds passes ready, since the reader hands one over late
+    while its own threads are reading. chosen: a fixed list of (game, frame) to cycle
+    instead of random ones.
     """
     ctx = mp.get_context("spawn")
     q = ctx.Queue(2)
@@ -222,7 +233,8 @@ def batches(
 
 
 def largest_windows(bases, L, n):
-    """(game, frame) of the windows with the most rows alive across all games: the memory worst case."""
+    """(game, frame) of the windows with the most rows alive across all games: the
+    memory worst case."""
     best = []
     for gid, base in bases.items():
         ix = np.load(base + ".index.npz")
@@ -239,7 +251,8 @@ def largest_windows(bases, L, n):
 
 
 def fixed_windows(bases, n, L, seed=0):
-    """n (game, frame, swap), the same every call, so numbers compare across updates. Games taken in turn from a shuffled list."""
+    """n (game, frame, swap), the same every call, so numbers compare across updates.
+    Games taken in turn from a shuffled list."""
     rng = np.random.default_rng(seed)
     ids = [sorted(bases)[i] for i in rng.permutation(len(bases))]
     out = []
@@ -252,7 +265,8 @@ def fixed_windows(bases, n, L, seed=0):
 
 @torch.no_grad()
 def evaluate(model, games, windows, seqs, L, workers):
-    """Every loss over fixed windows, and position error by kind of row. Sampling inside the losses is seeded too, and training's random state is left as it was."""
+    """Every loss over fixed windows, and position error by kind of row. Sampling inside
+    the losses is seeded too, and training's random state is left as it was."""
     grad_ckpt, model.enc.grad_ckpt = model.enc.grad_ckpt, False
     model.record_pos = True
     logs, pos, n = (
@@ -311,19 +325,28 @@ def main():
         "--bucket",
         type=int,
         default=32,
-        help="a pass holds windows whose row counts fall in one bucket of this width, so it pads little",
+        help=(
+            "a pass holds windows whose row counts fall in one bucket of this width, so"
+            " it pads little"
+        ),
     )
     ap.add_argument(
         "--min_bucket_games",
         type=int,
         default=40,
-        help="the thin ends of the size range join their neighbours until a bucket has windows from this many games",
+        help=(
+            "the thin ends of the size range join their neighbours until a bucket has"
+            " windows from this many games"
+        ),
     )
     ap.add_argument(
         "--stride",
         type=int,
         default=14,
-        help="an epoch starts a window every this many frames of each game; this many epochs start one at every frame",
+        help=(
+            "an epoch starts a window every this many frames of each game; this many"
+            " epochs start one at every frame"
+        ),
     )
     ap.add_argument(
         "--seed",
@@ -359,7 +382,10 @@ def main():
         "--min_map_games",
         type=int,
         default=5,
-        help="a map with fewer training games is left out: too little to learn its tokens",
+        help=(
+            "a map with fewer training games is left out: too little to learn its"
+            " tokens"
+        ),
     )
     ap.add_argument("--blocks", type=int, default=6, help="spatial-temporal blocks")
     ap.add_argument("--run", default="")
@@ -367,7 +393,10 @@ def main():
         "--gpu_gb",
         type=float,
         default=29.0,
-        help="most GPU memory PyTorch may hold, cache included, so the desktop keeps the rest",
+        help=(
+            "most GPU memory PyTorch may hold, cache included, so the desktop keeps the"
+            " rest"
+        ),
     )
     ap.add_argument(
         "--save_every",
@@ -420,7 +449,9 @@ def main():
     bases = {g: b for g, b in bases.items() if map_of(b) in map_ids}
     ids = sorted(bases)
     print(
-        f"{len(ids)} training games of patch {args.patch or 'any'} on {len(map_ids)} maps, left out {sum(n for m, n in per_map.items() if m not in map_ids)} on {len(per_map) - len(map_ids)}",
+        f"{len(ids)} training games of patch {args.patch or 'any'} on {len(map_ids)}"
+        f" maps, left out {sum(n for m, n in per_map.items() if m not in map_ids)} on"
+        f" {len(per_map) - len(map_ids)}",
         flush=True,
     )
     model = physics.Physics(
@@ -437,7 +468,8 @@ def main():
         model.enc.compile_parts()
         model.teacher.compile_parts()
     print(
-        f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('teacher')) / 1e6:.1f}M parameters",
+        f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('teacher')) / 1e6:.1f}M"
+        " parameters",
         flush=True,
     )
     games = Games(bases, vocab, avocab, map_ids=map_ids)
@@ -555,9 +587,11 @@ def main():
     for step in range(start, steps):
         logs = collections.Counter()
         data_s = 0.0
-        # an update's passes, weighted by their windows: each loss term is a mean over its pass, so without weights a pass of 3 large windows would
-        # count as much as one of 8 small ones; weighted, every window counts the same whichever pass it is in. All windows have the same frames,
-        # so counting each frame's prediction as a sample gives the same weights
+        # an update's passes, weighted by their windows: each loss term is a mean over
+        # its pass, so without weights a pass of 3 large windows would count as much as
+        # one of 8 small ones; weighted, every window counts the same whichever pass it
+        # is in. All windows have the same frames, so counting each frame's prediction
+        # as a sample gives the same weights
         t = time.time()
         passes = [next(data) for _ in range(args.accum if not args.measure else 1)]
         data_s += time.time() - t
@@ -569,7 +603,9 @@ def main():
                 loss, lg = model(b)
             (loss * w).backward()
             del loss
-            gc.collect()  # a pass's checkpoints sit in a reference cycle: uncollected, they take GBs from the next pass
+            # a pass's checkpoints sit in a reference cycle: uncollected, they take GBs
+            # from the next pass
+            gc.collect()
             for k, v in lg.items():
                 logs[k] += float(v) * w
         del passes

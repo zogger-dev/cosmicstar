@@ -1,6 +1,7 @@
-"""Import a train_direct.py text log into TensorBoard, for runs started before train_direct
-wrote TensorBoard events itself. Writes the same tags and chart layout train_direct does, into
-<run>/tb, where <run> is the run folder named in the log's header.
+"""Import a train_direct.py text log into TensorBoard, for runs started before
+train_direct wrote TensorBoard events itself. Writes the same tags and chart layout
+train_direct does, into <run>/tb, where <run> is the run folder named in the log's
+header.
 
     python scripts/log_to_tb.py data/worldmodel/runs/pyramid_d128_20261031_1328.log
     python scripts/log_to_tb.py <log> --force   # refresh: replace an earlier import
@@ -19,7 +20,8 @@ import shutil
 from torch.utils.tensorboard import SummaryWriter
 
 STEP = re.compile(
-    r"^step (\d+) loss ([\d.]+) \| (.*?) \| KL ([-\d.]+) \(beta ([\d.]+)\) \| grad ([\d.]+) \| ([\d.]+)s/step "
+    r"^step (\d+) loss ([\d.]+) \| (.*?) \| KL ([-\d.]+) \(beta ([\d.]+)\) \| grad"
+    r" ([\d.]+) \| ([\d.]+)s/step "
     r"\(data ([\d.]+)s\) \| mem ([\d.]+)G"
 )
 EVAL = re.compile(r"^\[(\S+) step (\d+)\] k=(\d+) loops")
@@ -136,8 +138,9 @@ def main():
             tb.add_scalar(f"{tag(name)}/{group}/k{k:02d}/{rest}", v_, s)
     tb.close()
     print(
-        f"{out}: {len(train)} training points (last step {train[-1][0] if train else 0}), "
-        f"{len(evals)} evaluations ({', '.join(names)}; k {ks})"
+        f"{out}: {len(train)} training points (last step"
+        f" {train[-1][0] if train else 0}), {len(evals)} evaluations"
+        f" ({', '.join(names)}; k {ks})"
     )
 
 

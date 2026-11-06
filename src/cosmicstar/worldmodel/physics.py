@@ -1,5 +1,6 @@
-"""The physics model (DESIGN_physics.md): a single pass over a whole sequence predicts the next state at every frame, as a language
-model does. No horizon input, no motion input.
+"""The physics model (DESIGN_physics.md): a single pass over a whole sequence predicts
+the next state at every frame, as a language model does. No horizon input, no motion
+input.
 
     per frame        256 learned tokens per map plus a ResNet over the live map at the anchors of a 16 x 16 grid, entities, globals, effects and action tokens
     each block       spatial, feed-forward, temporal, feed-forward, then this frame's actions
@@ -10,15 +11,20 @@ model does. No horizon input, no motion input.
                      the state reads the actions. Carried on as a change kept apart from the state
     outputs          a residual per token, s + g(s), trained against an EMA teacher's next token with Barlow Twins, plus the raw heads
 
-At inference, frame by frame: state at t -> action predictor -> actions at t -> updated tokens -> t + 1. Training runs the same dependencies in one pass with the
-real actions: a clean state at t holds no action from t, and the target is the teacher's clean state at t + 1.
+At inference, frame by frame: state at t -> action predictor -> actions at t -> updated
+tokens -> t + 1. Training runs the same dependencies in one pass with the real actions:
+a clean state at t holds no action from t, and the target is the teacher's clean state
+at t + 1.
 
-An action points at its target through a learned bias on the attention score of that pair, one per direction. Nothing is copied
-from the target, so an entity knows nothing about being targeted until attention tells it.
+An action points at its target through a learned bias on the attention score of that
+pair, one per direction. Nothing is copied from the target, so an entity knows nothing
+about being targeted until attention tells it.
 
-A state's own pointers (engaged target, container, each order's target) are inputs by identity: each row has a random code, fresh per window, and
-a row carries the codes of the rows it points at. A code means nothing but which row, so the network reads a pointer by matching codes, and
-the pointer head can keep a target by matching it. Orders and production carry their place in the queue.
+A state's own pointers (engaged target, container, each order's target) are inputs by
+identity: each row has a random code, fresh per window, and a row carries the codes of
+the rows it points at. A code means nothing but which row, so the network reads a
+pointer by matching codes, and the pointer head can keep a target by matching it. Orders
+and production carry their place in the queue.
 """
 
 import copy
@@ -67,15 +73,18 @@ POS_BOOST = 4.0
 DISCOUNT = 0.05  # critters' whole loss and larvae's position
 GRID = 16  # the grid's cells per side
 ROPE_SHORTEST = 1 / 32  # map units: a cell is one map unit
+# game loops: 3 tells gaps of 1, 2 and 3 apart (1 and 2 alias); 672 is 30 s at 22.4
+# loops a second
 TIME_SHORTEST, TIME_LONGEST = (
     3.0,
     672.0,
-)  # game loops: 3 tells gaps of 1, 2 and 3 apart (1 and 2 alias); 672 is 30 s at 22.4 loops a second
+)
 
 
 def cos_sin(ang):
-    """Rotation angles [..., dh / 2] -> cosines and sines [..., dh / 2, 2], once per pass and shared by every layer that rotates by them, in the dtype
-    the layers compute in (bfloat16 under autocast): computed per call they cost about 5% of an update.
+    """Rotation angles [..., dh / 2] -> cosines and sines [..., dh / 2, 2], once per
+    pass and shared by every layer that rotates by them, in the dtype the layers compute
+    in (bfloat16 under autocast): computed per call they cost about 5% of an update.
     """
     dt = (
         torch.get_autocast_dtype("cuda")
@@ -93,8 +102,9 @@ def rotate(x, cs):
 
 
 class RoPE1D(nn.Module):
-    """Rotary positions over time, in game loops: each head's pairs rotate at wavelengths from lo to hi (geometric), so a query and a key
-    score by how many loops apart they are, whatever the step between frames."""
+    """Rotary positions over time, in game loops: each head's pairs rotate at
+    wavelengths from lo to hi (geometric), so a query and a key score by how many loops
+    apart they are, whatever the step between frames."""
 
     def __init__(self, dh, lo=TIME_SHORTEST, hi=TIME_LONGEST):
         super().__init__()
@@ -150,8 +160,10 @@ def row_numbers(b):
 
 
 def attend_pairs(q, k, v, mask, causal=False, code=None, rowmap=None, bias=None):
-    """One softmax per query over the keys mask [B, K] allows. causal: only keys at or before the query. code [P, Q, K] and rowmap [B] add bias [3, H] to a
-    pair's score. FlexAttention when training; without gradient SDPA, since FlexAttention's no-gradient path fails to compile (quad_latent.attend).
+    """One softmax per query over the keys mask [B, K] allows. causal: only keys at or
+    before the query. code [P, Q, K] and rowmap [B] add bias [3, H] to a pair's score.
+    FlexAttention when training; without gradient SDPA, since FlexAttention's
+    no-gradient path fails to compile (quad_latent.attend).
     """
     if not torch.is_grad_enabled():
         Q, K = q.shape[2], k.shape[2]
@@ -201,7 +213,8 @@ class PairAttend(nn.Module):
 
 
 class Heads(nn.Module):
-    """Projections to 8 query heads and 4 key and value heads, each shared by 2 query heads. Queries and keys are normalized, with a learned scale."""
+    """Projections to 8 query heads and 4 key and value heads, each shared by 2 query
+    heads. Queries and keys are normalized, with a learned scale."""
 
     def __init__(self, d, heads, kv_heads):
         super().__init__()
@@ -262,8 +275,9 @@ class FeedForward(nn.Module):
 
 
 class Block(nn.Module):
-    """Spatial attention and a feed-forward, temporal attention and a feed-forward, then this frame's actions as a change kept apart from the state.
-    The action timeline has weights of its own: action tokens and entity tokens are different kinds of sequence.
+    """Spatial attention and a feed-forward, temporal attention and a feed-forward, then
+    this frame's actions as a change kept apart from the state. The action timeline has
+    weights of its own: action tokens and entity tokens are different kinds of sequence.
     """
 
     def __init__(self, d, heads, kv_heads, ff):
@@ -289,7 +303,8 @@ class Block(nn.Module):
         )  # starts as the identity: the updated tokens start as the state
 
     def spatial(self, x, c):
-        """All tokens of a frame read each other, entities and map cells in one softmax."""
+        """All tokens of a frame read each other, entities and map cells in one
+        softmax."""
         y = self.ns(x)
         a = self.ent(
             self.space.query(y, c["ang"]),
@@ -300,8 +315,9 @@ class Block(nn.Module):
         return x + self.space.out(a)
 
     def temporal(self, x, key, mask, ang, heads, norm):
-        """x, key [N, T, d], mask [N, T], ang [N, T, dh / 2, 2] the cosines and sines of each frame's rotation by its game loop: each token reads the keys at
-        or before its frame.
+        """x, key [N, T, d], mask [N, T], ang [N, T, dh / 2, 2] the cosines and sines of
+        each frame's rotation by its game loop: each token reads the keys at or before
+        its frame.
         A token with nothing to read keeps its own frame's key: an empty softmax is NaN.
         """
         N, T, d = x.shape
@@ -319,9 +335,10 @@ class Block(nn.Module):
         return torch.where(mask[..., None], x + heads.out(a), x)
 
     def actions(self, x, dl, a, c):
-        """Frames with an action: actions read the state, not each other (a player's own earlier actions reach it through its causal timeline, and the two players'
-        actions of one frame are simultaneous), then the state reads the actions; x + the returned dl is the updated state.
-        dl [BF, T, d], a [BF, A, d]."""
+        """Frames with an action: actions read the state, not each other (a player's own
+        earlier actions reach it through its causal timeline, and the two players'
+        actions of one frame are simultaneous), then the state reads the actions; x +
+        the returned dl is the updated state. dl [BF, T, d], a [BF, A, d]."""
         fa = c["fa"]
         y, ya = self.na(x[fa] + dl[fa]), self.na(a[fa])
         q, k, v = (
@@ -348,7 +365,8 @@ class Block(nn.Module):
     def forward(self, x, dl, a, c, last):
         B, F_, d = c["B"], c["F"], x.shape[-1]
         x = self.ff_space(self.spatial(x, c))
-        # timelines: earlier frames' tokens as the last block's actions left them. Effects have none: masked, they come out as they went in
+        # timelines: earlier frames' tokens as the last block's actions left them.
+        # Effects have none: masked, they come out as they went in
         T = x.shape[1]
         by_token = lambda z: z.view(B, F_, T, d).transpose(1, 2).reshape(B * T, F_, d)
         xr, up, mask = by_token(x), by_token(x + dl), c["t_mask"]
@@ -370,8 +388,9 @@ class Block(nn.Module):
         return x, dl, a
 
     def _act_timeline(self, a, c):
-        """Each player's action tokens over the window, causal, in time order: its own slots of each frame, frame after frame, so a timeline is a reshape.
-        a [BF, 2K, d]: player 0's K slots, then player 1's."""
+        """Each player's action tokens over the window, causal, in time order: its own
+        slots of each frame, frame after frame, so a timeline is a reshape. a [BF, 2K,
+        d]: player 0's K slots, then player 1's."""
         B, F_, d = c["B"], c["F"], a.shape[-1]
         K, m = a.shape[1] // 2, c["a_mask"]
         if not m.any():
@@ -390,7 +409,8 @@ class Block(nn.Module):
 
 
 class Tower(nn.Module):
-    """A plain ResNet over the live map at its own size: 3 strides, doubling to the model's width at an eighth of the resolution."""
+    """A plain ResNet over the live map at its own size: 3 strides, doubling to the
+    model's width at an eighth of the resolution."""
 
     def __init__(self, c_in, d, blocks=1):
         super().__init__()
@@ -412,7 +432,8 @@ class Tower(nn.Module):
 
 
 class PhysicsEncoder(nn.Module):
-    """The whole sequence through the tower and the blocks. Returns rows, cells and globals twice, the clean state and the action-updated tokens."""
+    """The whole sequence through the tower and the blocks. Returns rows, cells and
+    globals twice, the clean state and the action-updated tokens."""
 
     def __init__(
         self, vocab, avocab, d=512, blocks=6, heads=8, kv_heads=4, ff=1365, n_maps=1
@@ -431,7 +452,8 @@ class PhysicsEncoder(nn.Module):
         self.bag_slot = nn.ModuleDict(
             dict(ord=nn.Embedding(QUEUE, d), prod=nn.Embedding(PROD, d))
         )  # which place in the queue: 0 is now
-        # pointers as inputs: each row's random identity code, and the codes of the rows it points at, each kind through its own map
+        # pointers as inputs: each row's random identity code, and the codes of the rows
+        # it points at, each kind through its own map
         self.code_in = nn.ModuleDict(
             {
                 k: nn.Linear(CODE, d, bias=False)
@@ -485,14 +507,16 @@ class PhysicsEncoder(nn.Module):
         self.grad_ckpt = False
 
     def compile_parts(self):
-        """The masked attention. Each part sees several sizes, so it needs more than the default limit of 8 compiled versions."""
+        """The masked attention. Each part sees several sizes, so it needs more than the
+        default limit of 8 compiled versions."""
         torch._dynamo.config.recompile_limit = 256
         for m in self.modules():
             if type(m).__name__ in ("Attend", "PairAttend"):
                 m.compile(dynamic=True)
 
     def _bag(self, name, b, emb):
-        """Mean of a list-valued state per token: [B * F * R] flat index, embedded items."""
+        """Mean of a list-valued state per token: [B * F * R] flat index, embedded
+        items."""
         where, B, F_, R = b[f"{name}_at"], *b["mask"].shape
         out = emb.new_zeros(B * F_ * R, emb.shape[-1]).index_add(0, where, emb)
         cnt = (
@@ -595,7 +619,8 @@ class PhysicsEncoder(nn.Module):
         )
 
     def embed_map(self, b):
-        """Each frame's map tokens [BF, S, d]: the map's learned tokens + the tower over the live map, read at their anchors."""
+        """Each frame's map tokens [BF, S, d]: the map's learned tokens + the tower over
+        the live map, read at their anchors."""
         B, F_ = b["mask"].shape[:2]
         dt = self.cls.dtype
         st = b["static_grid"].to(dt)
@@ -619,7 +644,8 @@ class PhysicsEncoder(nn.Module):
         return self.map_tokens[b["map_id"]].repeat_interleave(F_, 0) + live
 
     def forward(self, b, last_action=True):
-        """last_action False skips the last block's action step, when only the clean state is wanted: the updated tokens returned are then a block old."""
+        """last_action False skips the last block's action step, when only the clean
+        state is wanted: the updated tokens returned are then a block old."""
         from torch.utils.checkpoint import checkpoint
 
         B, F_, R = b["mask"].shape
@@ -679,7 +705,8 @@ class PhysicsEncoder(nn.Module):
             .transpose(1, 2)
             .reshape(B * T, F_)
         )
-        # time: each frame's game loop from the window's first; without loops (older batches), a loop a frame
+        # time: each frame's game loop from the window's first; without loops (older
+        # batches), a loop a frame
         loops = (
             b["loops"] - b["loops"][:, :1]
             if "loops" in b
@@ -690,7 +717,8 @@ class PhysicsEncoder(nn.Module):
         t_cs = cos_sin(t_ang)  # [B, F, dh / 2, 2]
         act_mask = b["act_mask"].reshape(B * F_, A)
         fa = torch.nonzero(act_mask.any(1), as_tuple=True)[0]
-        # every rotation as cosines and sines, once: 6 blocks of spatial, temporal and action layers all rotate by these
+        # every rotation as cosines and sines, once: 6 blocks of spatial, temporal and
+        # action layers all rotate by these
         c = dict(
             B=B,
             F=F_,
@@ -728,8 +756,10 @@ class PhysicsEncoder(nn.Module):
 
 @torch.no_grad()
 def pointer_pairs(target, fa, A, n, g0):
-    """For the frames fa with actions, n state tokens: code tables of action -> target row (1) over the state, [P, A, n], and target row -> action (2),
-    [P, n, A], and rowmap [len(fa)] -> P or -1. A table always exists, so a compiled part sees one shape of call.
+    """For the frames fa with actions, n state tokens: code tables of action -> target
+    row (1) over the state, [P, A, n], and target row -> action (2), [P, n, A], and
+    rowmap [len(fa)] -> P or -1. A table always exists, so a compiled part sees one
+    shape of call.
     """
     t = target[fa]
     fi, ai = torch.nonzero(t >= 0, as_tuple=True)
@@ -752,7 +782,8 @@ def pointer_pairs(target, fa, A, n, g0):
 
 
 class RowHead(nn.Module):
-    """A row's token -> its raw fields at some frame. One head, shared by rows and birth queries."""
+    """A row's token -> its raw fields at some frame. One head, shared by rows and birth
+    queries."""
 
     def __init__(self, d, n_units, n_abilities):
         super().__init__()
@@ -799,7 +830,8 @@ class RowHead(nn.Module):
         return self.slot_abil(y), self.slot_reg(y)
 
     def pointers(self, x, rows):
-        """x [N, d] tokens, rows [N, R, d] their frames' rows -> [N, 2 + QUEUE, R] scores of each pointer over the rows."""
+        """x [N, d] tokens, rows [N, R, d] their frames' rows -> [N, 2 + QUEUE, R]
+        scores of each pointer over the rows."""
         q = self.ptr_mix(x[:, None] + self.ptr_q.weight[None])
         return torch.einsum("npd,nrd->npr", q, self.ptr_k(rows)) / math.sqrt(
             x.shape[-1]
@@ -834,8 +866,9 @@ REG = (
 
 
 class BirthHead(nn.Module):
-    """Per frame, how many units appear next, then that many queries plus a margin, in parallel: each reads the frame's rows and says real or
-    empty, with a new row's fields and a pointer to its parent."""
+    """Per frame, how many units appear next, then that many queries plus a margin, in
+    parallel: each reads the frame's rows and says real or empty, with a new row's
+    fields and a pointer to its parent."""
 
     def __init__(self, d, heads, head):
         super().__init__()
@@ -853,7 +886,8 @@ class BirthHead(nn.Module):
         self.head = [head]
 
     def forward(self, cls, rows, rmask, n):
-        """cls [K, d], rows [K, R, d], rmask [K, R], n queries -> outputs per (frame, query)."""
+        """cls [K, d], rows [K, R, d], rmask [K, R], n queries -> outputs per (frame,
+        query)."""
         K, R, d = rows.shape
         x = cls[:, None] + self.query.weight[:n][None]
         k, v = self.kv(rows).view(K, R, 2, self.H, self.dh).permute(2, 0, 3, 1, 4)
@@ -870,7 +904,8 @@ class BirthHead(nn.Module):
 
 
 class Physics(nn.Module):
-    """Encoder, EMA teacher, residual head, raw heads, births. forward(batch) -> (loss, logs)."""
+    """Encoder, EMA teacher, residual head, raw heads, births. forward(batch) -> (loss,
+    logs)."""
 
     def __init__(
         self,
@@ -915,7 +950,8 @@ class Physics(nn.Module):
             t.copy_(p)
 
     def barlow(self, p, t, rows_t, lam=0.005):
-        """Barlow Twins between predicted and teacher tokens at (sample, row) pairs; correlations after removing each row's mean over time if demean."""
+        """Barlow Twins between predicted and teacher tokens at (sample, row) pairs;
+        correlations after removing each row's mean over time if demean."""
         zp, zt = self.proj(p).float(), self.proj(t).float()
         if self.demean:
             n = int(rows_t.max()) + 1
@@ -1057,7 +1093,8 @@ class Physics(nn.Module):
             )
             * whole
         ).sum() / whole.sum()
-        # the alive field: scored on rows alive now, flips balanced against the many that stay
+        # the alive field: scored on rows alive now, flips balanced against the many
+        # that stay
         died = (~b["alive"][bi, fi + 1, ri]).float()
         pw = (len(died) - died.sum()).clamp(min=1) / died.sum().clamp(min=1)
         logs["alive"] = (
@@ -1077,7 +1114,8 @@ class Physics(nn.Module):
         )
         if self._ptr_stats is not None:
             logs["ptr_acc"], logs["ptr_copy"] = self._ptr_stats
-        # buffs, control groups and small presence bits: every scored token. Rare positives are the point, so report them too
+        # buffs, control groups and small presence bits: every scored token. Rare
+        # positives are the point, so report them too
         key = (bi * F_ + fi + 1) * R + ri
         buffs_t = torch.zeros(
             len(bi), N_BUFF_IDS, device=p.device, dtype=o["buffs"].float().dtype
@@ -1151,7 +1189,8 @@ class Physics(nn.Module):
         return total, logs
 
     def _position_errors(self, pred, tpos, own, crit, larva, keep):
-        """For evaluation: {kind of row: (rows, sum of model error, sum of copy error)}, map units per loop, the rows and kinds of scripts/physics_baselines.py."""
+        """For evaluation: {kind of row: (rows, sum of model error, sum of copy error)},
+        map units per loop, the rows and kinds of scripts/physics_baselines.py."""
         step = tpos.norm(dim=-1) * POS_SCALE
         err = (pred - tpos).norm(dim=-1) * POS_SCALE
         neutral = own == NEUTRAL
@@ -1177,8 +1216,9 @@ class Physics(nn.Module):
         }
 
     def _sampled(self, p, b, bi, fi, ri, cap=4096, ptr_cap=1024):
-        """The large outputs, on a sample of the scored tokens, rows whose queue changes first: order and production slots, available abilities, and pointers to
-        the engaged target, the container and each order's target."""
+        """The large outputs, on a sample of the scored tokens, rows whose queue changes
+        first: order and production slots, available abilities, and pointers to the
+        engaged target, the container and each order's target."""
         B, F_, R = b["mask"].shape
         key = (bi * (F_ - 1) + fi) * R + ri
         ch = b["queue_changed"].reshape(-1)[key]
@@ -1229,15 +1269,15 @@ class Physics(nn.Module):
             1,
         ).long()
         logits = self.head.pointers(p[bi[s2], fi[s2], ri[s2]], rows)
-        live = b["mask"][
-            bi[s2], fi[s2]
-        ]  # a target not live in this frame can't be pointed at: it would score the mask's -1e4
+        # a target not live in this frame can't be pointed at: it would score the mask's
+        # -1e4
+        live = b["mask"][bi[s2], fi[s2]]
         logits = logits.masked_fill(~live[:, None], -1e4).float()
         has = (tgt >= 0) & live.gather(1, tgt.clamp(min=0))
         pointers = F.cross_entropy(logits[has], tgt[has]) if has.any() else p.sum() * 0
-        with (
-            torch.no_grad()
-        ):  # accuracy, and the baseline of keeping this frame's pointer: the same kind and slot, a frame earlier
+        # accuracy, and the baseline of keeping this frame's pointer: the same kind and
+        # slot, a frame earlier
+        with torch.no_grad():
             now = torch.cat(
                 [
                     b["engaged_row"].reshape(-1)[at2 - R][:, None],
@@ -1337,7 +1377,8 @@ class Physics(nn.Module):
         return logs["birth_count"] + logs["birth_real"] + logs["birth_fields"], logs
 
     def map_loss(self, out, b, K=256):
-        """Next-frame visibility, seen, creep and each effect type at sampled map tokens, read from the coarsest cells. Effects are rare, so the cells they cover
+        """Next-frame visibility, seen, creep and each effect type at sampled map
+        tokens, read from the coarsest cells. Effects are rare, so the cells they cover
         are always among the sample (eff_force)."""
         B, F_ = b["mask"].shape[:2]
         S = out["cells"].shape[2]

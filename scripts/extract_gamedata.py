@@ -1,11 +1,12 @@
-"""Extracts the game's data XMLs (GameData/*.xml of every mod) from the installed CASC storage,
-per build, through CascLib (envs/casc.py).
+"""Extracts the game's data XMLs (GameData/*.xml of every mod) from the installed CASC
+storage, per build, through CascLib (envs/casc.py).
 
-The Editor's balance export leaves out what upgrades do (a Marauder's +1 damage and +1 vs
-Armored per weapons level, adrenal glands' attack period, ...); those live in UpgradeData.xml
-and the catalogs it references (WeaponData, EffectData, UnitData, BehaviorData), inside the
-mods of the game: Core, Liberty, Swarm, Void and the multiplayer balance mods layered on top.
-This writes them to <out>/<build>/<mod>/GameData/<file>.xml, mirroring the storage paths.
+The Editor's balance export leaves out what upgrades do (a Marauder's +1 damage and +1
+vs Armored per weapons level, adrenal glands' attack period, ...); those live in
+UpgradeData.xml and the catalogs it references (WeaponData, EffectData, UnitData,
+BehaviorData), inside the mods of the game: Core, Liberty, Swarm, Void and the
+multiplayer balance mods layered on top. This writes them to
+<out>/<build>/<mod>/GameData/<file>.xml, mirroring the storage paths.
 
     python scripts/extract_gamedata.py                 # every installed build
     python scripts/extract_gamedata.py --builds 98310 --list   # just list what matches
@@ -23,7 +24,8 @@ from cosmicstar.envs.casc import Storage  # noqa: E402
 
 
 def build_key(install, build):
-    """BuildConfig hash of a base build in an install's .build.info (None: the active row)."""
+    """BuildConfig hash of a base build in an install's .build.info (None: the active
+    row)."""
     _, rows = tact.read_build_info(install)
     for r in rows:
         if r.get("Version", "").endswith(f".{build}"):
@@ -46,7 +48,10 @@ def main():
     ap.add_argument(
         "--mods",
         default="core,liberty,swarm,void,voidmulti",
-        help="comma-separated mod names to keep (the ladder dependency chain, in load order); empty = all",
+        help=(
+            "comma-separated mod names to keep (the ladder dependency chain, in load"
+            " order); empty = all"
+        ),
     )
     ap.add_argument("--out", default="data/worldmodel/gamedata")
     ap.add_argument("--list", action="store_true", help="list matching files and exit")
@@ -59,7 +64,8 @@ def main():
         key = build_key(install, build)
         if key is None:
             print(
-                f"build {build}: not in {install}/.build.info, skipped (install it with cosmicstar.envs.tact first)",
+                f"build {build}: not in {install}/.build.info, skipped (install it with"
+                " cosmicstar.envs.tact first)",
                 flush=True,
             )
             continue
@@ -92,7 +98,8 @@ def main():
                     f.write(data)
                 n_bytes += len(data)
             print(
-                f"  wrote {len(names)} files, {n_bytes / 1e6:.1f} MB -> {os.path.join(args.out, str(build))}",
+                f"  wrote {len(names)} files, {n_bytes / 1e6:.1f} MB ->"
+                f" {os.path.join(args.out, str(build))}",
                 flush=True,
             )
 

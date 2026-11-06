@@ -1,18 +1,22 @@
 """Builds the per-build ability table from the Editor's balance exports.
 
-The replay names an ability by (link, cmd): the ability's link in that build's catalog and the
-button within it. The Editor's export of a replay's rules gives the link numbers:
+The replay names an ability by (link, cmd): the ability's link in that build's catalog
+and the button within it. The Editor's export of a replay's rules gives the link
+numbers:
 
     python scripts/export_balance.py   (-> data/worldmodel/balance/<ruleset>)
 
-Each exported unit lists its abilities by catalog name and link (<ability id= index=>) and the
-units/upgrades it builds, trains or researches by link only (<unit id= ability= index=>); those
-links are named through the API, which says which ability makes each unit and upgrade. The
-API's AbilityData then expands every link to all its buttons: link_index == the replay's cmd.
+Each exported unit lists its abilities by catalog name and link (<ability id= index=>)
+and the units/upgrades it builds, trains or researches by link only (<unit id= ability=
+index=>); those links are named through the API, which says which ability makes each
+unit and upgrade. The API's AbilityData then expands every link to all its buttons:
+link_index == the replay's cmd.
 
-Output (--out): {ruleset: {"base_build", "links": {link: link_name}, "units": {unit link: name},
+Output (--out): {ruleset: {"base_build", "links": {link: link_name}, "units": {unit
+link: name},
                          "commands": {"link:cmd": {"name", "index", "api", "button"}}}}
-A replay-vote table from the engine (data/worldmodel/ability_votes.json), where present, is checked against it.
+A replay-vote table from the engine (data/worldmodel/ability_votes.json), where present,
+is checked against it.
 
     python scripts/build_link_table.py
 """
@@ -32,8 +36,8 @@ UNIT_LINK = re.compile(
 
 
 def export_units(d):
-    """{unit link: unit name} from one balance export (fogged snapshots and pings name units
-    by link)."""
+    """{unit link: unit name} from one balance export (fogged snapshots and pings name
+    units by link)."""
     out = {}
     for f in glob.glob(os.path.join(d, "*.xml")):
         m = UNIT_LINK.search(open(f, encoding="utf-8").read())
@@ -43,8 +47,8 @@ def export_units(d):
 
 
 def export_links(d):
-    """{link: {link_name, or (producer, "unit"|"upgrade", name, cmd)}} from one balance export.
-    The producer is the unit whose file lists the build/train/research entry."""
+    """{link: {link_name, or (producer, "unit"|"upgrade", name, cmd)}} from one balance
+    export. The producer is the unit whose file lists the build/train/research entry."""
     out = collections.defaultdict(set)
     for f in glob.glob(os.path.join(d, "*.xml")):
         x = open(f, encoding="utf-8").read()
@@ -58,12 +62,14 @@ def export_links(d):
 
 
 def name_produced(items, family, makes, abil, loose=False, taken=()):
-    """Name a link known only by what it produces. Several abilities can make the same unit
-    (GatewayTrain and WarpGateTrain both make Zealots), so the API's "made by" alone is not
-    enough: score each candidate by how many items sit at the same button (by button name or by
-    the API's "made by"), and prefer abilities named after the producing unit.
-    loose: also accept a button name that merely contains the item's name (the Nuke's button is
-    NukeArm); only used for links nothing else names, since it confuses e.g. CreepTumorBuild.
+    """Name a link known only by what it produces. Several abilities can make the same
+    unit (GatewayTrain and WarpGateTrain both make Zealots), so the API's "made by"
+    alone is not enough: score each candidate by how many items sit at the same button
+    (by button name or by the API's "made by"), and prefer abilities named after the
+    producing unit.
+    loose: also accept a button name that merely contains the item's name (the Nuke's
+    button is NukeArm); only used for links nothing else names, since it confuses e.g.
+    CreepTumorBuild.
     """
     producers = {p for p, _, _, _ in items}
     cands = {n for n in family if any(n.startswith(p) for p in producers if p)}
@@ -130,7 +136,8 @@ def build_table(export, rules):
             and name_produced(produced, family, makes, abil) not in (None, name)
         ):
             problems.append(
-                f"link {link}: named {name} but produces like {name_produced(produced, family, makes, abil)}"
+                f"link {link}: named {name} but produces like"
+                f" {name_produced(produced, family, makes, abil)}"
             )
         links[link] = name
     for link, produced in unnamed:  # last resort, among the names no other link has
@@ -192,11 +199,12 @@ def main():
             if c is None or c["api"] != t["api"]:
                 disagree += 1
                 problems.append(
-                    f"vote {vkey}: replays say {api_name.get(t['api'])} ({t['votes']} votes), "
-                    f"export says {c and c['name']}"
+                    f"vote {vkey}: replays say {api_name.get(t['api'])} ({t['votes']}"
+                    f" votes), export says {c and c['name']}"
                 )
         print(
-            f"{key}: {len(links)} links, {len(commands)} commands; votes checked {checked}, disagree {disagree}"
+            f"{key}: {len(links)} links, {len(commands)} commands; votes checked"
+            f" {checked}, disagree {disagree}"
         )
         for p in problems:
             print("   ", p)

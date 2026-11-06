@@ -1,4 +1,5 @@
-"""WindowBlock's FlexAttention (block mask + validity) against a plain masked softmax. Run directly: python tests/test_dense_window.py (CUDA)."""
+"""WindowBlock's FlexAttention (block mask + validity) against a plain masked softmax.
+Run directly: python tests/test_dense_window.py (CUDA)."""
 
 import torch
 

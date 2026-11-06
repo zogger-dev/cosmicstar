@@ -1,9 +1,11 @@
-"""Build the frame cache (worldmodel/frame_cache.py): every extracted 1v1 game with both player
-views, --per_game moments each, in all three views, written per split (train, held_out_games,
-held_out_map_games) as <out>/<split>/<game id>.fcache, with the vocabulary in <out>/vocab.json.
+"""Build the frame cache (worldmodel/frame_cache.py): every extracted 1v1 game with both
+player views, --per_game moments each, in all three views, written per split (train,
+held_out_games, held_out_map_games) as <out>/<split>/<game id>.fcache, with the
+vocabulary in <out>/vocab.json.
 
 Each worker holds one game at a time plus its compressed windows (measure before raising
---workers), so --workers bounds the memory. Games already written are skipped (rerunnable).
+--workers), so --workers bounds the memory. Games already written are skipped
+(rerunnable).
 
     python scripts/build_frame_cache.py --out data/worldmodel/frame_cache --per_game 80 --workers 4
 """
@@ -36,15 +38,17 @@ def _init(vocab_path):
 
 
 def _release():
-    """Free the finished game now: a GameSet's views reference each other, so without this it lives until
-    the cycle collector happens to run and the next game loads on top of it; then hand freed arenas back.
+    """Free the finished game now: a GameSet's views reference each other, so without
+    this it lives until the cycle collector happens to run and the next game loads on
+    top of it; then hand freed arenas back.
     """
     gc.collect()
     ctypes.CDLL("libc.so.6").malloc_trim(0)
 
 
 def build_one(job):
-    """One game -> its .fcache; returns (game id, moments written, seconds) or (game id, error)."""
+    """One game -> its .fcache; returns (game id, moments written, seconds) or (game id,
+    error)."""
     try:
         return _build_one(job)
     finally:
@@ -105,8 +109,10 @@ def main():
         "--window",
         type=int,
         default=15,
-        help="consecutive frames per window, each in 3 views (15: a "
-        "moment and the 14 frames after it, 2.5 s at the 4-loop frame step; 1: single moments)",
+        help=(
+            "consecutive frames per window, each in 3 views (15: a moment and the 14"
+            " frames after it, 2.5 s at the 4-loop frame step; 1: single moments)"
+        ),
     )
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument(
@@ -145,7 +151,8 @@ def main():
                     )
                 )
     print(
-        f"{len(jobs)} games to build, {args.workers} workers, {args.per_game} windows of {args.window} frames each -> {args.out}",
+        f"{len(jobs)} games to build, {args.workers} workers, {args.per_game} windows"
+        f" of {args.window} frames each -> {args.out}",
         flush=True,
     )
     t0, done, moments = time.time(), 0, 0
@@ -161,8 +168,9 @@ def main():
             if done % 20 == 0 or done == len(jobs):
                 el = time.time() - t0
                 print(
-                    f"{done}/{len(jobs)} games, {moments} windows ({3 * args.window * moments} view-frames), {el:.0f}s, "
-                    f"~{el / done * (len(jobs) - done):.0f}s left",
+                    f"{done}/{len(jobs)} games, {moments} windows"
+                    f" ({3 * args.window * moments} view-frames), {el:.0f}s,"
+                    f" ~{el / done * (len(jobs) - done):.0f}s left",
                     flush=True,
                 )
     print("done", flush=True)

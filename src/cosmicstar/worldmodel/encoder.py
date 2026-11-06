@@ -57,10 +57,10 @@ class Fourier(nn.Module):
 
 
 class TimeFeatures(nn.Module):
-    """Game time (seconds) -> sin/cos at periods from 1 min to ~2.3 h (geometric) plus log
-    time, so any game length is unambiguous. No periods under a minute: absolute game time
-    has no meaningful rhythm at the scale of seconds, and fast-cycling features make the
-    encoding of frames a few seconds apart jump around."""
+    """Game time (seconds) -> sin/cos at periods from 1 min to ~2.3 h (geometric) plus
+    log time, so any game length is unambiguous. No periods under a minute: absolute
+    game time has no meaningful rhythm at the scale of seconds, and fast-cycling
+    features make the encoding of frames a few seconds apart jump around."""
 
     def __init__(self, n_periods=8, shortest=60.0, longest=8192.0):
         super().__init__()
@@ -100,7 +100,8 @@ class MapFourier(nn.Module):
 
 
 class PositionEncoder(nn.Module):
-    """Map position (normalized to [-1, 1]) -> d. Shared by entities and readout queries."""
+    """Map position (normalized to [-1, 1]) -> d. Shared by entities and readout
+    queries."""
 
     def __init__(self, d, n_freq=8):
         super().__init__()
@@ -144,7 +145,8 @@ class WindowReadout(nn.Module):
         nn.init.normal_(self.empty, std=0.02)
 
     def bias(self, ent_xy, ent_mask, center, size):
-        """[B, Q, K+1] additive attention bias: 0 inside the window, -(k*(r-1))^2 outside."""
+        """[B, Q, K+1] additive attention bias: 0 inside the window, -(k*(r-1))^2
+        outside."""
         rel = (ent_xy[:, None] - center[:, :, None]) / (
             size[:, :, None] / 2
         )  # [B, Q, K, 2]
@@ -156,7 +158,8 @@ class WindowReadout(nn.Module):
         )  # the empty token: always 0
 
     def forward(self, ent_h, ent_xy, ent_mask, center, size, cells):
-        """center, size: [B, Q, 2] normalized; cells: [B, 2] map cells per normalized unit."""
+        """center, size: [B, Q, 2] normalized; cells: [B, 2] map cells per normalized
+        unit."""
         B, Q = center.shape[:2]
         size_cells = (
             size * cells[:, None]
@@ -231,12 +234,13 @@ class StateEncoder(nn.Module):
         )
 
     def place(self, b, g):
-        """A token's position embedding (subclasses may read map units, <g>_pos, instead)."""
+        """A token's position embedding (subclasses may read map units, <g>_pos,
+        instead)."""
         return self.pos(b[f"{g}_xy"])
 
     def entity_tokens(self, b, g="ent"):
-        """Input embedding of entities from their features (tokenize.entity_features). Also
-        used by the action encoder for the units an action points at."""
+        """Input embedding of entities from their features (tokenize.entity_features).
+        Also used by the action encoder for the units an action points at."""
         tok = (
             self.unit(b[f"{g}_type"])
             + self.owner(b, g)
@@ -282,8 +286,10 @@ class StateEncoder(nn.Module):
         )
         return tokens, mask
 
-    grad_ckpt = False  # recompute layer activations in backward (much less memory for many frames)
-    use_orders = True  # entity tokens include the unit's current order (zeros in older extractions)
+    # recompute layer activations in backward (much less memory for many frames)
+    grad_ckpt = False
+    # entity tokens include the unit's current order (zeros in older extractions)
+    use_orders = True
 
     def forward(self, b):
         x, mask = self.embed(b)

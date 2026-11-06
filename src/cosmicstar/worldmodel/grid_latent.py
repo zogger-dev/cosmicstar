@@ -1,22 +1,24 @@
-"""Grid latent (DESIGN_grid_latent.md, 2026-11-01): a fixed-size latent for every map, and an
-entity-list decoder from it.
+"""Grid latent (DESIGN_grid_latent.md, 2026-11-01): a fixed-size latent for every map,
+and an entity-list decoder from it.
 
-Encoder: the dense encoder (dense.py) runs as before; then its entity / effect tokens and the
-cells of one map level (real cells, each at its true center in map units) are scattered onto a
-fixed S x S grid over the playable area (centered, scaled by the longest side, so cells are
-square in map units and the shorter side is padded evenly). Each latent cell pools what fell
-into it with one attention softmax (query: the cell's center; keys / values: the token plus its
-offset from the cell center, so the real lattice and its scale stay visible), then a few
-transformer blocks mix [globals, S x S cells]. The latent is those 1 + P + S^2 tokens.
+Encoder: the dense encoder (dense.py) runs as before; then its entity / effect tokens
+and the cells of one map level (real cells, each at its true center in map units) are
+scattered onto a fixed S x S grid over the playable area (centered, scaled by the
+longest side, so cells are square in map units and the shorter side is padded evenly).
+Each latent cell pools what fell into it with one attention softmax (query: the cell's
+center; keys / values: the token plus its offset from the cell center, so the real
+lattice and its scale stay visible), then a few transformer blocks mix [globals, S x S
+cells]. The latent is those 1 + P + S^2 tokens.
 
-Decoder (a probe: low gradient into the latent): per latent cell, a Poisson count for every
-(owner, type), owner in {neutral, player 0, player 1} (the frame's player order); one query per
-entity, built from its cell's vector, its (owner, type) and its slot within that (cell, owner,
-type) group; the queries attend to each other and to the latent and read out the entity's offset
-within its cell, its numbers (tokenize.entity_features) and its order. Training places the queries
-from the true counts. The loss ignores the order of entities within a group: predictions and
-targets are each sorted by y offset within the group and paired in that order (exact for 1-D,
-on the GPU, no assignment solver; evaluation compares it with a Hungarian assignment).
+Decoder (a probe: low gradient into the latent): per latent cell, a Poisson count for
+every (owner, type), owner in {neutral, player 0, player 1} (the frame's player order);
+one query per entity, built from its cell's vector, its (owner, type) and its slot
+within that (cell, owner, type) group; the queries attend to each other and to the
+latent and read out the entity's offset within its cell, its numbers
+(tokenize.entity_features) and its order. Training places the queries from the true
+counts. The loss ignores the order of entities within a group: predictions and targets
+are each sorted by y offset within the group and paired in that order (exact for 1-D, on
+the GPU, no assignment solver; evaluation compares it with a Hungarian assignment).
 """
 
 import numpy as np
@@ -45,10 +47,11 @@ def grad_scale(x, w):
 
 
 def map_views(b):
-    """A collated batch -> the same batch with its map split into what it is: b["grid"] the frame's
-    static layers (STATIC_LAYERS); b["view_grid"] [M, 3, H, W] one row per player view the frames hold
-    (a player's frame: the viewer's; a combined frame: both), b["view_frame"] and b["view_player"] [M]
-    saying whose. A view has no slot for anyone else."""
+    """A collated batch -> the same batch with its map split into what it is: b["grid"]
+    the frame's static layers (STATIC_LAYERS); b["view_grid"] [M, 3, H, W] one row per
+    player view the frames hold (a player's frame: the viewer's; a combined frame:
+    both), b["view_frame"] and b["view_player"] [M] saying whose. A view has no slot for
+    anyone else."""
     g = b["grid"]
     B, _, H, W = g.shape
     n = len(VIEW_LAYERS) * N_GRID_PLAYERS
@@ -62,8 +65,9 @@ def map_views(b):
     b["on_map"] = b["grid"][
         :, STATIC_LAYERS.index("on_map") : STATIC_LAYERS.index("on_map") + 1
     ]
-    # the lattice for QuadEncoder: the same layers on a square of each frame's longest playable side, centered
-    # on the playable center (padded where the cache has no terrain; real cells past the square are dropped)
+    # the lattice for QuadEncoder: the same layers on a square of each frame's longest
+    # playable side, centered on the playable center (padded where the cache has no
+    # terrain; real cells past the square are dropped)
     side = (2 * b["half"].max(-1).values).long()
     Q = -(-int(side.max()) // 4) * 4
     origin = (b["grid_origin"] - b["center"]).round().long()
@@ -91,8 +95,9 @@ def map_views(b):
 
 
 def geometry(half, S):
-    """Latent cells over the playable area: half [B, 2] (playable half-extents, map units) ->
-    cell size [B] and cell centers [B, S * S, 2] (playable-centered map units, row-major in y).
+    """Latent cells over the playable area: half [B, 2] (playable half-extents, map
+    units) -> cell size [B] and cell centers [B, S * S, 2] (playable-centered map units,
+    row-major in y).
     """
     size = 2 * half.max(-1).values / S
     c = torch.arange(S, device=half.device, dtype=torch.float32) + 0.5 - S / 2
@@ -107,8 +112,9 @@ def cell_of(pos, size, S):
 
 
 class ScatterPool(nn.Module):
-    """Each latent cell attends over the tokens that fell into it (one softmax per cell and head,
-    by scatter: no padding to the fullest cell). Empty cells get nothing (their query alone).
+    """Each latent cell attends over the tokens that fell into it (one softmax per cell
+    and head, by scatter: no padding to the fullest cell). Empty cells get nothing
+    (their query alone).
     """
 
     def __init__(self, d, heads, mlp_ratio=4.0):
@@ -119,8 +125,8 @@ class ScatterPool(nn.Module):
         self.n2, self.ff = nn.LayerNorm(d), mlp(d, d, int(d * mlp_ratio))
 
     def forward(self, x, off, seg, q0):
-        """x, off [B, N, d] (tokens, their offset embeddings); seg [B, N] in 0..C (C = dump: invalid
-        tokens); q0 [B, C, d] cell queries -> [B, C, d]."""
+        """x, off [B, N, d] (tokens, their offset embeddings); seg [B, N] in 0..C (C =
+        dump: invalid tokens); q0 [B, C, d] cell queries -> [B, C, d]."""
         B, N, d = x.shape
         C = q0.shape[1]
         H, dh = self.H, self.dh
@@ -144,10 +150,10 @@ class ScatterPool(nn.Module):
 
 
 class GridEncoder(DenseEncoder):
-    """The dense encoder, then the scatter onto the fixed grid and the latent mixer (module
-    docstring). Returns the latent as tokens [CLS, players, S x S cells] (the same keys the
-    dynamics read), the dense output under "dense" (the posterior and the decoder's targets read
-    its entity tokens), the cell size and centers."""
+    """The dense encoder, then the scatter onto the fixed grid and the latent mixer
+    (module docstring). Returns the latent as tokens [CLS, players, S x S cells] (the
+    same keys the dynamics read), the dense output under "dense" (the posterior and the
+    decoder's targets read its entity tokens), the cell size and centers."""
 
     def __init__(
         self,
@@ -180,7 +186,8 @@ class GridEncoder(DenseEncoder):
         )  # multi-hot: [1, 0] and [0, 1] the players, [1, 1] the observer
 
     def owner(self, b, g):
-        """Whose (the player's index, neutral its own) and their relation to the viewer."""
+        """Whose (the player's index, neutral its own) and their relation to the
+        viewer."""
         return self.pcode(b[f"{g}_pcode"]) + self.rel(b[f"{g}_rel"])
 
     def embed_parts(self, b):
@@ -192,8 +199,9 @@ class GridEncoder(DenseEncoder):
         )
 
     def minimap(self, grid, b):
-        """[B, C, H, W] static layers -> [B, w0, H, W]: static(the map's layers) plus, per player view the
-        frame holds, mix(GELU(view(its layers) + code(its player))). Batches without map_views: as before.
+        """[B, C, H, W] static layers -> [B, w0, H, W]: static(the map's layers) plus,
+        per player view the frame holds, mix(GELU(view(its layers) + code(its player))).
+        Batches without map_views: as before.
         """
         if "view_grid" not in b:
             return super().minimap(grid, b)
@@ -213,7 +221,8 @@ class GridEncoder(DenseEncoder):
         P = e["P"]
         g0, (c0, _) = 1 + P, e["cell_slice"]
         S = self.S
-        # tokens to scatter: entities and effects (their dense outputs), and the real cells of one map level
+        # tokens to scatter: entities and effects (their dense outputs), and the real
+        # cells of one map level
         epos = [b["ent_pos"].float()] + (
             [b["eff_pos"].float()] if "eff_type" in b else []
         )
@@ -274,10 +283,11 @@ class GridEncoder(DenseEncoder):
 
 
 def targets(fb, S, n_units):
-    """What the decoder must produce for a collated frame batch fb (any batch of frames): per
-    entity (units, not effects) its latent cell, (owner, type) class, slot within its (cell, owner,
-    type) group (by y offset), offset within the cell (cell units, -0.5..0.5); per cell, the count
-    of each (owner, type). All on the GPU, fixed shapes."""
+    """What the decoder must produce for a collated frame batch fb (any batch of
+    frames): per entity (units, not effects) its latent cell, (owner, type) class, slot
+    within its (cell, owner, type) group (by y offset), offset within the cell (cell
+    units, -0.5..0.5); per cell, the count of each (owner, type). All on the GPU, fixed
+    shapes."""
     pos, msk = fb["ent_pos"].float(), fb["ent_mask"]
     B, N = msk.shape
     size, centers = geometry(fb["half"].float(), S)
@@ -329,8 +339,8 @@ def targets(fb, S, n_units):
 
 
 class EntityDecoder(nn.Module):
-    """Latent -> (log count rates per cell and (owner, type), per-entity readouts for the given
-    queries). Queries come from targets() (training: the true counts)."""
+    """Latent -> (log count rates per cell and (owner, type), per-entity readouts for
+    the given queries). Queries come from targets() (training: the true counts)."""
 
     def __init__(self, d, n_units, n_abilities, n_num, depth=2, heads=4, mlp_ratio=4.0):
         super().__init__()
@@ -384,8 +394,9 @@ class EntityDecoder(nn.Module):
 
 
 def match(out, tg):
-    """Pairs predictions with targets within each (cell, owner, type) group, both sorted by y offset:
-    returns (prediction index, target index, valid), flat over the batch."""
+    """Pairs predictions with targets within each (cell, owner, type) group, both sorted
+    by y offset: returns (prediction index, target index, valid), flat over the
+    batch."""
     msk = tg["mask"].reshape(-1)
     big = 1e12  # above every group key x 4 (no sync to find the maximum)
     gg = tg["gg"].reshape(-1).double()
@@ -397,8 +408,8 @@ def match(out, tg):
 
 
 def decode_losses(dec, lat, lat_mask, cell_slice, tg):
-    """Count (Poisson, per cell, summed over classes) and matched entity losses; returns (losses,
-    decoder output, the pairing)."""
+    """Count (Poisson, per cell, summed over classes) and matched entity losses; returns
+    (losses, decoder output, the pairing)."""
     lr = dec.rates(lat, cell_slice)
     cnt = (
         F.poisson_nll_loss(
@@ -448,12 +459,13 @@ def cross_gram(a, b, w):
     )
 
 
-# ------------------------------------------------------------------ the map decoder (pretraining)
+# -------------------------------------------------------- the map decoder (pretraining)
 
 
 def canvas_cells(fb, S):
-    """Every canvas cell of a collated frame batch (1 map unit each, from grid_origin): its latent
-    cell [B, H W] and its offset from that cell's center in map units [B, H W, 2]."""
+    """Every canvas cell of a collated frame batch (1 map unit each, from grid_origin):
+    its latent cell [B, H W] and its offset from that cell's center in map units [B, H
+    W, 2]."""
     B, _, H, W = fb["grid"].shape
     origin = (fb["grid_origin"] - fb["center"]).float()
     ys = torch.arange(H, device=origin.device, dtype=torch.float32) + 0.5
@@ -470,9 +482,10 @@ def canvas_cells(fb, S):
 
 
 class MapDecoder(nn.Module):
-    """Latent cells -> the map layers at 1 map unit: a real cell reads its latent cell's vector and its
-    offset from that cell's center (Fourier features), through an MLP (an implicit field per latent
-    cell). With players: one player's view of those cells, the query saying whose."""
+    """Latent cells -> the map layers at 1 map unit: a real cell reads its latent cell's
+    vector and its offset from that cell's center (Fourier features), through an MLP (an
+    implicit field per latent cell). With players: one player's view of those cells, the
+    query saying whose."""
 
     def __init__(self, d, n_out, hidden=256, players=0):
         super().__init__()
@@ -487,16 +500,18 @@ class MapDecoder(nn.Module):
         )
 
     def forward(self, cells, cell, off, player=None):
-        """cells [B, S^2, d]; cell [B, K], off [B, K, 2] (the real cells to decode); player [B] -> [B, K, n_out]."""
+        """cells [B, S^2, d]; cell [B, K], off [B, K, 2] (the real cells to decode);
+        player [B] -> [B, K, n_out]."""
         x = torch.gather(cells, 1, cell[..., None].expand(-1, -1, cells.shape[-1]))
         if self.player is not None:
             x = x + self.player(player)[:, None].to(x.dtype)
         return self.mlp(torch.cat([x, self.fourier(off).to(x.dtype)], -1)).float()
 
 
-# ------------------------------------------------------------------ the state decoder (pretraining, v2)
-# Entities decoded from cell + slot queries alone: type and owner are outputs, not inputs; the entity
-# numbers by kind; the order queue. No counts (training places one query per true entity).
+# -------------------------------------------------- the state decoder (pretraining, v2)
+# Entities decoded from cell + slot queries alone: type and owner are outputs, not
+# inputs; the entity numbers by kind; the order queue. No counts (training places one
+# query per true entity).
 
 NUM_BIN = (
     "flying",
@@ -526,15 +541,17 @@ NUM_CONT = tuple(
 IDX = {n: i for i, n in enumerate(ENTITY_NUMS)}
 I_CONT = [IDX[n] for n in NUM_CONT]
 I_BIN = [IDX[n] for n in NUM_BIN]
-QUEUE = 8  # order queue slots decoded in full (the current order + 7 queued); the length beyond
+# order queue slots decoded in full (the current order + 7 queued); the length beyond
+QUEUE = 8
 PROD = 8  # production queue slots (a reactored facility's full queue)
 MAX_COUNT = 128  # per-cell entity count classes (0 .. 127)
 
 
 def cell_targets(fb, S, n_units, n_abilities):
-    """Decoder targets for a collated frame batch, grouped by latent cell only: per entity its cell,
-    slot within the cell (by y offset), offset (cell units), type, owner (neutral / player 0 / 1),
-    numbers by kind, and its first QUEUE orders (ability, target offset, targets a unit, progress).
+    """Decoder targets for a collated frame batch, grouped by latent cell only: per
+    entity its cell, slot within the cell (by y offset), offset (cell units), type,
+    owner (neutral / player 0 / 1), numbers by kind, and its first QUEUE orders
+    (ability, target offset, targets a unit, progress).
     """
     tg = targets(fb, S, n_units)
     msk = tg["mask"]
@@ -559,7 +576,8 @@ def cell_targets(fb, S, n_units, n_abilities):
     for name, cols in NUM_CAT.items():
         oh = num[..., [IDX[c] for c in cols]]
         tg[f"cat_{name}"] = torch.where(oh.sum(-1) > 0, oh.argmax(-1), len(cols))
-    # the order queue: bag_ord rows (entity b * N + row, ability, [dx, dy, targets unit, progress, position / 5])
+    # the order queue: bag_ord rows (entity b * N + row, ability, [dx, dy, targets unit,
+    # progress, position / 5])
     ent, ab, ft = fb["bag_ord_ent"], fb["bag_ord_id"], fb["bag_ord_feat"].float()
     qp = torch.round(ft[:, 4] * 5).long()
     slot = torch.where(
@@ -596,8 +614,8 @@ def cell_targets(fb, S, n_units, n_abilities):
     tg["p_abil"] = pput(pab, n_abilities)
     tg["p_prog"] = pput(pft[:, 0], 0.0)
     tg["p_has"] = tg["p_abil"] < n_abilities
-    # the container (passengers: their transport / bunker / command center; workers in gas; add-ons: their
-    # building): its row in the frame, N for none
+    # the container (passengers: their transport / bunker / command center; workers in
+    # gas; add-ons: their building): its row in the frame, N for none
     par = fb["ent_parent"]
     tg["parent"] = torch.where((par >= 0) & msk, par, N)
     # entities per latent cell (the count that places the queries at inference)
@@ -611,8 +629,8 @@ def cell_targets(fb, S, n_units, n_abilities):
 
 
 class StateEntityDecoder(nn.Module):
-    """Latent -> per-entity readouts for queries of (cell, slot): offset, type, owner, the numbers
-    by kind (continuous, binary, categorical groups) and the order queue."""
+    """Latent -> per-entity readouts for queries of (cell, slot): offset, type, owner,
+    the numbers by kind (continuous, binary, categorical groups) and the order queue."""
 
     def __init__(self, d, n_units, n_abilities, depth=2, heads=4, mlp_ratio=4.0):
         super().__init__()
@@ -665,7 +683,8 @@ class StateEntityDecoder(nn.Module):
         h = self.norm(q)
         B, N, _ = h.shape
         f = lambda m: m(h).float()
-        # container pointer: each query's scores over the frame's queries (masked) and "none"
+        # container pointer: each query's scores over the frame's queries (masked) and
+        # "none"
         sc = (self.ptr_q(h).float() @ self.ptr_k(h).float().transpose(1, 2)) / h.shape[
             -1
         ] ** 0.5
@@ -691,13 +710,15 @@ class StateEntityDecoder(nn.Module):
         )
 
 
-BALANCE_POWER = 0.5  # class weights n_c ** -power: 1 = fully balanced (rare states over-predicted: v6 at step 6,000 had
+# class weights n_c ** -power: 1 = fully balanced (rare states over-predicted: v6 at
+# step 6,000 had
+BALANCE_POWER = 0.5
 # recall 0.95-1.00, precision 0.08-0.37 on them), 0.5 = square root, 0 = the plain mean
 
 
 def _class_weighted(l, cls, w, K):
-    """Mean of losses l with each sample weighted by its class's count to the power -BALANCE_POWER
-    (counts over the batch's weighted samples); cls [n] in 0..K-1."""
+    """Mean of losses l with each sample weighted by its class's count to the power
+    -BALANCE_POWER (counts over the batch's weighted samples); cls [n] in 0..K-1."""
     cnt = torch.zeros(K, device=l.device).index_add_(0, cls, w)
     cw = cnt.clamp(min=1) ** -BALANCE_POWER
     sw = cw[cls] * w
@@ -705,25 +726,25 @@ def _class_weighted(l, cls, w, K):
 
 
 def balanced(loss, pos, w):
-    """Class-weighted mean over positive cases (an occupied queue slot, a unit with a container) and the
-    rest: each weighted by its class count ** -BALANCE_POWER, so the rare class isn't drowned by "empty" /
-    "none" without being over-predicted."""
+    """Class-weighted mean over positive cases (an occupied queue slot, a unit with a
+    container) and the rest: each weighted by its class count ** -BALANCE_POWER, so the
+    rare class isn't drowned by "empty" / "none" without being over-predicted."""
     l, p_, w_ = loss.reshape(-1), pos.reshape(-1), w.expand_as(loss).reshape(-1)
     return _class_weighted(l, p_.long(), w_, 2)
 
 
 def balanced_ce(logits, target, w):
-    """Cross entropy with each class weighted by its count ** -BALANCE_POWER (a state seen once in a
-    thousand rows, cloaked, detected, inside a transport, weighs more than its count, less than the
-    common state)."""
+    """Cross entropy with each class weighted by its count ** -BALANCE_POWER (a state
+    seen once in a thousand rows, cloaked, detected, inside a transport, weighs more
+    than its count, less than the common state)."""
     return _class_weighted(
         F.cross_entropy(logits, target, reduction="none"), target, w, logits.shape[-1]
     )
 
 
 def balanced_bce(logits, target, w):
-    """Per flag, the BCE with positives and negatives weighted by their counts ** -BALANCE_POWER, then
-    averaged over flags."""
+    """Per flag, the BCE with positives and negatives weighted by their counts **
+    -BALANCE_POWER, then averaged over flags."""
     l = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
     return torch.stack(
         [
@@ -735,11 +756,13 @@ def balanced_bce(logits, target, w):
 
 @torch.no_grad()
 def hungarian(out, tg):
-    """The cheapest pairing of predictions and entities over each whole frame; returns (prediction index,
-    target index, valid), flat over the batch. Cost: position error in map units, plus the cross entropy
-    of type and owner, plus the mean error of the numbers, so entities at the very same place (passengers
-    and workers in gas sit exactly at their container) still pair by what they are. A latent cell's edge
-    is a line we drew: a prediction landing just across it pairs with its entity at the small real cost.
+    """The cheapest pairing of predictions and entities over each whole frame; returns
+    (prediction index, target index, valid), flat over the batch. Cost: position error
+    in map units, plus the cross entropy of type and owner, plus the mean error of the
+    numbers, so entities at the very same place (passengers and workers in gas sit
+    exactly at their container) still pair by what they are. A latent cell's edge is a
+    line we drew: a prediction landing just across it pairs with its entity at the small
+    real cost.
     """
     B, N = tg["mask"].shape
     size = tg["size"][:, None, None]
@@ -779,7 +802,8 @@ def hungarian(out, tg):
 
 
 def state_losses(dec, lat, lat_mask, cell_slice, tg):
-    """Hungarian-matched (over each frame) losses of every readout; returns (losses, output, pairing)."""
+    """Hungarian-matched (over each frame) losses of every readout; returns (losses,
+    output, pairing)."""
     out = dec(lat, lat_mask, cell_slice, tg)
     ip, it, ok = hungarian(out, tg)
     w = ok.float()
@@ -787,7 +811,8 @@ def state_losses(dec, lat, lat_mask, cell_slice, tg):
     fl = lambda x: x.reshape(-1, *x.shape[2:])
     P_, T_ = (lambda k: fl(out[k])[ip]), (lambda k: fl(tg[k])[it])
     avg = lambda x: (x * w).sum() / n
-    # the entity's offset from the center of the cell that queried it, which may be a neighbor
+    # the entity's offset from the center of the cell that queried it, which may be a
+    # neighbor
     off_t = (
         T_("off")
         + (T_("ctr") - fl(tg["ctr"])[ip])
@@ -844,7 +869,8 @@ def state_losses(dec, lat, lat_mask, cell_slice, tg):
     L["p_prog"] = (
         F.smooth_l1_loss(P_("p_prog"), T_("p_prog"), beta=0.05, reduction="none") * ph
     ).sum() / ph.sum().clamp(min=1)
-    # container pointer: the target is the query matched to the parent's row (queries and rows differ within a cell)
+    # container pointer: the target is the query matched to the parent's row (queries
+    # and rows differ within a cell)
     B, N = tg["mask"].shape
     q_of_row = torch.full((B * N,), -1, dtype=torch.long, device=ip.device).scatter_(
         0, it, ip
@@ -863,9 +889,9 @@ def state_losses(dec, lat, lat_mask, cell_slice, tg):
 
 
 class DecompHead(nn.Module):
-    """The decomposition check: from the combined view's latent, each player's own view latent at the
-    same moment. The combined latent plus a learned per-player embedding, self-attention blocks (2D RoPE
-    at the latent cells), a linear readout per token."""
+    """The decomposition check: from the combined view's latent, each player's own view
+    latent at the same moment. The combined latent plus a learned per-player embedding,
+    self-attention blocks (2D RoPE at the latent cells), a linear readout per token."""
 
     def __init__(self, d, depth=2, heads=4, mlp_ratio=4.0):
         super().__init__()
@@ -877,7 +903,8 @@ class DecompHead(nn.Module):
         self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d))
 
     def forward(self, x, mask, ang, player):
-        """x [B, T, d] combined latents, player [B] (0 / 1) -> [B, T, d] that player's latent."""
+        """x [B, T, d] combined latents, player [B] (0 / 1) -> [B, T, d] that player's
+        latent."""
         x = x + self.player(player)[:, None].to(x.dtype)
         for blk in self.layers:
             x = blk(x, mask, ang)

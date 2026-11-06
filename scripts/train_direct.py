@@ -1,40 +1,44 @@
 """Direct state-space simulator (worldmodel/direct.py): the state at t, plus everyone's
-commands in [t, t+k) or nothing, -> every entity's state at t+k, for k up to --max_loops game loops.
+commands in [t, t+k) or nothing, -> every entity's state at t+k, for k up to --max_loops
+game loops.
 
-A batch is --frames present frames, each paired with --hor horizons k drawn uniformly from the
-multiples of the extraction's frame step up to --max_loops (a step of 4 gives 4, 8, ..., 56; a
-step of 1 gives every loop 1..56). Horizons, like every time the model reads, are game loops,
-never frame numbers. The present is
-encoded once per frame; each (frame, k) sample gets its own command window [t, t+k), with
---act_drop of them emptied (the model is told commands were withheld). Targets are the same
-units' attributes at t+k, read from the extraction, no target encoder.
+A batch is --frames present frames, each paired with --hor horizons k drawn uniformly
+from the multiples of the extraction's frame step up to --max_loops (a step of 4 gives
+4, 8, ..., 56; a step of 1 gives every loop 1..56). Horizons, like every time the model
+reads, are game loops, never frame numbers. The present is
+encoded once per frame; each (frame, k) sample gets its own command window [t, t+k),
+with --act_drop of them emptied (the model is told commands were withheld). Targets are
+the same units' attributes at t+k, read from the extraction, no target encoder.
 
 The latent z per (sample, player): the posterior (worldmodel/inverse_model.py) reads the
 present and the future as the encoder sees them; the prior (direct.PriorHead) reads the
 present and the player's command summary, or "withheld". KL(posterior || prior) above
 --free_nats is charged with --beta. With commands given the future is determined and KL
 should go to ~0; with them withheld z must carry what the players did. That difference,
-printed per horizon in evaluation, is the test of the design. Evaluation also prints each
-probe's error against copying the present (persistence), with z from the posterior (the
-oracle), a prior sample and the prior's mean, and the births per window the model ignores.
+printed per horizon in evaluation, is the test of the design. Evaluation also prints
+each probe's error against copying the present (persistence), with z from the posterior
+(the oracle), a prior sample and the prior's mean, and the births per window the model
+ignores.
 
-Latent mode (--model latent, 2026-11-01; worldmodel/latent_dynamics.py, DESIGN_latent_dynamics.md):
-the model predicts the encoder's own representation of the future, ŝ_{t+k} = s_t + h(s_t, k) +
-g(·, actions, z), against targets from the encoder on the future frame (stop-gradient; --target
-online, or a moving-average copy with --target ema). Losses: latent prediction, VICReg on s_t,
-decorrelation of g from h and from s_t, a floor on g's spread where commands exist, Barlow Twins
-between z and the command summaries, the KL. The probes decode ŝ_{t+k} on detached features
-(evaluation only; --probe_weight lets a share of their gradient shape the latent), so the evaluation tables still read
-positions, orders and deaths against persistence.
+Latent mode (--model latent, 2026-11-01; worldmodel/latent_dynamics.py,
+DESIGN_latent_dynamics.md): the model predicts the encoder's own representation of the
+future, ŝ_{t+k} = s_t + h(s_t, k) + g(·, actions, z), against targets from the encoder
+on the future frame (stop-gradient; --target online, or a moving-average copy with
+--target ema). Losses: latent prediction, VICReg on s_t, decorrelation of g from h and
+from s_t, a floor on g's spread where commands exist, Barlow Twins between z and the
+command summaries, the KL. The probes decode ŝ_{t+k} on detached features (evaluation
+only; --probe_weight lets a share of their gradient shape the latent), so the evaluation
+tables still read positions, orders and deaths against persistence.
 
 Views (2026-10-31): a game is its two player views and their combined view (tokenize.
-CombinedFrames: both views joined, both players' commands; there is no observer extraction).
-Each present frame is drawn from one of the three (--obs_share of them combined). In a player
-view the posterior also reads what the viewer can't know about the enemy units they see: their
-true orders and the enemy's commands in the window that selected them (inverse_model.EnemyIntent);
-the prior never does, so the KL charges for the enemy intent the prior can't predict. KL is
-charged for every player (the viewer's and the enemy's z). Horizons are drawn log-uniformly
-over the multiples of the frame step up to --max_loops (224 loops = 10 s by default).
+CombinedFrames: both views joined, both players' commands; there is no observer
+extraction). Each present frame is drawn from one of the three (--obs_share of them
+combined). In a player view the posterior also reads what the viewer can't know about
+the enemy units they see: their true orders and the enemy's commands in the window that
+selected them (inverse_model.EnemyIntent); the prior never does, so the KL charges for
+the enemy intent the prior can't predict. KL is charged for every player (the viewer's
+and the enemy's z). Horizons are drawn log-uniformly over the multiples of the frame
+step up to --max_loops (224 loops = 10 s by default).
 
     python scripts/train_direct.py --steps 3000
     python scripts/train_direct.py --resume data/worldmodel/runs/<run> --eval_only
@@ -50,8 +54,8 @@ import sys
 import time
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-# inductor's mixed-order reduction fusion fails to compile the backward of the per-cell LayerNorm
-# + padding mask in the dense encoder's ResNet blocks (CantSplit, torch 2.10)
+# inductor's mixed-order reduction fusion fails to compile the backward of the per-cell
+# LayerNorm + padding mask in the dense encoder's ResNet blocks (CantSplit, torch 2.10)
 os.environ.setdefault("TORCHINDUCTOR_MIX_ORDER_REDUCTION", "0")
 
 import numpy as np
@@ -60,11 +64,12 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-# the dense encoder's blocks see float32 and bfloat16 inputs (per-cell LayerNorm outputs float32 under autocast),
-# with and without gradient (the moving-average target), at several shapes: past the default 8 variants
-# dynamo silently ran the rest uncompiled
+# the dense encoder's blocks see float32 and bfloat16 inputs (per-cell LayerNorm outputs
+# float32 under autocast), with and without gradient (the moving-average target), at
+# several shapes: past the default 8 variants dynamo silently ran the rest uncompiled
 torch._dynamo.config.recompile_limit = 64
-# an inductor bug (tiling_utils AssertionError) on rare shape variants: run that graph uncompiled, don't crash
+# an inductor bug (tiling_utils AssertionError) on rare shape variants: run that graph
+# uncompiled, don't crash
 torch._dynamo.config.suppress_errors = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -107,8 +112,8 @@ RF = torch.autograd.profiler.record_function
 
 
 def actions_path(path, actions_dir=None):
-    """A view's action table: <id>.acts.npz next to it in the games tree; for the legacy flat
-    layout (<game>_p<slot>.npz in one folder) <game>.npz in actions_dir."""
+    """A view's action table: <id>.acts.npz next to it in the games tree; for the legacy
+    flat layout (<game>_p<slot>.npz in one folder) <game>.npz in actions_dir."""
     p = corpus.acts_path(path)
     if p is not None:
         return p
@@ -119,8 +124,9 @@ def actions_path(path, actions_dir=None):
 
 
 class Game:
-    """A replay's frames (one player's view, or the combined view), its action tokens and
-    per-frame deaths. enemy: the other player's view (player views of a 1v1), for the posterior.
+    """A replay's frames (one player's view, or the combined view), its action tokens
+    and per-frame deaths. enemy: the other player's view (player views of a 1v1), for
+    the posterior.
     """
 
     def __init__(self, path, actions_dir, vocab, avocab, frames=None, dead=None):
@@ -144,7 +150,8 @@ class Game:
 
 
 class GameSet:
-    """One game: its player views (by slot) and, for a 1v1 with both views, the combined view."""
+    """One game: its player views (by slot) and, for a 1v1 with both views, the combined
+    view."""
 
     def __init__(self, path, actions_dir, vocab, avocab, combined=True):
         m = corpus.VIEW_RE.match(os.path.basename(path))
@@ -190,7 +197,8 @@ class GameSet:
                 )
 
     def _deaths(self, c):
-        """Deaths of the combined view: both views' deaths, in combined ids, once each."""
+        """Deaths of the combined view: both views' deaths, in combined ids, once
+        each."""
         F = len(c.loops)
         fr, ids = [], []
         for i, g in enumerate(self.views):
@@ -213,7 +221,8 @@ class GameSet:
         ).astype(np.int64)
 
     def pick(self, rng, obs_share, view=None):
-        """A view for one present frame: view = "player" / "obs", or drawn (obs_share combined)."""
+        """A view for one present frame: view = "player" / "obs", or drawn (obs_share
+        combined)."""
         if view == "obs" or (
             view is None and self.obs is not None and rng.rand() < obs_share
         ):
@@ -226,10 +235,10 @@ class GameSet:
 
 
 def enemy_info(game, t, lo, hi):
-    """The posterior's privileged inputs in a player view (inverse_model.EnemyIntent): for each
-    enemy unit visible at t (not a snapshot, not inside anything), its order queue at t and the
-    enemy's commands in [lo, hi) that selected it, from the enemy's own view. Rows are the unit's
-    row within frame t (its token)."""
+    """The posterior's privileged inputs in a player view (inverse_model.EnemyIntent):
+    for each enemy unit visible at t (not a snapshot, not inside anything), its order
+    queue at t and the enemy's commands in [lo, hi) that selected it, from the enemy's
+    own view. Rows are the unit's row within frame t (its token)."""
     g, en = game.g, game.enemy
     ge = en.g
     u, a, b = g.u, g.start[t], g.start[t + 1]
@@ -306,7 +315,8 @@ def enemy_info(game, t, lo, hi):
     return out
 
 
-TIGHT_GAP = 1.0  # map units: a passage counts as tight within this much of a wall or a structure's edge
+# map units: a passage counts as tight within this much of a wall or a structure's edge
+TIGHT_GAP = 1.0
 SMALL_R, LARGE_R = (
     0.5,
     0.75,
@@ -314,9 +324,9 @@ SMALL_R, LARGE_R = (
 
 
 def tight_units(g, t):
-    """Fine-scale passage (evaluation): ground units at frame t whose body is within TIGHT_GAP of
-    unpathable terrain or of a structure's edge, where a fraction of a cell decides who fits.
-    Returns a bool per row of frame t."""
+    """Fine-scale passage (evaluation): ground units at frame t whose body is within
+    TIGHT_GAP of unpathable terrain or of a structure's edge, where a fraction of a cell
+    decides who fits. Returns a bool per row of frame t."""
     u, a, b = g.u, g.start[t], g.start[t + 1]
     x, y = u["x"][a:b].astype(np.float32), u["y"][a:b].astype(np.float32)
     r = (
@@ -332,7 +342,8 @@ def tight_units(g, t):
     idx = np.nonzero(unit)[0]
     if not len(idx):
         return out
-    # terrain: distance from the unit's center to the nearest unpathable cell (a distance map per game)
+    # terrain: distance from the unit's center to the nearest unpathable cell (a
+    # distance map per game)
     if getattr(g, "_wall_dist", None) is None:
         from scipy.ndimage import distance_transform_edt
 
@@ -358,10 +369,10 @@ def tight_units(g, t):
 
 
 def make_sample(game, t, k, rng, with_actions, om, frame):
-    """The frame at t (built once per present frame and shared by its horizons), the frame k
-    frames later (for the posterior), the commands in between (or none) and per-entity targets
-    there for the entities of t, in their row order. The sample's horizon is recorded in game
-    loops (the loop difference between the two frames)."""
+    """The frame at t (built once per present frame and shared by its horizons), the
+    frame k frames later (for the posterior), the commands in between (or none) and
+    per-entity targets there for the entities of t, in their row order. The sample's
+    horizon is recorded in game loops (the loop difference between the two frames)."""
     g, u = game.g, game.g.u
     a, b = g.start[t], g.start[t + 1]
     ids = u["id"][a:b]
@@ -375,7 +386,8 @@ def make_sample(game, t, k, rng, with_actions, om, frame):
     frac = lambda x, mx: np.where(mx > 0, x / np.maximum(mx, 1e-6), 0).astype(
         np.float32
     )
-    # positions and fractions as changes from t (persistence = 0); the order as the ability at t+k
+    # positions and fractions as changes from t (persistence = 0); the order as the
+    # ability at t+k
     tgt = dict(
         exit=np.where(
             present, dm.EXIT_PRESENT, np.where(died, dm.EXIT_DIED, dm.EXIT_GONE)
@@ -395,14 +407,14 @@ def make_sample(game, t, k, rng, with_actions, om, frame):
     }
     now["order"] = u["order"][a:b].astype(np.int64)
     lo, hi = int(g.loops[t]), int(g.loops[t + k])
-    # the full window always: withholding is a mask (has_act) on what g and the prior read; the inverse's targets
-    # (the commands that produced the change) exist either way
+    # the full window always: withholding is a mask (has_act) on what g and the prior
+    # read; the inverse's targets (the commands that produced the change) exist either
+    # way
     act = game.ga.window(
         lo, hi, np.array([lo]), lo, om, static_pointers=True, only=game.viewer or None
     )
-    if (
-        game.enemy is not None
-    ):  # player views: the enemy's commands, from their own view (a training target only)
+    # player views: the enemy's commands, from their own view (a training target only)
+    if game.enemy is not None:
         act_en = game.enemy.ga.window(
             lo, hi, np.array([lo]), lo, om, static_pointers=True, only=game.enemy.viewer
         )
@@ -469,10 +481,11 @@ def make_sample(game, t, k, rng, with_actions, om, frame):
 
 
 def make_seq(game, t0, d, n, rng, with_actions, om, frame0, base=False):
-    """A rollout sequence (--seq_len > 0): frames t0, t0 + d, ..., t0 + n d (d frames apart), each
-    step's commands (the full window; has_act masks what g and the prior read), the enemy's commands
-    (player views; inverse targets) and the posterior's enemy intent per step. base: also the
-    make_sample of (t0, n d), for evaluation's metrics at the end of the rollout."""
+    """A rollout sequence (--seq_len > 0): frames t0, t0 + d, ..., t0 + n d (d frames
+    apart), each step's commands (the full window; has_act masks what g and the prior
+    read), the enemy's commands (player views; inverse targets) and the posterior's
+    enemy intent per step. base: also the make_sample of (t0, n d), for evaluation's
+    metrics at the end of the rollout."""
     g = game.g
     frames = [frame0] + [g.frame(t0 + i * d, om) for i in range(1, n + 1)]
     acts, acts_en, privs, hors = [], [], [], []
@@ -549,10 +562,11 @@ TARGET_KEYS = (
 
 
 def collate_seq(seqs, dev, has_act=None):
-    """S sequences of n steps: all S (n + 1) frames in one frame batch (each encoded once: a step's
-    future is the next step's present); per step (S n of them, sequence-major) the commands, the
-    enemy's commands, the horizon, the enemy intent. fi / fut: each step's present / future frame.
-    tb holds the decoder's target fields of the futures; tb_last those of each sequence's last frame.
+    """S sequences of n steps: all S (n + 1) frames in one frame batch (each encoded
+    once: a step's future is the next step's present); per step (S n of them,
+    sequence-major) the commands, the enemy's commands, the horizon, the enemy intent.
+    fi / fut: each step's present / future frame. tb holds the decoder's target fields
+    of the futures; tb_last those of each sequence's last frame.
     """
     S, n = len(seqs), len(seqs[0]["acts"])
     fb = to(collate([f for q in seqs for f in q["frames"]]), dev)
@@ -661,7 +675,8 @@ def pad(arrs, n, dtype=None):
 
 
 def collate_samples(samples, dev):
-    """frames: the unique present frames (one per --frames), fi: sample -> frame index."""
+    """frames: the unique present frames (one per --frames), fi: sample -> frame
+    index."""
     frames, fi = [], []
     for s in samples:
         if not frames or frames[-1] is not s["frame"]:
@@ -754,7 +769,10 @@ def main():
         "--hor_dist",
         default="log",
         choices=("log", "uniform"),
-        help="how horizons are drawn: log-uniform (short ones as often per doubling as long ones) or uniform",
+        help=(
+            "how horizons are drawn: log-uniform (short ones as often per doubling as"
+            " long ones) or uniform"
+        ),
     )
     ap.add_argument(
         "--eval_loops",
@@ -779,9 +797,12 @@ def main():
     ap.add_argument(
         "--types",
         default="table",
-        help="unit / ability / upgrade embeddings: table (learned per id, the default; "
-        "decided 2026-10-30: learn them from the replays first, use the game data for probes and distillation later) "
-        "or ruleset (computed from the balance / game data, worldmodel/ruleset.py)",
+        help=(
+            "unit / ability / upgrade embeddings: table (learned per id, the default;"
+            " decided 2026-10-30: learn them from the replays first, use the game data"
+            " for probes and distillation later) or ruleset (computed from the balance"
+            " / game data, worldmodel/ruleset.py)"
+        ),
     )
     ap.add_argument("--rules_tables", default="data/worldmodel/rulesets.json")
     ap.add_argument(
@@ -799,15 +820,22 @@ def main():
         "--encoder",
         default="dense",
         choices=("dense", "pyramid", "flat"),
-        help="dense: dense ResNet convs + 4x4-window joint attention with all entities at 1-16 map units per cell "
-        "(worldmodel/dense.py); pyramid: units + map grid, 3x3 local joint attention at 1/2/4 map units per cell, full joint "
-        "attention at 8/16 (worldmodel/pyramid.py); flat: units only, full attention (the October pilot)",
+        help=(
+            "dense: dense ResNet convs + 4x4-window joint attention with all entities"
+            " at 1-16 map units per cell (worldmodel/dense.py); pyramid: units + map"
+            " grid, 3x3 local joint attention at 1/2/4 map units per cell, full joint"
+            " attention at 8/16 (worldmodel/pyramid.py); flat: units only, full"
+            " attention (the October pilot)"
+        ),
     )
     ap.add_argument(
         "--widths",
         default="128,128,128",
-        help="pyramid: map cell dimensions of the local levels (256, 128, 64 "
-        "grids); equal to --d means units and cells attend at full width with no projection",
+        help=(
+            "pyramid: map cell dimensions of the local levels (256, 128, 64 grids);"
+            " equal to --d means units and cells attend at full width with no"
+            " projection"
+        ),
     )
     ap.add_argument(
         "--conv_blocks",
@@ -843,8 +871,11 @@ def main():
         "--z",
         default="categorical",
         choices=("categorical", "gauss"),
-        help="z per (sample, player): categorical = --z_groups one-hot variables of --z_classes classes each "
-        "(DreamerV3: straight-through samples, unimix, balanced KL with free bits); gauss = the earlier diagonal Gaussian",
+        help=(
+            "z per (sample, player): categorical = --z_groups one-hot variables of"
+            " --z_classes classes each (DreamerV3: straight-through samples, unimix,"
+            " balanced KL with free bits); gauss = the earlier diagonal Gaussian"
+        ),
     )
     ap.add_argument("--z_groups", type=int, default=32)
     ap.add_argument("--z_classes", type=int, default=32)
@@ -870,8 +901,11 @@ def main():
         "--es_k",
         type=int,
         default=0,
-        help="latent + categorical z: K prior samples scored with the energy score "
-        "(a proper scoring rule: pulls samples to the truth, rewards their spread; averaging futures is penalized)",
+        help=(
+            "latent + categorical z: K prior samples scored with the energy score (a"
+            " proper scoring rule: pulls samples to the truth, rewards their spread;"
+            " averaging futures is penalized)"
+        ),
     )
     ap.add_argument("--w_es", type=float, default=1.0)
     ap.add_argument(
@@ -906,8 +940,10 @@ def main():
         "--sched_steps",
         type=int,
         default=0,
-        help="length of the cosine learning-rate schedule (default "
-        "--steps): longer than --steps keeps the rate up for a run meant to be resumed",
+        help=(
+            "length of the cosine learning-rate schedule (default --steps): longer than"
+            " --steps keeps the rate up for a run meant to be resumed"
+        ),
     )
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument(
@@ -949,7 +985,10 @@ def main():
         "--model",
         default="direct",
         choices=("direct", "latent", "grid"),
-        help="direct: the predictor outputs the future values; latent: residual dynamics in the encoder's space",
+        help=(
+            "direct: the predictor outputs the future values; latent: residual dynamics"
+            " in the encoder's space"
+        ),
     )
     ap.add_argument(
         "--grid",
@@ -1071,9 +1110,11 @@ def main():
         "--inv_pair",
         default="barlow",
         choices=("barlow", "vicreg"),
-        help="latent: how z and the command summaries "
-        "are matched: Barlow Twins (batch cross-correlation; needs many pairs) or VICReg (per-pair MSE + variance and "
-        "covariance on each side)",
+        help=(
+            "latent: how z and the command summaries are matched: Barlow Twins (batch"
+            " cross-correlation; needs many pairs) or VICReg (per-pair MSE + variance"
+            " and covariance on each side)"
+        ),
     )
     ap.add_argument(
         "--inv_queue",
@@ -1098,9 +1139,11 @@ def main():
         "--w_dinv",
         type=float,
         default=0.0,
-        help="latent: the per-unit inverse head on Δ = s_{t+k} − s_t "
-        "(moved / touched / order changed / new order), with gradient through the future encoding (>0 makes "
-        "the futures' encoding train: the cost of the direct model)",
+        help=(
+            "latent: the per-unit inverse head on Δ = s_{t+k} − s_t (moved / touched /"
+            " order changed / new order), with gradient through the future encoding (>0"
+            " makes the futures' encoding train: the cost of the direct model)"
+        ),
     )
     ap.add_argument(
         "--w_dbar",
@@ -1119,9 +1162,12 @@ def main():
         "--probe_weight",
         type=float,
         default=0.0,
-        help="latent: share of the probes' gradient that reaches the "
-        "latent (0: detached, evaluation only; a small value keeps the latent from dropping what the probes read, "
-        "e.g. motion; the probes themselves always train at full strength)",
+        help=(
+            "latent: share of the probes' gradient that reaches the latent (0:"
+            " detached, evaluation only; a small value keeps the latent from dropping"
+            " what the probes read, e.g. motion; the probes themselves always train at"
+            " full strength)"
+        ),
     )
     ap.add_argument(
         "--profile",
@@ -1132,9 +1178,11 @@ def main():
     ap.add_argument(
         "--no_compile",
         action="store_true",
-        help="no torch.compile (by default the encoder's blocks, the "
-        "predictor, posterior, prior, probes and the enemy-intent pooling are compiled: fused kernels; the "
-        "first steps of each new shape compile)",
+        help=(
+            "no torch.compile (by default the encoder's blocks, the predictor,"
+            " posterior, prior, probes and the enemy-intent pooling are compiled: fused"
+            " kernels; the first steps of each new shape compile)"
+        ),
     )
     ap.add_argument("--out", default="data/worldmodel/runs")
     ap.add_argument("--seed", type=int, default=0)
@@ -1144,9 +1192,11 @@ def main():
         "--refit_probes",
         type=int,
         default=0,
-        help="with --resume --eval_only: re-initialize the probes and train "
-        "only them for this many steps on the frozen model before evaluating (removes the lag of probes trained "
-        "online against a changing representation)",
+        help=(
+            "with --resume --eval_only: re-initialize the probes and train only them"
+            " for this many steps on the frozen model before evaluating (removes the"
+            " lag of probes trained online against a changing representation)"
+        ),
     )
     ap.add_argument(
         "--eval_sets",
@@ -1160,7 +1210,8 @@ def main():
         if os.path.isdir(args.resume):
             args.resume = os.path.join(args.resume, "model_latest.pt")
         ck = torch.load(args.resume, map_location="cpu", weights_only=False)
-        # the checkpoint's settings, except where the command line says otherwise for these
+        # the checkpoint's settings, except where the command line says otherwise for
+        # these
         given = {
             a.dest for a in ap._actions if any(o in sys.argv for o in a.option_strings)
         }
@@ -1195,7 +1246,8 @@ def main():
     )  # games tree: id -> its extracted player views
 
     def available(names):
-        """Every extracted view of the split's games (ids in the tree; legacy: file names)."""
+        """Every extracted view of the split's games (ids in the tree; legacy: file
+        names)."""
         paths = []
         for n in sorted(names):
             paths += views.get(n, []) if n in views else [os.path.join(args.games, n)]
@@ -1237,7 +1289,8 @@ def main():
                 }
             )
         print(
-            f"ruleset tables: {len(tables.rulesets)} rulesets; {len(train_paths)} of {n0} train games covered",
+            f"ruleset tables: {len(tables.rulesets)} rulesets; {len(train_paths)} of"
+            f" {n0} train games covered",
             flush=True,
         )
 
@@ -1291,7 +1344,8 @@ def main():
     ]
     step_loops = collections.Counter(x.g.step for x in loaded).most_common(1)[0][0]
     assert all(x.g.step == step_loops for x in loaded), "mixed frame rates"
-    # horizons in game loops: the multiples of the frame step up to --max_loops (frames are step_loops apart)
+    # horizons in game loops: the multiples of the frame step up to --max_loops (frames
+    # are step_loops apart)
     hor_loops = list(range(step_loops, args.max_loops + 1, step_loops))
     hor_p = (
         1.0 / np.array(hor_loops, np.float64)
@@ -1299,9 +1353,10 @@ def main():
         else np.ones(len(hor_loops))
     )
     hor_p /= hor_p.sum()
-    assert (
-        hor_loops
-    ), f"--max_loops {args.max_loops} is shorter than the frame step ({step_loops} loops)"
+    assert hor_loops, (
+        f"--max_loops {args.max_loops} is shorter than the frame step ({step_loops}"
+        " loops)"
+    )
     k_max = hor_loops[-1] // step_loops  # in frames, for bounds only
     eval_k = [int(x) for x in args.eval_loops.split(",")]
     deltas = [int(x) for x in args.deltas.split(",")]
@@ -1311,11 +1366,13 @@ def main():
         ), "rollout training (--seq_len) is built for the grid model"
         k_max = max(k_max, max(deltas) * args.seq_len)
     bad = [k for k in eval_k if k % step_loops or not step_loops <= k <= args.max_loops]
-    assert (
-        not bad
-    ), f"--eval_loops {bad}: not multiples of the frame step ({step_loops} loops) within --max_loops"
+    assert not bad, (
+        f"--eval_loops {bad}: not multiples of the frame step ({step_loops} loops)"
+        " within --max_loops"
+    )
     print(
-        f"loaded {len(pool.games) + sum(len(x) for x in eval_games.values())} games ({len(loaded)} player views) in {time.time() - t0:.0f}s",
+        f"loaded {len(pool.games) + sum(len(x) for x in eval_games.values())} games"
+        f" ({len(loaded)} player views) in {time.time() - t0:.0f}s",
         flush=True,
     )
 
@@ -1338,10 +1395,11 @@ def main():
     print(
         f"{len(train_paths)} train games (pool {len(pool.games)}) | eval: "
         + ", ".join(f"{k} {len(v_)} games" for k, v_ in eval_games.items())
-        + f" | frame step {step_loops} loops, horizons {hor_loops[0]}..{hor_loops[-1]} loops by {step_loops} (eval {eval_k})"
-        f" | batch {args.frames} frames x {args.hor} horizons"
-        f" | commands withheld on {args.act_drop:.0%} | z: d_z {args.d_z}, prior x{args.prior_k}, beta {args.beta}"
-        f" (warmup {args.beta_warmup}), free {args.free_nats} nats | {run}",
+        + f" | frame step {step_loops} loops, horizons {hor_loops[0]}..{hor_loops[-1]}"
+        f" loops by {step_loops} (eval {eval_k}) | batch {args.frames} frames x"
+        f" {args.hor} horizons | commands withheld on {args.act_drop:.0%} | z: d_z"
+        f" {args.d_z}, prior x{args.prior_k}, beta {args.beta} (warmup"
+        f" {args.beta_warmup}), free {args.free_nats} nats | {run}",
         flush=True,
     )
 
@@ -1414,9 +1472,9 @@ def main():
         "Block",
         "ScatterPool",
     )
-    if (
-        not args.no_compile
-    ):  # the encoder's blocks (the pyramid's pair search breaks its graph; dynamo handles that)
+    # the encoder's blocks (the pyramid's pair search breaks its graph; dynamo handles
+    # that)
+    if not args.no_compile:
         for m in enc.modules():
             if type(m).__name__ in COMPILED:
                 m.compile(dynamic=True)
@@ -1448,13 +1506,15 @@ def main():
         probes_true = dm.Probes(args.d, v.n_abilities).to(
             dev
         )  # diagnostic: the same readout from the true future latent
-        # the probes read [future token, present token]: their targets are changes from t (dx, dy, ...), which a
-        # future token alone can't give (it doesn't say where the unit is now)
+        # the probes read [future token, present token]: their targets are changes from
+        # t (dx, dy, ...), which a future token alone can't give (it doesn't say where
+        # the unit is now)
         probe_in, probe_true_in = nn.Linear(2 * args.d, args.d).to(dev), nn.Linear(
             2 * args.d, args.d
         ).to(dev)
-        # ... and the horizon: how far apart the two tokens are (at 4 loops the latent's non-motion changes are as
-        # large as the motion; without k the probes can't tell)
+        # ... and the horizon: how far apart the two tokens are (at 4 loops the latent's
+        # non-motion changes are as large as the motion; without k the probes can't
+        # tell)
         probe_time = LoopTime().to(dev)
         probe_hor, probe_true_hor = mlp(probe_time.out_dim(), args.d).to(dev), mlp(
             probe_time.out_dim(), args.d
@@ -1569,9 +1629,10 @@ def main():
         g_.setdefault("initial_lr", args.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at, last_epoch=start - 1)
 
-    # TensorBoard: `tensorboard --logdir data/worldmodel/runs` overlays every run. Evaluation charts
-    # put the model's errors and persistence's on one chart per (set, metric, horizon); purge_step
-    # drops points a resumed run logged after its checkpoint.
+    # TensorBoard: `tensorboard --logdir data/worldmodel/runs` overlays every run.
+    # Evaluation charts put the model's errors and persistence's on one chart per (set,
+    # metric, horizon); purge_step drops points a resumed run logged after its
+    # checkpoint.
     tb = SummaryWriter(
         os.path.join(run, "tb_eval" if args.eval_only else "tb"),
         purge_step=None if args.eval_only else start or None,
@@ -1630,9 +1691,9 @@ def main():
     )
 
     def draw_batch(games, n_frames, n_hor, rng, ks=None, with_actions=None, view=None):
-        """Samples grouped by present frame (collate_samples relies on the grouping). games: game
-        sets; view: "player" / "obs" (default: drawn, --obs_share combined). ks: horizons in game
-        loops (default: drawn from hor_loops, --hor_dist)."""
+        """Samples grouped by present frame (collate_samples relies on the grouping).
+        games: game sets; view: "player" / "obs" (default: drawn, --obs_share combined).
+        ks: horizons in game loops (default: drawn from hor_loops, --hor_dist)."""
         out = []
         for gi in rng.randint(len(games), size=n_frames):
             game = games[gi].pick(rng, args.obs_share, view)
@@ -1665,8 +1726,9 @@ def main():
         return out
 
     def forward(b, z_from="post", cache=None):
-        """One pass. z_from: post (a posterior sample in training, its mean otherwise), prior
-        (a sample) or prior_mean. Returns the probes' logits, the targets' mask and the latent terms.
+        """One pass. z_from: post (a posterior sample in training, its mean otherwise),
+        prior (a sample) or prior_mean. Returns the probes' logits, the targets' mask
+        and the latent terms.
         """
         fb, tb, ab = b["fb"], b["tb"], b["ab"]
         fi = b["fi"]
@@ -1680,12 +1742,14 @@ def main():
             B, T, d = tokens.shape
             with RF("encode commands"):
                 summaries, s_mask0, h = aenc(ab, horizon_loops=b["hor"])
-            # one summary per summarized player (all players in the observer view, the viewer alone
-            # in a player view): scatter them to the frame's player order; the rest stay zero / masked
+            # one summary per summarized player (all players in the observer view, the
+            # viewer alone in a player view): scatter them to the frame's player order;
+            # the rest stay zero / masked
             S = summaries.shape[2]
             pidx = b["sum_pidx"][:, :S]
             valid = (pidx >= 0) & s_mask0[:, 0, :S]
-            # fixed-shape scatter (masked indexing would make the CPU wait to learn its size)
+            # fixed-shape scatter (masked indexing would make the CPU wait to learn its
+            # size)
             at = pidx.clamp(min=0)
             summ = torch.zeros(
                 B, P, d, device=tokens.device, dtype=summaries.dtype
@@ -1723,7 +1787,8 @@ def main():
             summ = summ * b["has_act"][:, None, None].to(summ.dtype)
             # prior: present + commands (or "withheld"); posterior: present + future
             ply = e["players"][fi] + player_emb.weight[:P][None].to(tokens.dtype)
-            # commands given / withheld per player: a player view never gives the enemy's
+            # commands given / withheld per player: a player view never gives the
+            # enemy's
             wh = withheld((b["has_act"][:, None] & s_mask).long()).to(tokens.dtype)
             pin = torch.cat(
                 [
@@ -1744,13 +1809,13 @@ def main():
             post_mu, ef_live, hd_pre = None, None, None
             if z_from == "post" or enc.training or latent:
                 with RF("encode future"):
-                    if (
-                        cache is not None
-                    ):  # sequences: the futures are the next steps' presents, already encoded
+                    # sequences: the futures are the next steps' presents, already
+                    # encoded
+                    if cache is not None:
                         ef_live, ef = cache["ef_live"], cache["ef"]
-                    elif (
-                        grid
-                    ):  # the online future (with gradient: the inverse reads its change) + the targets' copy
+                    # the online future (with gradient: the inverse reads its change) +
+                    # the targets' copy
+                    elif grid:
                         ef_live = enc(tb)
                         if enc_ema is not None:
                             with torch.no_grad():
@@ -1761,29 +1826,31 @@ def main():
                         latent and args.w_dinv > 0 and enc.training
                     ):  # futures with gradient, for the Δ inverse head only
                         ef_live = enc(tb)
-                        if (
-                            enc_ema is not None
-                        ):  # the targets come from the moving-average copy: a second encoding
+                        # the targets come from the moving-average copy: a second
+                        # encoding
+                        if enc_ema is not None:
                             with torch.no_grad():
                                 ef = enc_ema(tb)
                         else:
                             ef = ef_live
-                    elif (
-                        latent
-                    ):  # targets: stop-gradient (the online encoder, or its moving-average copy)
+                    # targets: stop-gradient (the online encoder, or its moving-average
+                    # copy)
+                    elif latent:
                         with torch.no_grad():
                             ef = (enc_ema or enc)(tb)
                     else:
                         ef = enc(tb)
                 if grid:
-                    # the posterior is the inverse: from the action residual δ_a = E(s_{t+k}) − E(s_t) − sg(h(E(s_t), k))
-                    # only (never the state itself), the players' action embeddings z
+                    # the posterior is the inverse: from the action residual δ_a =
+                    # E(s_{t+k}) − E(s_t) − sg(h(E(s_t), k)) only (never the state
+                    # itself), the players' action embeddings z
                     with RF("dynamics h"):
                         hd_pre = dyn_h(tokens, mask, ang, b["hor"])
                     delta_a = ef_live["tokens"] - tokens - hd_pre.detach()
                     if len(b["priv"]["ord_idx"]) or len(b["priv"]["cmd_idx"]):
-                        # player views: the enemy's true orders and commands on the units the viewer sees, pooled into
-                        # those units' latent cells (action information, not state)
+                        # player views: the enemy's true orders and commands on the
+                        # units the viewer sees, pooled into those units' latent cells
+                        # (action information, not state)
                         N_ = fb["ent_mask"].shape[1]
                         iv = intent(b["priv"], B * N_, delta_a.dtype).view(B, N_, -1)
                         cell = gl.cell_of(
@@ -1927,7 +1994,8 @@ def main():
         hd_pre=None,
         inv_tgt=None,
     ):
-        """ŝ_{t+k} = s_t + h(s_t, k) + g(·, actions, z) and the latent losses (inside forward's autocast)."""
+        """ŝ_{t+k} = s_t + h(s_t, k) + g(·, actions, z) and the latent losses (inside
+        forward's autocast)."""
         fb, ab, fi = b["fb"], b["ab"], b["fi"]
         B, T, d = s.shape
         has_act = b["has_act"]
@@ -1939,14 +2007,14 @@ def main():
             )
             gd = dyn_g(s + hd, b["hor"], mem, mem_mask, mask, ang)
             s_hat = s + hd + gd
-        # targets: each present token's counterpart in the future encoding (globals by position, units
-        # by id, cells by grid position; effects have none)
+        # targets: each present token's counterpart in the future encoding (globals by
+        # position, units by id, cells by grid position; effects have none)
         fr = b.get(
             "fut_row"
         )  # (rollout sequences have none: the grid needs no per-unit alignment)
-        if (
-            grid
-        ):  # a fixed-size latent: every token's target is the same token of the future latent
+        # a fixed-size latent: every token's target is the same token of the future
+        # latent
+        if grid:
             tgt = ef["tokens"].detach().float()
             fut_live = tgt
             ok = mask & ef["mask"]
@@ -1973,18 +2041,21 @@ def main():
         lat_loss = (((s_hat.float() - tgt) ** 2).mean(-1) * w).sum() / w.sum().clamp(
             min=1
         )
-        # how much the latent changes (persistence's error in latent space); lat / chg < 1: better than persistence
+        # how much the latent changes (persistence's error in latent space); lat / chg <
+        # 1: better than persistence
         chg = (((s.float() - tgt) ** 2).mean(-1) * w).sum() / w.sum().clamp(min=1)
-        # h alone on the samples with commands withheld (s + h, no g): h is the best prediction from the state alone, so
-        # the action residual δ_a = target − s − h is what the state can't explain (g still reads z there)
+        # h alone on the samples with commands withheld (s + h, no g): h is the best
+        # prediction from the state alone, so the action residual δ_a = target − s − h
+        # is what the state can't explain (g still reads z there)
         wh = w * (~has_act).float()[:, None]
         hal = (
             ((s.float() + hd.float() - tgt) ** 2).mean(-1) * wh
         ).sum() / wh.sum().clamp(min=1)
         es_loss = s.new_zeros(()).float()
         if args.es_k > 1 and p_pri is not None and enc.training:
-            # energy score over K futures from prior samples (straight-through, so the prior learns): mean distance to
-            # the truth minus half the mean distance between samples, per token (distances / sqrt(d))
+            # energy score over K futures from prior samples (straight-through, so the
+            # prior learns): mean distance to the truth minus half the mean distance
+            # between samples, per token (distances / sqrt(d))
             mem_mask_k = torch.cat(
                 [ab["act_mask"] & has_act[:, None], fb["ply_mask"][fi]], 1
             )
@@ -2031,9 +2102,9 @@ def main():
                 inv_loss = ld.vicreg_pair(
                     pz, pa, pairs, queue=pair_q if enc.training else None
                 )
-                if (
-                    enc.training
-                ):  # recent projections, detached: the variance / covariance statistics span ~inv_queue batches
+                # recent projections, detached: the variance / covariance statistics
+                # span ~inv_queue batches
+                if enc.training:
                     pair_q.append(
                         (
                             pz.detach().reshape(-1, pz.shape[-1]),
@@ -2045,7 +2116,8 @@ def main():
                 inv_loss = ld.barlow(pz, pa, pairs, args.inv_off)
         dinv_loss = s.new_zeros(()).float()
         if args.w_dinv > 0 and fut_live.requires_grad:
-            # per unit, from its change only: moved, touched by a command, order changed, the new order
+            # per unit, from its change only: moved, touched by a command, order
+            # changed, the new order
             here = (fr >= 0) & fb["ent_mask"][fi]
             delta = (fut_live[:, u0:u1] - s[:, u0:u1]).float()
             flags, ord_logits, dproj = dinv(delta, b["hor"])
@@ -2063,8 +2135,9 @@ def main():
                 reduction="none",
             ).view_as(hw)
             cw = hw * changed.float()
-            # the raw feature change of each unit, on comparable scales at the source: position as a fraction of the
-            # playable area (ent_xy) and the entity numbers (fractions, logs, /max by construction); no batch scaling
+            # the raw feature change of each unit, on comparable scales at the source:
+            # position as a fraction of the playable area (ent_xy) and the entity
+            # numbers (fractions, logs, /max by construction); no batch scaling
             tb_ = b["tb"]
             frc = fr.clamp(min=0)
             take = lambda x: torch.gather(
@@ -2124,7 +2197,8 @@ def main():
                     ),
                 ),
             )
-        # diagnostic probes on the true future latent (detached): does the encoder keep motion at all?
+        # diagnostic probes on the true future latent (detached): does the encoder keep
+        # motion at all?
         here_t = (fr >= 0) & fb["ent_mask"][fi]
         cur = s[:, u0:u1].detach()
         kt = probe_time(b["hor"])
@@ -2177,9 +2251,10 @@ def main():
         )
 
     def forward_seq(b, z_from="post"):
-        """Sequences: every frame encoded once online (with gradient) and once by the targets' copy; the
-        one-step pass (teacher-forced: each step from the real present) is forward() on those encodings;
-        then the open-loop rollout from each sequence's first frame (its own predictions fed back).
+        """Sequences: every frame encoded once online (with gradient) and once by the
+        targets' copy; the one-step pass (teacher-forced: each step from the real
+        present) is forward() on those encodings; then the open-loop rollout from each
+        sequence's first frame (its own predictions fed back).
         """
         with torch.autocast("cuda", dtype=torch.bfloat16):
             with RF("encode frames"):
@@ -2217,10 +2292,11 @@ def main():
         return out, mask, lt
 
     def open_loop(b, lt, z_mode="post"):
-        """Roll the dynamics from each sequence's first real latent, feeding predictions back, with each
-        step's commands (masked when withheld) and z: the posterior's (from the real step's action
-        residual) or a sample of the prior read from the predicted latent. Returns the mean latent loss
-        over steps against the targets' copy, the last prediction and the per-step losses.
+        """Roll the dynamics from each sequence's first real latent, feeding predictions
+        back, with each step's commands (masked when withheld) and z: the posterior's
+        (from the real step's action residual) or a sample of the prior read from the
+        predicted latent. Returns the mean latent loss over steps against the targets'
+        copy, the last prediction and the per-step losses.
         """
         o = lt["_ol"]
         S, n = b["S"], b["n"]
@@ -2272,7 +2348,8 @@ def main():
     def draw_seq(
         games, n_seq, n, rng, d=None, with_actions=None, view=None, base=False
     ):
-        """n_seq sequences of n steps; the step (frames) drawn from --deltas per sequence unless given."""
+        """n_seq sequences of n steps; the step (frames) drawn from --deltas per
+        sequence unless given."""
         out = []
         while len(out) < n_seq:
             game = games[rng.randint(len(games))].pick(rng, args.obs_share, view)
@@ -2298,8 +2375,9 @@ def main():
         return out
 
     def seq_eval_runner():
-        """evaluate_grid's hooks for rollouts: a horizon K is reached by the smallest step d in --deltas
-        with K / d steps <= --seq_len; the metrics compare the rollout's last prediction with the truth.
+        """evaluate_grid's hooks for rollouts: a horizon K is reached by the smallest
+        step d in --deltas with K / d steps <= --seq_len; the metrics compare the
+        rollout's last prediction with the truth.
         """
 
         def plan(k):
@@ -2310,7 +2388,8 @@ def main():
                 ):
                     return d_, k // (d_ * step_loops)
             raise ValueError(
-                f"horizon {k} loops: no step in --deltas reaches it within --seq_len steps"
+                f"horizon {k} loops: no step in --deltas reaches it within --seq_len"
+                " steps"
             )
 
         def make_batches(games, view, k, erng):
@@ -2354,10 +2433,10 @@ def main():
         return make_batches, run
 
     def grid_decode(b, e, ef, s, s_hat, tgt, mask, lt):
-        """Grid mode: the entity decoder on the present latent (truth at t) and on the prediction
-        ŝ_{t+k} (truth at t+k), each with --dec_grad of its gradient into the latent, and the
-        second-moment losses (latent cells; decoded entities vs the target encoder's entity tokens;
-        entities x their cells), predicted vs target."""
+        """Grid mode: the entity decoder on the present latent (truth at t) and on the
+        prediction ŝ_{t+k} (truth at t+k), each with --dec_grad of its gradient into the
+        latent, and the second-moment losses (latent cells; decoded entities vs the
+        target encoder's entity tokens; entities x their cells), predicted vs target."""
         fb, tb = b["fb"], b["tb"]
         cs = e["cell_slice"]
         c0, c1 = cs
@@ -2401,9 +2480,9 @@ def main():
 
     @torch.no_grad()
     def grid_metrics(b, tp, tf_, outf, lrf, pair, tgt, mask, cs):
-        """Evaluation: the decoded future against the truth at t+k, from ŝ (model), from the target
-        latent (truelat: what the latent holds) and, where defined, persistence (the units' own
-        displacement; the present's counts)."""
+        """Evaluation: the decoded future against the truth at t+k, from ŝ (model), from
+        the target latent (truelat: what the latent holds) and, where defined,
+        persistence (the units' own displacement; the present's counts)."""
         fi = b["fi"]
         B, N = tf_["mask"].shape
         fl = lambda x: x.reshape(-1, *x.shape[2:])
@@ -2466,9 +2545,10 @@ def main():
         return r
 
     def hungarian_gap(h):
-        """Mean position error of the decoded future under the in-cell pairing (sorted by y) and under a
-        global Hungarian assignment within each (owner, type), ignoring cells: the gap is how much the
-        cell-local pairing mismatches (units decoded across a cell border, pairs crossed in x).
+        """Mean position error of the decoded future under the in-cell pairing (sorted
+        by y) and under a global Hungarian assignment within each (owner, type),
+        ignoring cells: the gap is how much the cell-local pairing mismatches (units
+        decoded across a cell border, pairs crossed in x).
         """
         from scipy.optimize import linear_sum_assignment
 
@@ -2559,9 +2639,11 @@ def main():
                     f"{(c if c != 'model' else zf)[:7]:>7s}" for c, zf in cols
                 )
                 print(
-                    f"[{name} step {step}] k={k} loops ({k / LPS:.2f}s) | KL with commands {rows[True][1]:.2f}, withheld "
-                    f"{rows[False][1]:.2f} nats | position error, in-cell pairing {gaps[0][0]:.3f} vs global Hungarian "
-                    f"{gaps[0][1]:.3f} map units\n   {'':16s} with commands: {hdr}  | withheld: {hdr}",
+                    f"[{name} step {step}] k={k} loops ({k / LPS:.2f}s) | KL with"
+                    f" commands {rows[True][1]:.2f}, withheld {rows[False][1]:.2f} nats"
+                    f" | position error, in-cell pairing {gaps[0][0]:.3f} vs global"
+                    f" Hungarian {gaps[0][1]:.3f} map units\n   {'':16s} with commands:"
+                    f" {hdr}  | withheld: {hdr}",
                     flush=True,
                 )
                 for key in keys:
@@ -2753,7 +2835,9 @@ def main():
                 moving = np.mean(rows[True][0]["moving share"]["post"])
                 touched = np.mean(rows[True][0]["touched share"]["post"])
                 print(
-                    f"[{name} step {step}] k={k} loops ({hs:.2f}s) births/window {np.mean(births):.1f} | moving {moving:.0%} | touched by a command {touched:.0%}"
+                    f"[{name} step {step}] k={k} loops ({hs:.2f}s) births/window"
+                    f" {np.mean(births):.1f} | moving {moving:.0%} | touched by a"
+                    f" command {touched:.0%}"
                     + (
                         " | type residual norms "
                         + " ".join(
@@ -2763,9 +2847,8 @@ def main():
                         if rs is not None and rs.residual
                         else ""
                     )
-                    + "\n"
-                    f"   {'':16s} with commands: KL {kl_str(rows[True][1])} | commands withheld: KL {kl_str(rows[False][1])}\n"
-                    f"   {'':16s} "
+                    + f"\n   {'':16s} with commands: KL {kl_str(rows[True][1])} |"
+                    f" commands withheld: KL {kl_str(rows[False][1])}\n   {'':16s} "
                     + "  ".join(f"{c[:6]:>6s}" for c in cols)
                     + "  | "
                     + "  ".join(f"{c[:6]:>6s}" for c in cols),
@@ -2852,7 +2935,8 @@ def main():
             popt.step()
             if (i + 1) % 100 == 0:
                 print(
-                    f"refit {i + 1}/{args.refit_probes}: probe loss {float(pl):.3f} ({time.time() - t0:.0f}s)",
+                    f"refit {i + 1}/{args.refit_probes}: probe loss {float(pl):.3f}"
+                    f" ({time.time() - t0:.0f}s)",
                     flush=True,
                 )
             if (i + 1) % 250 == 0:
@@ -2865,8 +2949,8 @@ def main():
         m.train()
     hist = collections.defaultdict(list)
     t_last = time.time()
-    # batches are built on a background thread (its own random stream), 2 ahead; the pool
-    # rotates by batches built, swapping in games a loader thread prepared
+    # batches are built on a background thread (its own random stream), 2 ahead; the
+    # pool rotates by batches built, swapping in games a loader thread prepared
     prng = np.random.RandomState(args.seed * 1000003 + start)
     built = [start]
 
@@ -2883,8 +2967,9 @@ def main():
         )
         return b_, time.time() - t0
 
-    # validation every --val_every steps: the training objective on fixed batches from the held-out
-    # games and maps (drawn once, kept on the GPU), next to the training average
+    # validation every --val_every steps: the training objective on fixed batches from
+    # the held-out games and maps (drawn once, kept on the GPU), next to the training
+    # average
     vrng = np.random.RandomState(4321)
     held = [
         gs
@@ -2983,8 +3068,9 @@ def main():
         sched.step()
         if latent and enc_ema is not None:
             ld.ema_update(enc_ema, enc, args.ema_tau)
-        # logged values stay on the GPU until the log line: reading one waits for the GPU to finish
-        # everything queued, and a dozen such waits per step left it idle at every step boundary
+        # logged values stay on the GPU until the log line: reading one waits for the
+        # GPU to finish everything queued, and a dozen such waits per step left it idle
+        # at every step boundary
         hist["loss"].append(loss.detach())
         hist["recon"].append(
             (lt["lat"] if latent else sum(L.values())).detach()
@@ -3031,24 +3117,31 @@ def main():
                 + (
                     " ".join(f"{k_} {avg[k_]:.3f}" for k_ in L)
                     + (
-                        f" gram {avg['gram']:.4f} h-alone {avg['hal']:.4f} pairs {avg['pairs']:.0f} "
+                        f" gram {avg['gram']:.4f} h-alone {avg['hal']:.4f} pairs"
+                        f" {avg['pairs']:.0f} "
                         if grid
                         else ""
                     )
                     + (f"open-loop {avg['ol']:.4f} " if args.seq_len else "")
                     if grid
-                    else f"exit {avg['exit']:.3f} dx {avg['dx']:.3f} dy {avg['dy']:.3f} "
-                    f"hp {avg['hp']:.3f} sh {avg['sh']:.3f} en {avg['en']:.3f} build {avg['build']:.3f} order {avg['order']:.3f} "
+                    else (
+                        f"exit {avg['exit']:.3f} dx {avg['dx']:.3f} dy {avg['dy']:.3f}"
+                        f" hp {avg['hp']:.3f} sh {avg['sh']:.3f} en {avg['en']:.3f}"
+                        f" build {avg['build']:.3f} order {avg['order']:.3f} "
+                    )
                 )
                 + (
-                    f"| latent {avg['lat']:.4f} var {avg['var']:.3f} cov {avg['cov']:.3f} dec {avg['dec']:.3f} gvar {avg['gvar']:.3f} "
-                    f"inv {avg['inv']:.2f} dinv {avg['dinv']:.3f} chg {avg['chg']:.4f} ratio {avg['ratio']:.3f} es {avg['es']:.3f} "
+                    f"| latent {avg['lat']:.4f} var {avg['var']:.3f} cov"
+                    f" {avg['cov']:.3f} dec {avg['dec']:.3f} gvar {avg['gvar']:.3f} inv"
+                    f" {avg['inv']:.2f} dinv {avg['dinv']:.3f} chg {avg['chg']:.4f}"
+                    f" ratio {avg['ratio']:.3f} es {avg['es']:.3f} "
                     if latent
                     else ""
                 )
-                + f"| KL {avg['kl']:.2f} (beta {beta_t:.3f}) | grad {avg['gn']:.2f} | {dt / 25:.2f}s/step (waited {avg['data_s']:.2f}s, "
-                f"built {avg['build_s']:.2f}s alongside) "
-                f"| mem {torch.cuda.max_memory_allocated() / 2**30:.1f}G",
+                + f"| KL {avg['kl']:.2f} (beta {beta_t:.3f}) | grad {avg['gn']:.2f} |"
+                f" {dt / 25:.2f}s/step (waited {avg['data_s']:.2f}s, built"
+                f" {avg['build_s']:.2f}s alongside) | mem"
+                f" {torch.cuda.max_memory_allocated() / 2**30:.1f}G",
                 flush=True,
             )
             for k_, v_ in avg.items():
@@ -3075,7 +3168,8 @@ def main():
             tb.add_scalar("kl/train", t_kl, step + 1)
             tb.add_scalar("kl/val", v_kl, step + 1)
             print(
-                f"[val step {step + 1}] loss train {t_rec:.3f} val {v_rec:.3f} | KL train {t_kl:.3f} val {v_kl:.3f}",
+                f"[val step {step + 1}] loss train {t_rec:.3f} val {v_rec:.3f} | KL"
+                f" train {t_kl:.3f} val {v_kl:.3f}",
                 flush=True,
             )
         if (step + 1) % args.eval_every == 0 or step + 1 == args.steps:

@@ -1,8 +1,10 @@
-"""A view on disk as Arrow files (scripts/extract_states.py --arrow), seek friendly: <view>.units.arrow, one row per unit
-with ragged lists as list columns, and <view>.frames.arrow, one row per frame, in record batches of a fixed number of frames.
-In the units file a batch's first frame is a keyframe and every other unit column is the change from that unit's row in the
-previous frame of the batch (statefile's integer deltas), so reading a moment touches only its batch. Each batch's custom
-metadata says how to undo that."""
+"""A view on disk as Arrow files (scripts/extract_states.py --arrow), seek friendly:
+<view>.units.arrow, one row per unit with ragged lists as list columns, and
+<view>.frames.arrow, one row per frame, in record batches of a fixed number of frames.
+In the units file a batch's first frame is a keyframe and every other unit column is the
+change from that unit's row in the previous frame of the batch (statefile's integer
+deltas), so reading a moment touches only its batch. Each batch's custom metadata says
+how to undo that."""
 
 import json
 
@@ -13,7 +15,8 @@ from . import statefile
 
 
 def encode_units(cols, counts):
-    """{name: column} (u_id whole) and rows per frame -> ({name: stored column}, {name: [how, dtype]})."""
+    """{name: column} (u_id whole) and rows per frame -> ({name: stored column}, {name:
+    [how, dtype]})."""
     starts = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
     prev = statefile.prev_rows(cols["u_id"], starts)
     stored, how = {}, {}
@@ -28,14 +31,16 @@ def encode_units(cols, counts):
 
 
 def open_view(base):
-    """(units reader, frames reader) of <base>.units.arrow, <base>.frames.arrow, memory mapped."""
+    """(units reader, frames reader) of <base>.units.arrow, <base>.frames.arrow, memory
+    mapped."""
     return pa.ipc.open_file(pa.memory_map(f"{base}.units.arrow")), pa.ipc.open_file(
         pa.memory_map(f"{base}.frames.arrow")
     )
 
 
 def read_units(reader, i):
-    """Batch i of a units file: ({name: unit column}, {name: list column}, frame per row)."""
+    """Batch i of a units file: ({name: unit column}, {name: list column}, frame per
+    row)."""
     b, meta = reader.get_batch_with_custom_metadata(i)
     how = json.loads(meta[b"how"])
     ids = b.column("u_id").to_numpy(zero_copy_only=False)

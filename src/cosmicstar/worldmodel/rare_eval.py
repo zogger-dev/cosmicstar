@@ -1,8 +1,9 @@
-"""Rare entity states (2026-11-01): which states the rare-state evaluation set covers, how to find
-them in a frame, and their metrics on the decoder's matched output. Random evaluation frames rarely
-contain a blip, a cloaked or detected unit, a hallucination or a passenger, so their F1 / recall was
-computed on a handful of units; scripts/build_rare_eval.py picks fixed held-out frames that contain
-each state instead."""
+"""Rare entity states (2026-11-01): which states the rare-state evaluation set covers,
+how to find them in a frame, and their metrics on the decoder's matched output. Random
+evaluation frames rarely contain a blip, a cloaked or detected unit, a hallucination or
+a passenger, so their F1 / recall was computed on a handful of units;
+scripts/build_rare_eval.py picks fixed held-out frames that contain each state
+instead."""
 
 import collections
 
@@ -34,7 +35,8 @@ def states_of(fr):
 
 
 class RareCounts:
-    """Accumulates, per state, true positives / false positives / false negatives over matched entities."""
+    """Accumulates, per state, true positives / false positives / false negatives over
+    matched entities."""
 
     def __init__(self):
         self.c = collections.defaultdict(lambda: np.zeros(3))

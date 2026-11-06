@@ -113,9 +113,11 @@ def main():
             )
             json.dump(index, open(index_path, "w"), indent=1)
             print(
-                f"{key}: {len(data.get('units', []))} units, {len(data.get('abilities', []))} abilities, "
-                f"{len(data.get('upgrades', []))} upgrades, {len(data.get('buffs', []))} buffs, "
-                f"{len(data.get('effects', []))} effects  ({len(games)} games)",
+                f"{key}: {len(data.get('units', []))} units,"
+                f" {len(data.get('abilities', []))} abilities,"
+                f" {len(data.get('upgrades', []))} upgrades,"
+                f" {len(data.get('buffs', []))} buffs, {len(data.get('effects', []))}"
+                f" effects  ({len(games)} games)",
                 flush=True,
             )
             break

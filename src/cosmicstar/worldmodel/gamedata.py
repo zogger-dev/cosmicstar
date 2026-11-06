@@ -1,18 +1,20 @@
 """The game's own data catalogs (GameData/*.xml inside the mods, extracted by
 scripts/extract_gamedata.py), layered the way the engine loads them, with inheritance.
 
-What the balance export leaves out lives here, above all what an upgrade *does*: a CUpgrade's
-EffectArray lists (catalog, id, field) references with a value, applied once per level, e.g.
+What the balance export leaves out lives here, above all what an upgrade *does*: a
+CUpgrade's EffectArray lists (catalog, id, field) references with a value, applied once
+per level, e.g.
     Effect,PunisherGrenadesU,Amount                 +1   (Marauder base damage per level)
     Effect,PunisherGrenadesU,AttributeBonus[Armored] +1   (and +1 vs Armored per level)
     Weapon,Claws,RateMultiplier                     +0.2  (adrenal glands; two mods add 0.2 each)
     Unit,Marine,LifeArmor                           +1
 
-Layering (the ladder dependency chain): core, liberty, swarm, void, voidmulti. A later mod's
-entry with the same id modifies the earlier one: scalar fields are set, array entries with
-`index=` patch that position, entries without an index append, `removed="1"` drops an entry.
-`parent=` inherits the resolved parent's fields and arrays (a child's indexed patches refer
-to the inherited array). Entries with default="1" are templates and never used directly.
+Layering (the ladder dependency chain): core, liberty, swarm, void, voidmulti. A later
+mod's entry with the same id modifies the earlier one: scalar fields are set, array
+entries with `index=` patch that position, entries without an index append,
+`removed="1"` drops an entry. `parent=` inherits the resolved parent's fields and arrays
+(a child's indexed patches refer to the inherited array). Entries with default="1" are
+templates and never used directly.
 """
 
 import copy
@@ -60,15 +62,15 @@ def mod_file(build, mod, catalog, root=GAMEDATA):
 
 
 class Entry:
-    """One catalog entry's accumulated operations (across mods), resolved against its parent."""
+    """One catalog entry's accumulated operations (across mods), resolved against its
+    parent."""
 
     def __init__(self, cid, tag):
         self.id, self.tag = cid, tag
         self.parent = None
         self.default = False
-        self.ops = (
-            []
-        )  # (kind, field, index, attrib) in mod order; kind: set | append | patch | remove
+        # (kind, field, index, attrib) in mod order; kind: set | append | patch | remove
+        self.ops = []
 
     def apply(self, el):
         if el.get("parent") and self.parent is None:
@@ -93,7 +95,8 @@ class Entry:
 
 
 class Catalog:
-    """All entries of one catalog (e.g. 'UpgradeData') for a build, layered over MODS."""
+    """All entries of one catalog (e.g. 'UpgradeData') for a build, layered over
+    MODS."""
 
     def __init__(self, build, catalog, mods=MODS, root=GAMEDATA):
         self.entries = {}
@@ -135,9 +138,8 @@ class Catalog:
                 if not isinstance(arr, list):
                     arr = data[field] = []
                 i = int(idx) if idx.isdigit() else None
-                if (
-                    i is None
-                ):  # named index (e.g. AttributeBonus[Armored]-style arrays keyed by name)
+                # named index (e.g. AttributeBonus[Armored]-style arrays keyed by name)
+                if i is None:
                     arr.append(dict(attrs, index=idx))
                 else:
                     while len(arr) <= i:
@@ -163,7 +165,8 @@ class Catalog:
 
 
 def parse_reference(ref):
-    """'Effect,PunisherGrenadesU,AttributeBonus[Armored]' -> ('Effect', 'PunisherGrenadesU', 'AttributeBonus', 'Armored')."""
+    """'Effect,PunisherGrenadesU,AttributeBonus[Armored]' -> ('Effect',
+    'PunisherGrenadesU', 'AttributeBonus', 'Armored')."""
     parts = ref.split(",")
     if len(parts) < 3:
         return None
@@ -175,9 +178,9 @@ def parse_reference(ref):
 
 
 def upgrade_effects(build, root=GAMEDATA):
-    """{upgrade id: [(catalog, id, field, key, operation, value)]} for every non-template
-    CUpgrade of the build, mechanics fields only (icons and tooltips dropped), plus
-    {upgrade id: [affected unit ids]}."""
+    """{upgrade id: [(catalog, id, field, key, operation, value)]} for every
+    non-template CUpgrade of the build, mechanics fields only (icons and tooltips
+    dropped), plus {upgrade id: [affected unit ids]}."""
     cat = Catalog(build, "UpgradeData", root=root)
     effects, affected = {}, {}
     for uid in cat.ids():
@@ -211,7 +214,8 @@ if __name__ == "__main__":
     build = int(sys.argv[1]) if len(sys.argv) > 1 else 98310
     eff, aff, mods = upgrade_effects(build)
     print(
-        f"build {build}: mods {mods}, {len(eff)} upgrades, {sum(len(v) for v in eff.values())} mechanic effects"
+        f"build {build}: mods {mods}, {len(eff)} upgrades,"
+        f" {sum(len(v) for v in eff.values())} mechanic effects"
     )
     for uid in sys.argv[2:] or (
         "TerranInfantryWeaponsLevel1",

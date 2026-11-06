@@ -2,10 +2,11 @@
 
     data/replays/<format>/<build>/<map>/<id>.SC2Replay + <id>.json
 
-from loose files, directories (walked) and archives (.zip / .rar / .7z, unpacked with 7z into a
-temporary folder; the archive itself stays where it is). <id> is the content hash, so a game
-that arrives twice is one game with both sources in its sidecar. Loose files are moved
-(--copy keeps them). Unreadable replays stay where they are and are listed at the end.
+from loose files, directories (walked) and archives (.zip / .rar / .7z, unpacked with 7z
+into a temporary folder; the archive itself stays where it is). <id> is the content
+hash, so a game that arrives twice is one game with both sources in its sidecar. Loose
+files are moved (--copy keeps them). Unreadable replays stay where they are and are
+listed at the end.
 
     python scripts/ingest_replays.py data/replays/pro-1v1
     python scripts/ingest_replays.py "data/replays/TSL 9 Replay Pack.zip" --source "TSL 9"
@@ -162,7 +163,8 @@ def main():
     if not args.no_index:
         index = corpus.build_index(args.root)
         print(
-            f"index: {len(index)} games -> {os.path.join(args.root, corpus.INDEX)}, maps -> {os.path.join(args.root, corpus.MAPS)}"
+            f"index: {len(index)} games -> {os.path.join(args.root, corpus.INDEX)},"
+            f" maps -> {os.path.join(args.root, corpus.MAPS)}"
         )
 
 

@@ -1,26 +1,30 @@
-"""Pretraining the grid latent as an autoencoder (2026-11-01, DESIGN_grid_latent.md "Pretraining"):
-one game frame -> the grid latent (worldmodel/quad_latent.QuadEncoder: 16 x 16 cells + CLS and
-players, the same on every map) -> the whole frame back, gradients fully on. No dynamics, no z,
-no actions. If it trains, a latent exists that holds the game state in a decodable form.
+"""Pretraining the grid latent as an autoencoder (2026-11-01, DESIGN_grid_latent.md
+"Pretraining"): one game frame -> the grid latent (worldmodel/quad_latent.QuadEncoder:
+16 x 16 cells + CLS and players, the same on every map) -> the whole frame back,
+gradients fully on. No dynamics, no z, no actions. If it trains, a latent exists that
+holds the game state in a decodable form.
 
-Data (2026-11-01): moments come from the frame cache (worldmodel/frame_cache.py, built by
-scripts/build_frame_cache.py): ready frames on disk from every extracted game, each moment in both
-player views and the combined view, read at random (~10 ms per batch). The earlier in-memory pool of
-12 whole games grew to ~47 GB and was OOM-killed.
+Data (2026-11-01): moments come from the frame cache (worldmodel/frame_cache.py, built
+by scripts/build_frame_cache.py): ready frames on disk from every extracted game, each
+moment in both player views and the combined view, read at random (~10 ms per batch).
+The earlier in-memory pool of 12 whole games grew to ~47 GB and was OOM-killed.
 
 Decoded:
 - entities: Poisson counts per (cell, owner, type); one query per entity (true counts in
-  training) reading its offset in the cell, its numbers (tokenize.entity_features) and its order;
-  paired with the truth by a Hungarian assignment over each frame (order-free; see grid_latent.hungarian);
-- the map at 1 map unit, each real cell from its latent cell's vector and its offset (MapDecoder; a
-  random sample of --map_cells on-map cells per frame in training, all of them in evaluation): the
-  static layers (pathable, placeable, height) and one view (visible, seen, creep) per player the
-  frame holds: the viewer's in a player's frame, both in a combined frame;
+  training) reading its offset in the cell, its numbers (tokenize.entity_features) and
+  its order; paired with the truth by a Hungarian assignment over each frame
+  (order-free; see grid_latent.hungarian);
+- the map at 1 map unit, each real cell from its latent cell's vector and its offset
+  (MapDecoder; a random sample of --map_cells on-map cells per frame in training, all of
+  them in evaluation): the static layers (pathable, placeable, height) and one view
+  (visible, seen, creep) per player the frame holds: the viewer's in a player's frame,
+  both in a combined frame;
 - the players' numbers (stats, extras) and upgrades from their latent tokens.
 
-Evaluation (player views and the combined view of seen / unseen games and unseen maps): position
-error of the matched entities, counts (precision / recall of the predicted counts, the error per
-frame), HP, numbers, orders; map-layer accuracy and IoU; player numbers and upgrades.
+Evaluation (player views and the combined view of seen / unseen games and unseen maps):
+position error of the matched entities, counts (precision / recall of the predicted
+counts, the error per frame), HP, numbers, orders; map-layer accuracy and IoU; player
+numbers and upgrades.
 
     python scripts/train_ae.py --steps 20000
 """
@@ -58,7 +62,8 @@ from cosmicstar.worldmodel.encoder import mlp  # noqa: E402
 from cosmicstar.worldmodel.tokenize import collate as collate_frames  # noqa: E402
 
 ON_MAP = gl.STATIC_LAYERS.index("on_map")
-# decoded static layers (on_map and playable are structure: on_map is the mask itself, playable ~1 in the crop)
+# decoded static layers (on_map and playable are structure: on_map is the mask itself,
+# playable ~1 in the crop)
 STATIC_BIN = ("pathable", "placeable")
 STATIC_OUT = [gl.STATIC_LAYERS.index(c) for c in (*STATIC_BIN, "height")]
 HEIGHT = len(STATIC_BIN)  # its output
@@ -165,7 +170,8 @@ def main():
     rng = np.random.RandomState(args.seed)
     dev = "cuda"
 
-    # moments come from the frame cache (scripts/build_frame_cache.py): ready frames on disk, all games
+    # moments come from the frame cache (scripts/build_frame_cache.py): ready frames on
+    # disk, all games
     train = fc.FrameCache(args.cache, ["train"])
     held = {
         "unseen-games": fc.FrameCache(args.cache, ["held_out_games"]),
@@ -181,7 +187,8 @@ def main():
         run = os.path.join(args.out, time.strftime("ae_%Y%m%d_%H%M%S"))
     os.makedirs(run, exist_ok=True)
     print(
-        f"frame cache {args.cache}: {len(train)} train moments from {len(train.games)} games | held out: "
+        f"frame cache {args.cache}: {len(train)} train moments from {len(train.games)}"
+        " games | held out: "
         + ", ".join(
             f"{k} {len(c)} moments / {len(c.games)} games" for k, c in held.items()
         )
@@ -227,7 +234,8 @@ def main():
         enc.compile_parts()
         for m in (edec, mdec, vdec):
             m.compile(dynamic=True)
-    # learned uncertainty weights (Kendall et al.): loss = sum exp(-s_i) L_i + s_i over the loss groups
+    # learned uncertainty weights (Kendall et al.): loss = sum exp(-s_i) L_i + s_i over
+    # the loss groups
     log_var = nn.Parameter(torch.zeros(19, device=dev))
     uw = nn.ParameterDict(dict(log_var=log_var))
     dhead = gl.DecompHead(args.d, heads=heads).to(dev)
@@ -244,8 +252,9 @@ def main():
     params = [p for m in modules.values() for p in m.parameters()]
     n = lambda m: sum(p.numel() for p in m.parameters()) / 1e6
     print(
-        f"encoder {n(enc):.2f}M, entity decoder {n(edec):.2f}M, map decoders {n(mdec) + n(vdec):.2f}M | latent "
-        f"{args.grid}x{args.grid}x{args.d} + {1 + 2} globals",
+        f"encoder {n(enc):.2f}M, entity decoder {n(edec):.2f}M, map decoders"
+        f" {n(mdec) + n(vdec):.2f}M | latent {args.grid}x{args.grid}x{args.d} + {1 + 2}"
+        " globals",
         flush=True,
     )
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
@@ -279,9 +288,10 @@ def main():
     tag = lambda s_: re.sub(r"[^A-Za-z0-9_.-]+", "_", s_)
 
     def draw_triples(cache, n_moments, rng):
-        """Moments from the cache, each in both player views and the combined view, [player 0's view,
-        player 1's view, combined] per moment; returns the frames and, per moment, the frame
-        indices of the combined view and of player 0's / player 1's own view."""
+        """Moments from the cache, each in both player views and the combined view,
+        [player 0's view, player 1's view, combined] per moment; returns the frames and,
+        per moment, the frame indices of the combined view and of player 0's / player
+        1's own view."""
         frames, trip = [], []
         for m in cache.sample(rng, n_moments):
             base = len(frames)
@@ -319,9 +329,9 @@ def main():
     )
 
     def decomp(e, trip):
-        """The decomposition check: each player's latent from the combined latent of the same moment.
-        Returns the loss and, per player, the fraction of variance unexplained (and that of copying the
-        combined latent, the baseline)."""
+        """The decomposition check: each player's latent from the combined latent of the
+        same moment. Returns the loss and, per player, the fraction of variance
+        unexplained (and that of copying the combined latent, the baseline)."""
         o, p0, p1 = trip[:, 0], trip[:, 1], trip[:, 2]
         lat = e["tokens"]
         x = gl.grad_scale(lat[o], args.decomp_grad)
@@ -432,8 +442,9 @@ def main():
 
     @torch.no_grad()
     def metrics(fb, tg, out, pair, mo, tgt_map, onm, vo, tgt_view, pn, ups_logit, pm):
-        """Per attribute: position error, type / owner accuracy, each continuous number's error, each
-        flag's F1, each categorical's accuracy, the order queue, each map layer's IoU, the players.
+        """Per attribute: position error, type / owner accuracy, each continuous
+        number's error, each flag's F1, each categorical's accuracy, the order queue,
+        each map layer's IoU, the players.
         """
         ip, it, ok = pair
         B, N = tg["mask"].shape
@@ -458,12 +469,11 @@ def main():
             fp = float((be[:, j] & ~bt[:, j] & ok).sum())
             fn = float((~be[:, j] & bt[:, j] & ok).sum())
             m[f"flag {name} f1"] = 2 * tp / max(2 * tp + fp + fn, 1)
+        # accuracy, and the recall of each state (rare ones would hide in the accuracy)
         for (
             k,
             cols,
-        ) in (
-            gl.NUM_CAT.items()
-        ):  # accuracy, and the recall of each state (rare ones would hide in the accuracy)
+        ) in gl.NUM_CAT.items():
             ph_, th_ = P_(f"cat_{k}").argmax(-1), T_(f"cat_{k}")
             m[f"cat {k} acc"] = avg(ph_ == th_)
             for c, cname in enumerate(cols + ("none",)):
@@ -472,7 +482,8 @@ def main():
                     ((ph_ == c) & sel).float().sum() / sel.float().sum().clamp(min=1)
                 )
                 m[f"cat {k}:{cname} share"] = float(sel.float().sum() / nok)
-        # type: balanced accuracy (the mean recall over the types present), next to the plain accuracy
+        # type: balanced accuracy (the mean recall over the types present), next to the
+        # plain accuracy
         tp_, tt_ = P_("type").argmax(-1), T_("type")
         K_ = v.n_units
         hit_ = torch.zeros(K_, device=dev).index_add_(
@@ -652,8 +663,9 @@ def main():
                 fv.append(dm_["fvu"])
                 fc.append(dm_["fvu_copy"])
             print(
-                f"[{name} step {step}] decomposition: player latents from the combined latent, unexplained variance "
-                f"{np.mean(fv):.3f} (copying the combined latent: {np.mean(fc):.3f})",
+                f"[{name} step {step}] decomposition: player latents from the combined"
+                f" latent, unexplained variance {np.mean(fv):.3f} (copying the combined"
+                f" latent: {np.mean(fc):.3f})",
                 flush=True,
             )
             tb.add_scalar(f"{tag(name)}/decomp_fvu", float(np.mean(fv)), step)
@@ -662,8 +674,9 @@ def main():
         for m_ in modules.values():
             m_.train()
 
-    # validation: the reconstruction losses (unweighted sum over the groups) on fixed batches from the held-out
-    # games (seen maps) and the held-out maps, every --val_every steps, next to the training average
+    # validation: the reconstruction losses (unweighted sum over the groups) on fixed
+    # batches from the held-out games (seen maps) and the held-out maps, every
+    # --val_every steps, next to the training average
     vrng = np.random.RandomState(4321)
     val_sets = {
         name: [draw_triples(c, args.frames // 3, vrng) for _ in range(args.val_batches)]
@@ -768,7 +781,8 @@ def main():
                     for k_, x in avg.items()
                     if k_ != "wait" and not k_.startswith("w_")
                 )
-                + f" | {dt:.2f}s/step (waited {avg['wait']:.2f}s) | mem {torch.cuda.max_memory_allocated() / 2**30:.1f}G",
+                + f" | {dt:.2f}s/step (waited {avg['wait']:.2f}s) | mem"
+                f" {torch.cuda.max_memory_allocated() / 2**30:.1f}G",
                 flush=True,
             )
             for k_, x in avg.items():

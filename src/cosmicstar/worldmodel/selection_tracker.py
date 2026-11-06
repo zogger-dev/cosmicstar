@@ -1,31 +1,36 @@
-"""A player's control groups and active selection, replayed from the replay's own events.
+"""A player's control groups and active selection, replayed from the replay's own
+events.
 
 The API does not expose control-group contents (ui_data.groups is index + leader type +
-count per group; the selection panel lists types without tags), but the replay logs every
-change to them: SSelectionDeltaEvent and SControlGroupUpdateEvent, parsed by
-replay_actions.py into SELECT / GROUP rows. This module replays those rows into eleven lists
-(groups 0-9 and the active selection, 10) and snapshots them per state frame. The semantics
-below were checked against the engine's own summaries and recipients (worldmodel/README.md,
-"Command recipients and control groups"); sc2reader's SelectionTracker is the reference for
-the event structure but sorts by tag as an approximation and ignores deaths.
+count per group; the selection panel lists types without tags), but the replay logs
+every change to them: SSelectionDeltaEvent and SControlGroupUpdateEvent, parsed by
+replay_actions.py into SELECT / GROUP rows. This module replays those rows into eleven
+lists (groups 0-9 and the active selection, 10) and snapshots them per state frame. The
+semantics below were checked against the engine's own summaries and recipients
+(worldmodel/README.md, "Command recipients and control groups"); sc2reader's
+SelectionTracker is the reference for the event structure but sorts by tag as an
+approximation and ignores deaths.
 
-  - Each list is in ascending unit-tag order, the game's own order: removal masks index it,
-    the engine's recipients come in it, and the selection panel lists units in it. (Subgroup
-    priorities and links in the deltas only describe the units; they do not order the list.)
-  - SELECT on list g: drop the masked positions, add the new units, keep the order. The game
-    logs these for the player's selection changes and, on any list, when a member changes
-    type (morphs, burrow, an egg hatching: the egg's tag is removed and the hatched unit's
-    added) or when it cleans dead members out of a selection the player just changed.
+  - Each list is in ascending unit-tag order, the game's own order: removal masks index
+    it, the engine's recipients come in it, and the selection panel lists units in it.
+    (Subgroup priorities and links in the deltas only describe the units; they do not
+    order the list.)
+  - SELECT on list g: drop the masked positions, add the new units, keep the order. The
+    game logs these for the player's selection changes and, on any list, when a member
+    changes type (morphs, burrow, an egg hatching: the egg's tag is removed and the
+    hatched unit's added) or when it cleans dead members out of a selection the player
+    just changed.
   - GROUP ops: set (0) / set+steal (4): group := selection; add (1) / add+steal (5):
     group := (group minus mask) + selection; recall (2): selection := group minus mask;
     clear (3): group := []. The "steal" variants need nothing more: the game logs the
-    removal from every other group itself, as a burst of recall / mask / set rows on each
-    affected group followed by the selection's restoration, all in the same loop.
-  - Dead units are NOT removed from a list when they die: they stay as stale entries that
-    the masks of later recalls and deltas account for (a baneling that exploded at loop 5076
-    was still position 1 of its group's recall mask at 5233). Pruning at the death loop
-    shifts every later mask. The engine's group counts and recipients exclude them, so the
-    per-frame output does too (a member whose death loop is <= the frame loop is left out).
+    removal from every other group itself, as a burst of recall / mask / set rows on
+    each affected group followed by the selection's restoration, all in the same loop.
+  - Dead units are NOT removed from a list when they die: they stay as stale entries
+    that the masks of later recalls and deltas account for (a baneling that exploded at
+    loop 5076 was still position 1 of its group's recall mask at 5233). Pruning at the
+    death loop shifts every later mask. The engine's group counts and recipients exclude
+    them, so the per-frame output does too (a member whose death loop is <= the frame
+    loop is left out).
 
 A frame at loop L shows the lists after every event at loops < L (an action at loop t is
 reported by the engine in the first observation after t); the per-command snapshots are
@@ -44,9 +49,10 @@ ENGINE_TAG_OFFSET = 1 << 32
 
 
 def ragged(acts, start_key, flat_key, i):
-    """Row i's slice of a ragged action-table column. The *_start arrays hold one start per
-    row and no trailing sentinel, so the last row's slice ends at the flat array's end (indexing
-    start[i + 1] there raised IndexError on views whose frames reach the replay's last row).
+    """Row i's slice of a ragged action-table column. The *_start arrays hold one start
+    per row and no trailing sentinel, so the last row's slice ends at the flat array's
+    end (indexing start[i + 1] there raised IndexError on views whose frames reach the
+    replay's last row).
     """
     start = acts[start_key]
     end = start[i + 1] if i + 1 < len(start) else len(acts[flat_key])
@@ -112,10 +118,11 @@ def player_rows(acts, slot):
 
 
 def replay(acts, slot, frame_loops=(), command_rows=(), after_rows=None):
-    """Runs the tracker over one player's rows. Returns (per-frame snapshots: 11 tuples of
-    replay tags per frame loop, including stale dead members; snapshots of the selection
-    right before each row in command_rows: {row: tuple}; the tracker). after_rows, a dict,
-    receives the selection after each SELECT / GROUP row: {row: tuple}."""
+    """Runs the tracker over one player's rows. Returns (per-frame snapshots: 11 tuples
+    of replay tags per frame loop, including stale dead members; snapshots of the
+    selection right before each row in command_rows: {row: tuple}; the tracker).
+    after_rows, a dict, receives the selection after each SELECT / GROUP row: {row:
+    tuple}."""
     tr = Tracker()
     rows = player_rows(acts, slot)
     loops = acts["loop"][rows]
@@ -160,10 +167,11 @@ def deaths_from_frames(arrays):
 
 
 def frame_groups(acts, slots, frame_loop, unit_tag, died):
-    """The grp_* arrays of a state file, for the players in slots (a player view: its one slot;
-    an observer file: every player): group g of player index k (grp_player[k] is its slot) at
-    frame f is grp_id[grp_start[(f*P+k)*11+g]:grp_start[(f*P+k)*11+g+1]], P = len(slots),
-    state unit ids in the game's order (ascending tag). died: replay tag -> death loop; dead
+    """The grp_* arrays of a state file, for the players in slots (a player view: its
+    one slot; an observer file: every player): group g of player index k (grp_player[k]
+    is its slot) at frame f is
+    grp_id[grp_start[(f*P+k)*11+g]:grp_start[(f*P+k)*11+g+1]], P = len(slots), state
+    unit ids in the game's order (ascending tag). died: replay tag -> death loop; dead
     members and members the engine never reported (no state id) are left out."""
     ids = {int(t) - ENGINE_TAG_OFFSET: i for i, t in enumerate(unit_tag.tolist())}
     per_player = [replay(acts, slot, frame_loop)[0] for slot in slots]
@@ -183,7 +191,8 @@ def frame_groups(acts, slots, frame_loop, unit_tag, died):
     )
 
 
-N_CAMERA_SAVES = 8  # camera hotkey slots (F5-F8 and the shifted set; slots 0-7 all seen in pro replays)
+# camera hotkey slots (F5-F8 and the shifted set; slots 0-7 all seen in pro replays)
+N_CAMERA_SAVES = 8
 FLAG_SET_AUTOCAST, FLAG_AUTOCAST_ON = (
     0x40,
     0x80,
@@ -191,9 +200,10 @@ FLAG_SET_AUTOCAST, FLAG_AUTOCAST_ON = (
 
 
 def frame_memory(acts, slots, frame_loop, unit_tag, died):
-    """The rest of what a player's interface remembers, per frame, from the replay's events
-    (the same frame rule as frame_groups: a frame at loop L shows the state after every event
-    at loops < L). For the players in slots (grp_player order), F frames, P players:
+    """The rest of what a player's interface remembers, per frame, from the replay's
+    events (the same frame rule as frame_groups: a frame at loop L shows the state after
+    every event at loops < L). For the players in slots (grp_player order), F frames, P
+    players:
 
         cam_save[F, P, 8, 2]   camera hotkey positions (slot 0-7), NaN until saved
         subgroup[F, P]         the active subgroup (tab) of the selection: the last SELECT row's
@@ -307,9 +317,9 @@ def frame_memory(acts, slots, frame_loop, unit_tag, died):
 
 
 def selected_at(arrays, loop):
-    """The engine's is_selected set (replay tags) as of `loop`, from a player view's per-loop
-    snapshots (sel_loop / sel_start / sel_id: stored at every loop the set changed). None when
-    the file has no snapshots or `loop` precedes the first one."""
+    """The engine's is_selected set (replay tags) as of `loop`, from a player view's
+    per-loop snapshots (sel_loop / sel_start / sel_id: stored at every loop the set
+    changed). None when the file has no snapshots or `loop` precedes the first one."""
     if "sel_loop" not in arrays:
         return None
     sl = arrays["sel_loop"]
@@ -324,9 +334,9 @@ def selected_at(arrays, loop):
 
 
 def validate(arrays, acts, slot, died=None, verbose=False):
-    """Checks the tracker against the engine on a player-view file with cmd_* arrays (and, from
-    an extraction with --ui, the ui_* arrays; without them only the command checks run).
-    Counts (rates are fractions of the totals):
+    """Checks the tracker against the engine on a player-view file with cmd_* arrays
+    (and, from an extraction with --ui, the ui_* arrays; without them only the command
+    checks run). Counts (rates are fractions of the totals):
 
         cells, grp_count   (frame, group 0-9) cells; those where the tracked alive count
                            equals ui_grp_count
@@ -412,7 +422,8 @@ def validate(arrays, acts, slot, died=None, verbose=False):
                 elif verbose and shown["grp"] < 10 and n != ui_count[f, g]:
                     shown["grp"] += 1
                     print(
-                        f"  group {g} frame {f} loop {loop}: tracked {n} ui {int(ui_count[f, g])}"
+                        f"  group {g} frame {f} loop {loop}: tracked {n} ui"
+                        f" {int(ui_count[f, g])}"
                     )
         sel = sorted(type_of(t) for t in snap[SELECTION])
         panel = sorted(ui_type[ui_start[f] : ui_start[f + 1]].tolist())
@@ -441,7 +452,8 @@ def validate(arrays, acts, slot, died=None, verbose=False):
             if verbose and shown["cmd"] < 10:
                 shown["cmd"] += 1
                 print(
-                    f"  command {c} loop {loop} ability {int(arrays['cmd_abil'][c])} row {int(r)}: recipients {recip} tracked {sel}"
+                    f"  command {c} loop {loop} ability {int(arrays['cmd_abil'][c])}"
+                    f" row {int(r)}: recipients {recip} tracked {sel}"
                 )
     # the engine's own selection, per loop (player views extracted with the snapshots)
     mismatches = []

@@ -1,5 +1,5 @@
-"""Shared pieces of the training scripts: game-loop rate, the in-memory game pool, a batch
-prefetcher and a device helper."""
+"""Shared pieces of the training scripts: game-loop rate, the in-memory game pool, a
+batch prefetcher and a device helper."""
 
 import os
 import queue
@@ -13,10 +13,10 @@ LPS = 22.4  # game loops per second at "faster" speed
 class GamePool:
     """Holds `size` games in memory; rotate(n) swaps n of them for games not loaded.
 
-    background=k: a loader thread keeps k replacement games loaded ahead of time, so a rotation
-    is an instant swap (loading a game with its three views takes ~5 s); rotate() swaps in
-    whatever is ready and never waits. games is replaced as a whole list, so readers in other
-    threads always see a consistent pool."""
+    background=k: a loader thread keeps k replacement games loaded ahead of time, so a
+    rotation is an instant swap (loading a game with its three views takes ~5 s);
+    rotate() swaps in whatever is ready and never waits. games is replaced as a whole
+    list, so readers in other threads always see a consistent pool."""
 
     def __init__(self, paths, size, load, rng, names=None, background=0):
         self.paths, self.load, self.rng = list(paths), load, rng
@@ -84,8 +84,9 @@ class GamePool:
 
 
 class Prefetch:
-    """Builds batches on a background thread, `depth` ahead: make() -> batch. The GPU works on
-    one batch while the next ones are drawn, collated and copied. Exceptions surface in get().
+    """Builds batches on a background thread, `depth` ahead: make() -> batch. The GPU
+    works on one batch while the next ones are drawn, collated and copied. Exceptions
+    surface in get().
     """
 
     def __init__(self, make, depth=2):

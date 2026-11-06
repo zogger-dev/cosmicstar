@@ -9,16 +9,16 @@ by an MLP into d:
     snapshot type (fogged targets), selected units (mean of their state embeddings),
     numbers (presses, counts, amounts, flags), time relative to the sample's present (game loops)
 
-Owner codes, positions and unit embeddings are the state encoder's own tables, so a player
-code, a map position or a unit means the same thing in actions and in states.
+Owner codes, positions and unit embeddings are the state encoder's own tables, so a
+player code, a map position or a unit means the same thing in actions and in states.
 
 A causal transformer runs over the window's tokens in time order (a retarget sees the
 command it retargets; a selection is seen by the commands after it). Then each (segment,
-player) gets one summary by attention pooling over that player's tokens in that segment; a
-learned "nothing" key is always there, so a player who did nothing still gets a summary
-(doing nothing is information too). The summaries are the abstract actions: what each player
-did in each segment. The world model predicts given them; a policy would later act in this
-space, with a separate decoder down to raw interface events.
+player) gets one summary by attention pooling over that player's tokens in that segment;
+a learned "nothing" key is always there, so a player who did nothing still gets a
+summary (doing nothing is information too). The summaries are the abstract actions: what
+each player did in each segment. The world model predicts given them; a policy would
+later act in this space, with a separate decoder down to raw interface events.
 """
 
 import math
@@ -32,11 +32,11 @@ from .encoder import mlp
 
 
 class LoopTime(nn.Module):
-    """Game loops relative to the present (past < 0 < future; 22.4 loops per second) -> sin/cos
-    at periods from 2 loops to 2048 loops (~0.09 s to ~1.5 min, geometric), plus the signed
-    value scaled by the longest horizon (56 loops = 2.5 s). Every time the model reads (action
-    times, segment bounds, horizons) is in loops, the game's own clock, independent of the
-    extraction's frame step."""
+    """Game loops relative to the present (past < 0 < future; 22.4 loops per second) ->
+    sin/cos at periods from 2 loops to 2048 loops (~0.09 s to ~1.5 min, geometric), plus
+    the signed value scaled by the longest horizon (56 loops = 2.5 s). Every time the
+    model reads (action times, segment bounds, horizons) is in loops, the game's own
+    clock, independent of the extraction's frame step."""
 
     def __init__(self, n_periods=10, shortest=2.0, longest=2048.0, scale=56.0):
         super().__init__()
@@ -142,13 +142,14 @@ class ActionEncoder(nn.Module):
 
     def forward(self, b, ahead=None, horizon_loops=None):
         """Returns summaries [B, S, P, d], their mask [B, S, P] (real players) and the
-        contextualized tokens [B, N, d]. horizon_loops [B]: the summarized interval's length in
-        game loops, when it varies between samples.
+        contextualized tokens [B, N, d]. horizon_loops [B]: the summarized interval's
+        length in game loops, when it varies between samples.
 
-        ahead (in segments): instead of one summary per segment, one per (frame, player) over
-        the `ahead` segments that follow the frame, i.e. the actions in the interval the
-        predictor is asked about. The window's bounds then run `ahead` segments past its last
-        frame (seg_t holds T + ahead bounds; queries are made for the first T)."""
+        ahead (in segments): instead of one summary per segment, one per (frame, player)
+        over the `ahead` segments that follow the frame, i.e. the actions in the
+        interval the predictor is asked about. The window's bounds then run `ahead`
+        segments past its last frame (seg_t holds T + ahead bounds; queries are made for
+        the first T)."""
         x = self.tokens(b)
         B, N, d = x.shape
         x = torch.cat([self.start.expand(B, -1, -1).to(x.dtype), x], 1)

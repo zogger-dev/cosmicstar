@@ -1,5 +1,6 @@
-"""Builds each game's <base>.index.npz for the physics model's training store (worldmodel/physics_data.py): rows' first and last
-frames, death frames and parents. Skips games that already have one and games missing a view.
+"""Builds each game's <base>.index.npz for the physics model's training store
+(worldmodel/physics_data.py): rows' first and last frames, death frames and parents.
+Skips games that already have one and games missing a view.
 
     python scripts/build_physics_index.py --games data/games_v3 --workers 12
 """

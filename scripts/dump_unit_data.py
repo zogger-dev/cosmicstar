@@ -1,4 +1,5 @@
-"""Dumps static unit data (name, attributes, costs, supply) from the running game version.
+"""Dumps static unit data (name, attributes, costs, supply) from the running game
+version.
 
 python scripts/dump_unit_data.py --out data/worldmodel/unit_data.json
 """

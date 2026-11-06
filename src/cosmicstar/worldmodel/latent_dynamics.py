@@ -1,24 +1,25 @@
-"""Latent dynamics (DESIGN_latent_dynamics.md, 2026-11-01): the world model predicts the encoder's
-own representation of the future, as a residual
+"""Latent dynamics (DESIGN_latent_dynamics.md, 2026-11-01): the world model predicts the
+encoder's own representation of the future, as a residual
 
     ŝ_{t+k} = s_t + h(s_t, k) + g(s_t + h(s_t, k), A, z)
 
-h, passive dynamics: self-attention over the state tokens, conditioned on the horizon k: what
-happens with no new commands. g, the action delta: the state tokens attend to the action tokens
-(the replay commands) and the players' z tokens; it never sees the state through the actions.
-Both end in a zero-initialized projection, so a fresh model predicts persistence (ŝ = s_t).
+h, passive dynamics: self-attention over the state tokens, conditioned on the horizon k:
+what happens with no new commands. g, the action delta: the state tokens attend to the
+action tokens (the replay commands) and the players' z tokens; it never sees the state
+through the actions. Both end in a zero-initialized projection, so a fresh model
+predicts persistence (ŝ = s_t).
 
-Targets come from a slow-moving copy of the encoder (exponential moving average, stop-gradient).
-Anti-collapse and identifiability terms (all masked, fixed shapes):
+Targets come from a slow-moving copy of the encoder (exponential moving average,
+stop-gradient). Anti-collapse and identifiability terms (all masked, fixed shapes):
 
-- vicreg: per-dimension standard deviation of s_t above 1 over the batch's tokens, and small
-  off-diagonal covariance (VICReg), so the latent can't shrink to a constant;
-- cross_corr: the batch cross-correlation between two token streams (h's delta vs g's delta, g's
-  delta vs s_t), pushed to zero, so g carries what h and the state don't;
-- floor_std: g's per-dimension spread over samples with actions above a floor (g = 0 would be
-  trivially uncorrelated);
-- barlow: Barlow Twins between the posterior's z and the players' command summaries, where commands
-  exist (the inverse side: z must mean "what was done")."""
+- vicreg: per-dimension standard deviation of s_t above 1 over the batch's tokens, and
+  small off-diagonal covariance (VICReg), so the latent can't shrink to a constant;
+- cross_corr: the batch cross-correlation between two token streams (h's delta vs g's
+  delta, g's delta vs s_t), pushed to zero, so g carries what h and the state don't;
+- floor_std: g's per-dimension spread over samples with actions above a floor (g = 0
+  would be trivially uncorrelated);
+- barlow: Barlow Twins between the posterior's z and the players' command summaries,
+  where commands exist (the inverse side: z must mean "what was done")."""
 
 import torch
 import torch.nn.functional as F
@@ -30,7 +31,8 @@ from .encoder import mlp
 
 
 class PassiveDynamics(nn.Module):
-    """h: [B, T, d] state tokens + horizon -> [B, T, d] delta (self-attention with 2D RoPE)."""
+    """h: [B, T, d] state tokens + horizon -> [B, T, d] delta (self-attention with 2D
+    RoPE)."""
 
     def __init__(self, d, depth, heads, mlp_ratio=4.0):
         super().__init__()
@@ -76,10 +78,11 @@ class ActionBlock(nn.Module):
 
 
 class ActionDynamics(nn.Module):
-    """g: state tokens (after h) attending to the action and z tokens -> [B, T, d] delta. The
-    memory always holds each player's z token, so no row is empty. rope given (--g_self): each
-    block also self-attends over the state tokens first (2D RoPE), so a command's effect can move
-    between tokens (units leaving one cell arrive in another)."""
+    """g: state tokens (after h) attending to the action and z tokens -> [B, T, d]
+    delta. The memory always holds each player's z token, so no row is empty. rope given
+    (--g_self): each block also self-attends over the state tokens first (2D RoPE), so a
+    command's effect can move between tokens (units leaving one cell arrive in
+    another)."""
 
     def __init__(self, d, depth, heads, mlp_ratio=4.0, rope=None):
         super().__init__()
@@ -135,7 +138,8 @@ def vicreg(x, w, target_std=1.0, eps=1e-4):
 
 
 def cross_corr(a, b, w, eps=1e-4):
-    """Mean squared entry of the cross-correlation between a and b [..., d] over weighted tokens."""
+    """Mean squared entry of the cross-correlation between a and b [..., d] over
+    weighted tokens."""
     _, ac, n = _moments(a, w)
     _, bc, _ = _moments(b, w)
     ac, bc = ac.reshape(-1, a.shape[-1]), bc.reshape(-1, b.shape[-1])
@@ -153,8 +157,9 @@ def floor_std(x, w, floor, eps=1e-4):
 
 
 def barlow(a, b, w, off_weight, eps=1e-4):
-    """Barlow Twins over weighted pairs: the cross-correlation of standardized a, b [..., d] toward
-    the identity (diagonal to 1, off-diagonal to 0, the latter weighted)."""
+    """Barlow Twins over weighted pairs: the cross-correlation of standardized a, b
+    [..., d] toward the identity (diagonal to 1, off-diagonal to 0, the latter
+    weighted)."""
     _, ac, n = _moments(a, w)
     _, bc, _ = _moments(b, w)
     ac, bc = ac.reshape(-1, a.shape[-1]), bc.reshape(-1, b.shape[-1])
@@ -167,11 +172,12 @@ def barlow(a, b, w, off_weight, eps=1e-4):
 
 
 def vicreg_pair(a, b, w, w_cov=0.04, queue=None):
-    """VICReg between paired a, b [..., d] over weighted pairs: the mean squared distance of each pair,
-    plus each side's variance hinge and off-diagonal covariance (the 25 : 25 : 1 weighting of VICReg,
-    divided by 25). A direct gradient per pair, so it works with tens of pairs where Barlow Twins'
-    batch cross-correlation is mostly noise. queue: recent (a, b, w) rows, detached, added to the
-    variance / covariance statistics only (a memory bank, as in MoCo)."""
+    """VICReg between paired a, b [..., d] over weighted pairs: the mean squared
+    distance of each pair, plus each side's variance hinge and off-diagonal covariance
+    (the 25 : 25 : 1 weighting of VICReg, divided by 25). A direct gradient per pair, so
+    it works with tens of pairs where Barlow Twins' batch cross-correlation is mostly
+    noise. queue: recent (a, b, w) rows, detached, added to the variance / covariance
+    statistics only (a memory bank, as in MoCo)."""
     wf = w.float()
     mse = (((a.float() - b.float()) ** 2).mean(-1) * wf).sum() / wf.sum().clamp(min=1)
     a2, b2, w2 = (
@@ -197,21 +203,23 @@ def ema_update(target, online, tau):
         bt.copy_(bo)
 
 
-N_RAW_DELTA = (
-    2 + 49
-)  # position (fraction of the playable area, ent_xy) + the entity numbers (tokenize.ENTITY_NUMS)
+# position (fraction of the playable area, ent_xy) + the entity numbers
+# (tokenize.ENTITY_NUMS)
+N_RAW_DELTA = 2 + 49
 
 
 class DeltaInverse(nn.Module):
-    """What happened to each unit, read only from its change Δ = s_{t+k} − s_t and the horizon
-    (never s_t itself): moved, touched by a command, order changed, the new order; and a Barlow
-    Twins alignment between the latent change and the unit's raw feature change (position, HP,
-    shields, energy, build progress, cooldowns, ...: everything that changed, without decoding
-    it; the flags alone let Δ say "this unit changed" without saying how). With
-    gradient through both encodings, a latent that doesn't change over time (Δ ≈ 0) can't
-    answer, which is the pressure against collapse in time; static units are correctly
-    "nothing happened", so the slowness of most of the state is respected, and a clock stamped
-    into every token is the same for all units, so it can't say which of them moved."""
+    """What happened to each unit, read only from its change Δ = s_{t+k} − s_t and the
+    horizon (never s_t itself): moved, touched by a command, order changed, the new
+    order; and a Barlow Twins alignment between the latent change and the unit's raw
+    feature change (position, HP, shields, energy, build progress, cooldowns, ...:
+    everything that changed, without decoding it; the flags alone let Δ say "this unit
+    changed" without saying how). With
+    gradient through both encodings, a latent that doesn't change over time (Δ ≈ 0)
+    can't answer, which is the pressure against collapse in time; static units are
+    correctly "nothing happened", so the slowness of most of the state is respected, and
+    a clock stamped into every token is the same for all units, so it can't say which of
+    them moved."""
 
     def __init__(self, d, n_orders):
         super().__init__()
@@ -223,8 +231,8 @@ class DeltaInverse(nn.Module):
         self.raw_in = mlp(N_RAW_DELTA, 64)  # the raw feature change, its other side
 
     def forward(self, delta, hor_loops):
-        """delta [B, N, d], hor_loops [B] -> (flag logits [B, N, 3], order logits [B, N, n_orders],
-        the latent change projected for Barlow Twins [B, N, 64])."""
+        """delta [B, N, d], hor_loops [B] -> (flag logits [B, N, 3], order logits [B, N,
+        n_orders], the latent change projected for Barlow Twins [B, N, 64])."""
         t = self.time(hor_loops)[:, None].expand(-1, delta.shape[1], -1).to(delta.dtype)
         h = F.gelu(self.body(torch.cat([delta, t], -1)))
         return self.flags(h), self.order(h), self.proj(delta)

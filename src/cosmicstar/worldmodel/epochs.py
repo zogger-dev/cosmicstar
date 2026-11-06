@@ -1,19 +1,25 @@
 """Epochs of training windows: every pass planned ahead, reproducible from a seed.
 
-An epoch tiles each game with windows every `stride` frames, from an offset of its own; the offsets go through a permutation per game, so `stride`
-epochs start a window at every frame of every game exactly once, and no window repeats before that. The model sees no absolute time, so the
-stride is invisible to it, and offsets differ by game, so no alignment is special.
+An epoch tiles each game with windows every `stride` frames, from an offset of its own;
+the offsets go through a permutation per game, so `stride` epochs start a window at
+every frame of every game exactly once, and no window repeats before that. The model
+sees no absolute time, so the stride is invisible to it, and offsets differ by game, so
+no alignment is special.
 
-A window's size is its rows: the units alive in any of its frames, worked out from each game's index (first and last frame per row) without reading
-the game. Windows of similar size share a pass, so a pass pads little: buckets of `width` rows, the thin ends merged until each bucket has windows
-from `min_games` games. A pass holds as many windows as fit the token budget at its bucket's largest window, at most `seqs`.
+A window's size is its rows: the units alive in any of its frames, worked out from each
+game's index (first and last frame per row) without reading the game. Windows of similar
+size share a pass, so a pass pads little: buckets of `width` rows, the thin ends merged
+until each bucket has windows from `min_games` games. A pass holds as many windows as
+fit the token budget at its bucket's largest window, at most `seqs`.
 
 Spread evenly through an epoch:
-- buckets: each bucket's passes at evenly spaced places, and the passes of one update from different buckets
-- games: each game's windows of a bucket at evenly spaced passes of that bucket; never twice in a pass, and not again within `recent` passes where
-  another game can stand in
+- buckets: each bucket's passes at evenly spaced places, and the passes of one update
+  from different buckets
+- games: each game's windows of a bucket at evenly spaced passes of that bucket; never
+  twice in a pass, and not again within `recent` passes where another game can stand in
 - maps: a pass takes distinct maps where it can
-- time in game (thirds) and effects present: from a game, the window whose kind was seen longest ago
+- time in game (thirds) and effects present: from a game, the window whose kind was seen
+  longest ago
 """
 
 import zlib
@@ -27,7 +33,8 @@ THIRDS = 3
 
 
 def game_windows(base, L):
-    """For each start frame t0 in [0, F - L): the window's rows, and whether it has effects in either view."""
+    """For each start frame t0 in [0, F - L): the window's rows, and whether it has
+    effects in either view."""
     ix = np.load(f"{base}.index.npz")
     F = int(ix["F"])
     t0 = np.arange(max(1, F - L))
@@ -48,7 +55,8 @@ def game_windows(base, L):
 
 
 class Plan:
-    """All windows of all games, bucketed. passes(epoch) -> the epoch's passes, each [(game, t0, swap), ...]."""
+    """All windows of all games, bucketed. passes(epoch) -> the epoch's passes, each
+    [(game, t0, swap), ...]."""
 
     def __init__(
         self,
@@ -77,7 +85,8 @@ class Plan:
         for g in self.ids:
             self.F[g], self.rows[g], self.eff[g] = game_windows(bases[g], L)
         self.map = {g: maps[g] for g in self.ids}
-        # buckets: the raw ones with windows from min_games games or more; anything below or above joins the end bucket
+        # buckets: the raw ones with windows from min_games games or more; anything
+        # below or above joins the end bucket
         raw = {}
         for g in self.ids:
             for b in np.unique(self.rows[g] // width).tolist():
@@ -95,14 +104,16 @@ class Plan:
         return np.clip(np.asarray(rows) // self.width, self.lo, self.hi) - self.lo
 
     def offset(self, g, epoch):
-        """The game's offset this epoch: a permutation of 0..stride-1 per game, a new one each cycle of stride epochs."""
+        """The game's offset this epoch: a permutation of 0..stride-1 per game, a new
+        one each cycle of stride epochs."""
         perm = np.random.default_rng(
             [self.seed, zlib.crc32(g.encode()), epoch // self.stride]
         ).permutation(self.stride)
         return int(perm[epoch % self.stride])
 
     def windows(self, epoch):
-        """The epoch's windows: arrays of game index, t0, bucket, kind (third * 2 + effects)."""
+        """The epoch's windows: arrays of game index, t0, bucket, kind (third * 2 +
+        effects)."""
         gi, t0s = [], []
         for i, g in enumerate(self.ids):
             t = np.arange(self.offset(g, epoch), len(self.rows[g]), self.stride)
@@ -115,7 +126,8 @@ class Plan:
         return gi, t0, self.bucket(rows), third * 2 + eff
 
     def sizes(self, epoch):
-        """Windows per bucket and passes per bucket: as few passes as the caps allow, windows shared out evenly among them."""
+        """Windows per bucket and passes per bucket: as few passes as the caps allow,
+        windows shared out evenly among them."""
         _, _, b, _ = self.windows(epoch)
         n = np.bincount(b, minlength=len(self.top))
         return n, -(-n // self.cap)
@@ -135,7 +147,8 @@ class Plan:
         rng = np.random.default_rng([self.seed, epoch, 1])
         gi, t0, b, kind = self.windows(epoch)
         n, P = self.sizes(epoch)
-        # the order of buckets: each bucket's passes evenly spaced, then the passes of one update from different buckets
+        # the order of buckets: each bucket's passes evenly spaced, then the passes of
+        # one update from different buckets
         pos = np.concatenate([(np.arange(p) + rng.random()) / p for p in P])
         which = np.repeat(np.arange(len(P)), P)
         order = which[np.argsort(pos, kind="stable")].tolist()
@@ -152,7 +165,8 @@ class Plan:
                     )
                     if k is not None:
                         order[j], order[k] = order[k], order[j]
-        # each bucket's windows by game, in random order; each game's next turn evenly spaced through the bucket's passes
+        # each bucket's windows by game, in random order; each game's next turn evenly
+        # spaced through the bucket's passes
         G = len(self.ids)
         pool = {}
         for bk in range(len(P)):
@@ -184,7 +198,8 @@ class Plan:
             s["passes"] -= 1
             cand = np.argsort(s["due"], kind="stable")[: max(6 * size, 32)]
             cand = cand[np.isfinite(s["due"][cand])].tolist()
-            # a game with more windows left than the bucket has passes after this one must be in this one, or it would repeat in a pass later
+            # a game with more windows left than the bucket has passes after this one
+            # must be in this one, or it would repeat in a pass later
             must = np.nonzero(s["cnt"] > s["passes"])[0]
             took = must[np.argsort(-s["cnt"][must], kind="stable")][:size].tolist()
             took_maps = {maps[c] for c in took}

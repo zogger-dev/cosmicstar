@@ -1,21 +1,23 @@
-"""The ruleset encoder: the game's balance data -> embeddings for unit types, ability commands
-and upgrades, computed from the data rather than looked up in a learned table.
+"""The ruleset encoder: the game's balance data -> embeddings for unit types, ability
+commands and upgrades, computed from the data rather than looked up in a learned table.
 
-Nodes (scripts/build_ruleset_tables.py): every unit type, ability command and upgrade level of
-a ruleset, each with a fixed-width feature vector. A unit also owns a set of weapons, each a
-vector (range, period, damage, bonus damage per attribute tag, ...); the set is summed, so any
-number of weapons works and a unit without one adds nothing. Every node gets a learned
-residual keyed by its stable name (zero-initialized; L2 keeps the data carrying the load), so
-a unit the data describes well needs none, and one in a future patch starts from its numbers.
+Nodes (scripts/build_ruleset_tables.py): every unit type, ability command and upgrade
+level of a ruleset, each with a fixed-width feature vector. A unit also owns a set of
+weapons, each a vector (range, period, damage, bonus damage per attribute tag, ...); the
+set is summed, so any number of weapons works and a unit without one adds nothing. Every
+node gets a learned residual keyed by its stable name (zero-initialized; L2 keeps the
+data carrying the load), so a unit the data describes well needs none, and one in a
+future patch starts from its numbers.
 
-Attention over all nodes of the ruleset, with an additive bias per edge relation (has ability,
-produced by, requires, ...), lets a type's vector hold what is true in every game: a weapon's
-bonus tag meets the attribute tags of the types it applies to, a target class meets movement
-types, a train command meets its product. What depends on the situation stays with the
-entity-level attention over the frame.
+Attention over all nodes of the ruleset, with an additive bias per edge relation (has
+ability, produced by, requires, ...), lets a type's vector hold what is true in every
+game: a weapon's bonus tag meets the attribute tags of the types it applies to, a target
+class meets movement types, a train command meets its product. What depends on the
+situation stays with the entity-level attention over the frame.
 
-The tables are a function of the ruleset alone, so the encoder runs once per ruleset per batch
-(about 1600 tokens) and the entity tokens gather their rows (RulesetEncoder.lookup).
+The tables are a function of the ruleset alone, so the encoder runs once per ruleset per
+batch (about 1600 tokens) and the entity tokens gather their rows
+(RulesetEncoder.lookup).
 """
 
 import json
@@ -226,11 +228,11 @@ class RulesetEncoder(nn.Module):
         return {k: float(e.weight.norm(dim=-1).mean()) for k, e in self.res.items()}
 
     def lookup(self, rulesets, unit_api=None, abil_api=None, upg_names=None):
-        """Per-sample rows. rulesets: list of B keys; unit_api / abil_api: [B, ...] raw API ids
-        (0 / negative = none -> the unknown row for units, nothing for abilities); upg_names:
-        per sample a list of completed upgrade names -> the sum of their rows, [B, d]. Returns a
-        dict of the requested embeddings; samples of the same ruleset share one encoder pass and
-        one gather. Works for B = 0."""
+        """Per-sample rows. rulesets: list of B keys; unit_api / abil_api: [B, ...] raw
+        API ids (0 / negative = none -> the unknown row for units, nothing for
+        abilities); upg_names: per sample a list of completed upgrade names -> the sum
+        of their rows, [B, d]. Returns a dict of the requested embeddings; samples of
+        the same ruleset share one encoder pass and one gather. Works for B = 0."""
         dev = self.kind.weight.device
         keys = sorted(set(rulesets))
         emb = {key: self(key) for key in keys}

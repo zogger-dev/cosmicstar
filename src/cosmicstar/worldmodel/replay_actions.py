@@ -178,12 +178,13 @@ def user_slots(proto, archive):
 def _mask_positions(bits):
     """s2protocol bitmask (length n, value v) -> positions of the set bits.
 
-    The game writes the mask byte by byte (byte j holds positions 8j..8j+7, the last one only
-    n % 8 of them) and s2protocol reads all n bits as one big-endian integer, so byte 0 is the
-    top of v: position p is bit (w - 1 - p % 8) of the (p // 8)-th 8-bit group from the most
-    significant end, w the group's width. For n <= 8 this is just bit p of v; for longer masks
-    it is not (a 16-unit mask read as bit p was byte-swapped). Checked against the engine's
-    recipients (worldmodel/README.md, "Command recipients and control groups")."""
+    The game writes the mask byte by byte (byte j holds positions 8j..8j+7, the last one
+    only n % 8 of them) and s2protocol reads all n bits as one big-endian integer, so
+    byte 0 is the top of v: position p is bit (w - 1 - p % 8) of the (p // 8)-th 8-bit
+    group from the most significant end, w the group's width. For n <= 8 this is just
+    bit p of v; for longer masks it is not (a 16-unit mask read as bit p was
+    byte-swapped). Checked against the engine's recipients (worldmodel/README.md,
+    "Command recipients and control groups")."""
     n, v = bits
     out = []
     for b in range(n):  # b-th bit from the most significant end
@@ -195,7 +196,8 @@ def _mask_positions(bits):
 
 
 def parse(path):
-    """Replay file -> dict of numpy arrays (see the module doc) plus a meta JSON string."""
+    """Replay file -> dict of numpy arrays (see the module doc) plus a meta JSON
+    string."""
     import mpyq
 
     a = mpyq.MPQArchive(path)
@@ -221,7 +223,8 @@ def parse(path):
         rows["addsub_start"].append(len(rag["addsub_link"]))
 
     def remove_mask(mask):
-        """A removal mask (SELECT / GROUP rows) -> select_remove code, positions into rem_pos."""
+        """A removal mask (SELECT / GROUP rows) -> select_remove code, positions into
+        rem_pos."""
         kind, val = next(iter(mask.items()))
         code = {
             "None": REMOVE_NONE,

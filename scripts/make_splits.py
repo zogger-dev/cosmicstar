@@ -1,4 +1,5 @@
-"""Fixed train / held-out split for the world model, written once and reused by every run.
+"""Fixed train / held-out split for the world model, written once and reused by every
+run.
 
     held-out maps    every game on these maps is left out: does the model analyse maps it has
                      never seen, or memorize the ones it has?
@@ -6,8 +7,8 @@
                      matches it hasn't seen?
     train            everything else
 
-Games are ids from the replay tree (worldmodel/corpus.py), so a game's split doesn't depend
-on whether it's extracted yet, and one split serves every view of a game.
+Games are ids from the replay tree (worldmodel/corpus.py), so a game's split doesn't
+depend on whether it's extracted yet, and one split serves every view of a game.
 
     python scripts/make_splits.py --format 1v1 --maps "Ley Lines LE,Pylon LE" --out data/games/splits/default.json
 """
@@ -53,7 +54,8 @@ def main():
     args = ap.parse_args()
     if os.path.exists(args.out):
         sys.exit(
-            f"{args.out} exists; splits are fixed once made (delete it deliberately to remake)"
+            f"{args.out} exists; splits are fixed once made (delete it deliberately to"
+            " remake)"
         )
     index = corpus.load_index(args.replays, rebuild=True)
     names = [m.strip() for m in args.maps.split(",") if m.strip()]
@@ -89,8 +91,9 @@ def main():
         split["train"] += [f for i, f in enumerate(files) if i not in pick]
     json.dump(split, open(args.out, "w"), indent=1)
     print(
-        f"train {len(split['train'])} | held-out games {len(split['held_out_games'])} | "
-        f"held-out maps {split['held_out_maps']}: {len(split['held_out_map_games'])} games -> {args.out}"
+        f"train {len(split['train'])} | held-out games {len(split['held_out_games'])} |"
+        f" held-out maps {split['held_out_maps']}: {len(split['held_out_map_games'])}"
+        f" games -> {args.out}"
     )
 
 

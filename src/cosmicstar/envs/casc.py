@@ -1,10 +1,10 @@
 """Reading files out of the game's local CASC storage by name, through CascLib.
 
-StarCraft II's TACT root is an MNDX file: a compressed trie of file names (envs/tact.py can
-read the root's bytes from the storage but does not parse the trie). CascLib implements it,
-so this module loads libcasc.so (built from https://github.com/ladislav-zezula/CascLib, see
-the README) with ctypes and exposes three things: open a storage at a build, list files by a
-wildcard mask, read a file.
+StarCraft II's TACT root is an MNDX file: a compressed trie of file names (envs/tact.py
+can read the root's bytes from the storage but does not parse the trie). CascLib
+implements it, so this module loads libcasc.so (built from
+https://github.com/ladislav-zezula/CascLib, see the README) with ctypes and exposes
+three things: open a storage at a build, list files by a wildcard mask, read a file.
 
     from cosmicstar.envs.casc import Storage
     with Storage(install_dir, build_key="05cce99544c8b80c07f6eb3250b957a9") as st:
@@ -74,7 +74,8 @@ def load_library():
             last = e
     else:
         raise OSError(
-            f"libcasc.so not found (set $CASCLIB or build CascLib into lib/libcasc.so): {last}"
+            "libcasc.so not found (set $CASCLIB or build CascLib into lib/libcasc.so):"
+            f" {last}"
         )
     H = ctypes.c_void_p
     lib.CascOpenStorageEx.argtypes = [
@@ -118,8 +119,8 @@ def load_library():
 
 
 class Storage:
-    """A local CASC storage opened at one build (the active one, or `build_key`, a BuildConfig
-    hash present in the install's .build.info / SC2Data/config)."""
+    """A local CASC storage opened at one build (the active one, or `build_key`, a
+    BuildConfig hash present in the install's .build.info / SC2Data/config)."""
 
     def __init__(self, install, build_key=None, lib=None, code_name=None):
         self.lib = lib or load_library()
@@ -136,7 +137,8 @@ class Storage:
             None, ctypes.byref(args), False, ctypes.byref(self.handle)
         ):
             raise OSError(
-                f"CascOpenStorageEx({install}, build {build_key}) failed: error {self.lib.GetCascError()}"
+                f"CascOpenStorageEx({install}, build {build_key}) failed: error"
+                f" {self.lib.GetCascError()}"
             )
 
     def __enter__(self):
@@ -194,7 +196,8 @@ class Storage:
                 or got.value != size.value
             ):
                 raise OSError(
-                    f"{name}: CascReadFile read {got.value} of {size.value} bytes, error {self.lib.GetCascError()}"
+                    f"{name}: CascReadFile read {got.value} of {size.value} bytes,"
+                    f" error {self.lib.GetCascError()}"
                 )
             return buf.raw
         finally:

@@ -1,27 +1,29 @@
 """Stochastic latent actions: the distribution over what happens next.
 
-A predictor that gets only the present and is trained with a regression loss predicts the
-average of the futures that present allows (spire and hydralisk den at once), and a JEPA
-encoder then learns to stop representing whatever was unpredictable. The fix is a latent z
-per (pair, player) that the predictor is conditioned on, estimated three ways that differ
-only in what they see:
+A predictor that gets only the present and is trained with a regression loss predicts
+the average of the futures that present allows (spire and hydralisk den at once), and a
+JEPA encoder then learns to stop representing whatever was unpredictable. The fix is a
+latent z per (pair, player) that the predictor is conditioned on, estimated three ways
+that differ only in what they see:
 
     posterior  q(z | present, future)    the inverse model; training signal only
     commands   q(z | present, commands)  the command encoder; the controllable input
     prior      p(z | present)            what players tend to do from here; sampled at
                                          inference, a mixture so it can hold several branches
 
-Losses (as used by the pair model, now scripts/train_direct.py): the predictor is driven by a sample of the posterior (or of the
-command distribution); KL(posterior || prior) is charged per nat above --free_nats (the
-decision itself is always affordable) and trains the prior; KL(posterior || commands) ties
-the command encoder to what actually happened; an entropy bonus on the prior's batch-mean
-component usage and an optional repulsion between component means keep the mixture's
-components distinct (the same job as load balancing in a mixture of experts).
+Losses (as used by the pair model, now scripts/train_direct.py): the predictor is driven
+by a sample of the posterior (or of the command distribution); KL(posterior || prior) is
+charged per nat above --free_nats (the decision itself is always affordable) and trains
+the prior; KL(posterior || commands) ties the command encoder to what actually happened;
+an entropy bonus on the prior's batch-mean component usage and an optional repulsion
+between component means keep the mixture's components distinct (the same job as load
+balancing in a mixture of experts).
 
-Diagnostics: KL in nats, active units (posterior means that vary across data, Burda et al.),
-effective number of components used, and in evaluation the prediction error with the prior's
-mean vs one sample vs the best of K samples vs the posterior (the oracle). A gap between the
-mean and best-of-K says the future was multimodal and the prior spans it.
+Diagnostics: KL in nats, active units (posterior means that vary across data, Burda et
+al.), effective number of components used, and in evaluation the prediction error with
+the prior's mean vs one sample vs the best of K samples vs the posterior (the oracle). A
+gap between the mean and best-of-K says the future was multimodal and the prior spans
+it.
 """
 
 import math
@@ -57,9 +59,9 @@ def kl_gauss(mu_q, lv_q, mu_p, lv_p):
 
 
 class MixturePrior(nn.Module):
-    """p(z | present) per player: a mixture of K diagonal Gaussians whose weights, means and
-    variances are functions of the present frame's CLS slot and the player's slot. K = 1 is a
-    plain Gaussian prior."""
+    """p(z | present) per player: a mixture of K diagonal Gaussians whose weights, means
+    and variances are functions of the present frame's CLS slot and the player's slot. K
+    = 1 is a plain Gaussian prior."""
 
     def __init__(self, d, d_z, K=8, max_players=8):
         super().__init__()
@@ -78,7 +80,8 @@ class MixturePrior(nn.Module):
             self.net[-1].weight.mul_(0.5)
 
     def forward(self, cls, ply):
-        """cls [B, d], ply [B, P, d] -> dict(logits [B, P, K], mu [B, P, K, d_z], lv [B, P, K, d_z])."""
+        """cls [B, d], ply [B, P, d] -> dict(logits [B, P, K], mu [B, P, K, d_z], lv [B,
+        P, K, d_z])."""
         B, P, _ = ply.shape
         x = torch.cat(
             [
@@ -116,7 +119,8 @@ def mix_mean(p):
 
 @torch.no_grad()
 def mix_sample(p):
-    """One z per (pair, player) from the mixture: pick a component, then its Gaussian."""
+    """One z per (pair, player) from the mixture: pick a component, then its
+    Gaussian."""
     k = torch.distributions.Categorical(logits=p["logits"]).sample()  # [B, P]
     idx = k[..., None, None].expand(-1, -1, 1, p["mu"].shape[-1])
     mu, lv = p["mu"].gather(2, idx)[:, :, 0], p["lv"].gather(2, idx)[:, :, 0]
@@ -124,13 +128,15 @@ def mix_sample(p):
 
 
 def kl_mc(z, mu_q, lv_q, p):
-    """A one-sample estimate of KL(q || p) for a Gaussian q and a mixture p, with z ~ q."""
+    """A one-sample estimate of KL(q || p) for a Gaussian q and a mixture p, with z ~
+    q."""
     return gauss_logp(z, mu_q, lv_q) - mix_logp(z, p)
 
 
 def usage(resp, mask):
     """How evenly the prior's components are used over a batch: (loss = log K - H(mean
-    responsibility), effective number of components = exp H). resp [B, P, K], mask [B, P].
+    responsibility), effective number of components = exp H). resp [B, P, K], mask [B,
+    P].
     """
     m = mask.float()[..., None]
     r = (resp * m).sum((0, 1)) / m.sum().clamp(min=1)
@@ -139,7 +145,8 @@ def usage(resp, mask):
 
 
 def diversity(p, mask):
-    """Repulsion between a state's component means: mean |cosine| over component pairs."""
+    """Repulsion between a state's component means: mean |cosine| over component
+    pairs."""
     mu = F.normalize(p["mu"], dim=-1)  # [B, P, K, d_z]
     K = mu.shape[-2]
     if K < 2:
@@ -152,26 +159,28 @@ def diversity(p, mask):
 
 
 def active_units(post_mu, threshold=0.01):
-    """Burda et al.: dimensions whose posterior mean varies across data. post_mu [N, d_z]."""
+    """Burda et al.: dimensions whose posterior mean varies across data. post_mu [N,
+    d_z]."""
     if len(post_mu) < 2:
         return 0
     return int((post_mu.var(0) > threshold).sum())
 
 
-# ------------------------------------------------------------------ categorical latent (DreamerV3 style)
-# z = G one-hot variables with C classes each (32 x 32: ~2^160 states); logits [..., G, C].
+# ------------------------------------------------- categorical latent (DreamerV3 style)
+# z = G one-hot variables with C classes each (32 x 32: ~2^160 states); logits [..., G,
+# C].
 
 
 def cat_probs(logits, unimix=0.01):
-    """Class probabilities with `unimix` of uniform mixed in: no class reaches probability 0,
-    which keeps the KL bounded (DreamerV3)."""
+    """Class probabilities with `unimix` of uniform mixed in: no class reaches
+    probability 0, which keeps the KL bounded (DreamerV3)."""
     p = F.softmax(logits.float(), -1)
     return (1 - unimix) * p + unimix / p.shape[-1]
 
 
 def cat_sample(probs):
-    """One-hot sample per variable with a straight-through gradient: forward is discrete, the
-    backward pass flows through the probabilities."""
+    """One-hot sample per variable with a straight-through gradient: forward is
+    discrete, the backward pass flows through the probabilities."""
     idx = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1).view(
         probs.shape[:-1]
     )
@@ -190,9 +199,10 @@ def cat_kl(p, q):
 
 
 def cat_kl_balanced(post, prior, w_dyn=0.5, w_rep=0.1, free=1.0):
-    """DreamerV3's KL balancing with free bits: the prior learns to predict the posterior
-    (w_dyn, posterior stopped), the posterior is only lightly pulled toward the prior (w_rep,
-    prior stopped); each side is free below `free` nats. Returns (charged [...], raw KL [...]).
+    """DreamerV3's KL balancing with free bits: the prior learns to predict the
+    posterior (w_dyn, posterior stopped), the posterior is only lightly pulled toward
+    the prior (w_rep, prior stopped); each side is free below `free` nats. Returns
+    (charged [...], raw KL [...]).
     """
     dyn = cat_kl(post.detach(), prior)
     rep = cat_kl(post, prior.detach())
@@ -202,8 +212,8 @@ def cat_kl_balanced(post, prior, w_dyn=0.5, w_rep=0.1, free=1.0):
 
 
 class CategoricalPrior(nn.Module):
-    """p(z | input) as G x C logits per (sample, player): the input is what PriorHead reads
-    (CLS, the player's slot, its command summary or 'withheld')."""
+    """p(z | input) as G x C logits per (sample, player): the input is what PriorHead
+    reads (CLS, the player's slot, its command summary or 'withheld')."""
 
     def __init__(self, d_in, groups=32, classes=32, hidden=None):
         super().__init__()

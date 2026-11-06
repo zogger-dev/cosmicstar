@@ -20,15 +20,17 @@
     data/games/logs/<run>.log, <run>.json                  each extraction run's worker output and
                                                            its settings / job list
 
-<id> is the first 16 hex digits of the sha1 of the replay file: the same game from two packs
-is one game (both packs listed in its sidecar), a renamed file is not a new game. <format> is
-1v1, 2v2, ..., ffa, from the replay's teams; <build> the base build; <map> the first MAP_HEX
-digits of the map file's hash (the replay's cache handle, what the engine actually loaded): a
-tournament's own version of a ladder map, or a map's next revision, is a different directory
-even under the same name, and the same map under two names is one (the sidecar has the name;
-maps.json lists them). Pruning: a format, patch or map is one
+<id> is the first 16 hex digits of the sha1 of the replay file: the same game from two
+packs is one game (both packs listed in its sidecar), a renamed file is not a new game.
+<format> is 1v1, 2v2, ..., ffa, from the replay's teams; <build> the base build; <map>
+the first MAP_HEX digits of the map file's hash (the replay's cache handle, what the
+engine actually loaded): a tournament's own version of a ladder map, or a map's next
+revision, is a different directory even under the same name, and the same map under two
+names is one (the sidecar has the name; maps.json lists them). Pruning: a format, patch
+or map is one
 directory in both trees; anything else is a query over the sidecars (or index.json) that
-yields ids, then those ids' files. scripts/ingest_replays.py sorts packs into the replay tree.
+yields ids, then those ids' files. scripts/ingest_replays.py sorts packs into the replay
+tree.
 """
 
 import collections
@@ -56,13 +58,15 @@ def game_id(path_or_bytes):
 
 
 def map_slug(name):
-    """'Ley Lines LE' -> 'ley_lines_le'; anything not alphanumeric becomes one underscore."""
+    """'Ley Lines LE' -> 'ley_lines_le'; anything not alphanumeric becomes one
+    underscore."""
     s = re.sub(r"[^0-9a-z]+", "_", name.lower()).strip("_")
     return s or "unknown"
 
 
 def game_format(players):
-    """'1v1', '2v2', ..., 'ffa' (3+ teams of one), else the team sizes joined ('1v2')."""
+    """'1v1', '2v2', ..., 'ffa' (3+ teams of one), else the team sizes joined
+    ('1v2')."""
     sizes = sorted(collections.Counter(p["team"] for p in players).values())
     if not sizes:
         return "empty"
@@ -82,7 +86,7 @@ def rel_dir(fmt, base_build, map_hash):
     return os.path.join(fmt, str(base_build), map_dir(map_hash))
 
 
-# ---------------------------------------------------------------- replay metadata (no engine)
+# ---------------------------------------------------------- replay metadata (no engine)
 
 
 def _s(b):
@@ -110,7 +114,8 @@ def ruleset_key(base_build, data_version, mods):
 
 
 def filetime_iso(ft, offset=0):
-    """A Windows FILETIME (100 ns since 1601, as the replay's m_timeUTC) -> ISO 8601 UTC."""
+    """A Windows FILETIME (100 ns since 1601, as the replay's m_timeUTC) -> ISO 8601
+    UTC."""
     try:
         t = datetime.datetime(
             1601, 1, 1, tzinfo=datetime.timezone.utc
@@ -121,8 +126,8 @@ def filetime_iso(ft, offset=0):
 
 
 def replay_info(path):
-    """Cheap metadata from the replay file (no engine): builds, map and its depot handles,
-    ruleset, duration, players with MMR, date."""
+    """Cheap metadata from the replay file (no engine): builds, map and its depot
+    handles, ruleset, duration, players with MMR, date."""
     import mpyq
     from cosmicstar.envs import depot
 
@@ -146,7 +151,8 @@ def replay_info(path):
         for i, p in enumerate(det["m_playerList"])
     ]
     map_cells = None
-    try:  # MMR lives with the lobby user; players and users meet through the working-set slot
+    # MMR lives with the lobby user; players and users meet through the working-set slot
+    try:
         init = proto.decode_replay_initdata(a.read_file("replay.initData"))[
             "m_syncLobbyState"
         ]
@@ -186,8 +192,8 @@ def replay_info(path):
 
 
 def replay_sidecar(info, gid, rel_path, source):
-    """The <id>.json next to a replay. source: {"pack": ..., "file": original name} (merged
-    into a list when the same game arrives again)."""
+    """The <id>.json next to a replay. source: {"pack": ..., "file": original name}
+    (merged into a list when the same game arrives again)."""
     keep = (
         "format",
         "build",
@@ -224,7 +230,8 @@ def replay_sidecar(info, gid, rel_path, source):
 
 
 def iter_sidecars(root=REPLAYS, fmt=None):
-    """(path, sidecar dict) for every replay sidecar under root (format filtered if given)."""
+    """(path, sidecar dict) for every replay sidecar under root (format filtered if
+    given)."""
     top = os.path.join(root, fmt) if fmt else root
     for dirpath, dirnames, filenames in os.walk(top):
         dirnames.sort()
@@ -241,8 +248,8 @@ MAPS = "maps.json"
 
 
 def build_index(root=REPLAYS):
-    """Rewrites root/index.json ({id: sidecar}) and root/maps.json ({map dir: {name, names,
-    games, builds, hash}}). Returns the index."""
+    """Rewrites root/index.json ({id: sidecar}) and root/maps.json ({map dir: {name,
+    names, games, builds, hash}}). Returns the index."""
     index = {d["id"]: d for _, d in iter_sidecars(root)}
     maps = {}
     for d in index.values():
@@ -266,8 +273,8 @@ def build_index(root=REPLAYS):
 
 
 def map_dirs_named(index, names):
-    """The map directories whose name or hash prefix matches any of names (names: real map
-    names, slugs, or hash prefixes)."""
+    """The map directories whose name or hash prefix matches any of names (names: real
+    map names, slugs, or hash prefixes)."""
     want = {map_slug(n) for n in names} | {n.lower() for n in names}
     out = set()
     for d in index.values():
@@ -346,8 +353,8 @@ def read_meta(path):
 
 
 def update_meta(path, slot, record):
-    """Merges one view's record into <id>.meta.json under a file lock (two workers finish a
-    game's two views independently)."""
+    """Merges one view's record into <id>.meta.json under a file lock (two workers
+    finish a game's two views independently)."""
     import fcntl
 
     lock = path + ".lock"

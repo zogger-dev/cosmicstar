@@ -1,5 +1,7 @@
-"""What the physics model has to beat, on the same store and windows (DESIGN_physics.md "Evaluation"): copy the last frame; follow the current order at
-the unit type's usual speed. Position by split, moving and still rows apart, neutrals and critters apart, plus rare changes against copying.
+"""What the physics model has to beat, on the same store and windows (DESIGN_physics.md
+"Evaluation"): copy the last frame; follow the current order at the unit type's usual
+speed. Position by split, moving and still rows apart, neutrals and critters apart, plus
+rare changes against copying.
 
     python scripts/physics_baselines.py --windows 300
 """
@@ -27,7 +29,8 @@ I = {n: i for i, n in enumerate(physics_data.RAW_NUMS)}
 
 
 def first_order_target(w):
-    """[F, R, 2] each row's first order target position (NaN: none): a point, or the targeted row's position."""
+    """[F, R, 2] each row's first order target position (NaN: none): a point, or the
+    targeted row's position."""
     out = np.full(w["mask"].shape + (2,), np.nan, np.float32)
     if not w["ord_where"]:
         return out
@@ -167,7 +170,8 @@ def main():
                 measure(w, acc=acc)
         print(f"\n== {name}: {len(ids)} games, {args.windows} windows of {args.frames}")
         print(
-            f"{'':16s} {'tokens':>10s} | {'copy: mean':>11s} {'median':>7s} {'p99':>7s} | {'follow: mean':>12s} {'median':>7s} {'p99':>7s}"
+            f"{'':16s} {'tokens':>10s} | {'copy: mean':>11s} {'median':>7s} {'p99':>7s}"
+            f" | {'follow: mean':>12s} {'median':>7s} {'p99':>7s}"
         )
         for k in (
             "player moving",
@@ -181,7 +185,9 @@ def main():
                 continue
             c, f = np.concatenate(acc["copy"][k]), np.concatenate(acc["follow"][k])
             print(
-                f"{k:16s} {len(c):10d} | {c.mean():11.4f} {np.median(c):7.3f} {np.percentile(c, 99):7.3f} | {f.mean():12.4f} {np.median(f):7.3f} {np.percentile(f, 99):7.3f}"
+                f"{k:16s} {len(c):10d} | {c.mean():11.4f} {np.median(c):7.3f}"
+                f" {np.percentile(c, 99):7.3f} | {f.mean():12.4f} {np.median(f):7.3f}"
+                f" {np.percentile(f, 99):7.3f}"
             )
         cnt = acc["count"]
         print(
@@ -193,7 +199,9 @@ def main():
             },
         )
         print(
-            f"births per loop {cnt['births'] / cnt['frames']:.4f}, frames with a birth {cnt['frames_with_birth'] / cnt['frames']:.4f}, deaths per loop {cnt['deaths'] / cnt['frames']:.4f}",
+            f"births per loop {cnt['births'] / cnt['frames']:.4f}, frames with a birth"
+            f" {cnt['frames_with_birth'] / cnt['frames']:.4f}, deaths per loop"
+            f" {cnt['deaths'] / cnt['frames']:.4f}",
             flush=True,
         )
         res[name] = {k: float(np.concatenate(v).mean()) for k, v in acc["copy"].items()}

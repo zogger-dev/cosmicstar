@@ -1,11 +1,15 @@
-"""The physics model's training store (DESIGN_physics.md): any window of a game read straight from its Arrow views.
+"""The physics model's training store (DESIGN_physics.md): any window of a game read
+straight from its Arrow views.
 
-A game is two views, p1 and p2, each with that player's own units and the neutrals as that player knows them. Players are indexed 0,
-1 (neutral 2). An own row comes from its player's view. A neutral row joins both views: it keeps one row by its type and place, since a
-neutral out of sight is a snapshot under another tag; critters go by tag and exist only while seen. <game>.index.npz (build_index, once
-per game) holds what a window can't work out on its own: each row's first and last frame, its death frame and its parent, and each
-neutral's contents as last seen, since a snapshot reports none. Contents change only in a player's view, so before they are first seen
-they are what they are when they are.
+A game is two views, p1 and p2, each with that player's own units and the neutrals as
+that player knows them. Players are indexed 0, 1 (neutral 2). An own row comes from its
+player's view. A neutral row joins both views: it keeps one row by its type and place,
+since a neutral out of sight is a snapshot under another tag; critters go by tag and
+exist only while seen. <game>.index.npz (build_index, once per game) holds what a window
+can't work out on its own: each row's first and last frame, its death frame and its
+parent, and each neutral's contents as last seen, since a snapshot reports none.
+Contents change only in a player's view, so before they are first seen they are what
+they are when they are.
 
 A sequence is a grid, frames x rows, with a unit on the same row throughout:
 
@@ -13,7 +17,8 @@ A sequence is a grid, frames x rows, with a unit on the same row throughout:
     alive      false from the frame after its death: the row keeps its last values, hit points and shields 0
     inside     0 on the map, 1 passenger, 2 in a gas building (bridged as tokenize._gas_gaps does), with parent_row
 
-Targets are the same columns one frame later. Births are rows whose first frame in the whole game is inside the window.
+Targets are the same columns one frame later. Births are rows whose first frame in the
+whole game is inside the window.
 """
 
 import glob
@@ -64,10 +69,12 @@ MARGIN = (
 PATCH = 3  # real cells per side each 64-level map token reads
 TOP = 64  # map tokens per side
 C_DYNAMIC = 6  # map layers decoded: (visible, seen, creep) per player
+# map layers read: (visible, seen, creep, pathable, buildable) per player; height per
+# player, playable, known
 C_LIVE, C_STATIC = (
     10,
     4,
-)  # map layers read: (visible, seen, creep, pathable, buildable) per player; height per player, playable, known
+)
 MAX_ROWS = 4096
 SNAPSHOT = 2  # u_display
 
@@ -86,8 +93,9 @@ def base_paths(root, split_ids):
 
 
 def build_index(base, replay_path=None):
-    """One game's <base>.index.npz: for each view, row ids with first frame, last frame, death frame (-1: never) and parent id
-    (-1: none), and frames of the game. Parents come from the replay's creator tags, so own-view ids only.
+    """One game's <base>.index.npz: for each view, row ids with first frame, last frame,
+    death frame (-1: never) and parent id (-1: none), and frames of the game. Parents
+    come from the replay's creator tags, so own-view ids only.
     """
     out = {}
     for s in VIEWS:
@@ -136,8 +144,9 @@ def build_index(base, replay_path=None):
 
 
 def _neutral_index(base):
-    """The neutrals' rows over both views: each view's unit id -> a neutral id (nid<view>, -1: not neutral), each neutral's first, last and
-    death frame, and its contents whenever they change while seen, per neutral (nlog_*).
+    """The neutrals' rows over both views: each view's unit id -> a neutral id
+    (nid<view>, -1: not neutral), each neutral's first, last and death frame, and its
+    contents whenever they change while seen, per neutral (nlog_*).
     """
     keys, out, rows, deaths = {}, {}, [], []
     for s in VIEWS:
@@ -204,7 +213,8 @@ def _neutral_index(base):
 
 
 def _parents(replay_path, unit_tag, ids):
-    """A view's row ids -> their creator's id, from the replay's SUnitBornEvent (-1: no creator, or not this view's)."""
+    """A view's row ids -> their creator's id, from the replay's SUnitBornEvent (-1: no
+    creator, or not this view's)."""
     import mpyq
     from . import replay_actions
 
@@ -234,7 +244,8 @@ def _own_mask(owner, s):
 
 
 class Game:
-    """One game's two views, opened lazily: batches are memory mapped, so windows of many games can be read without holding any."""
+    """One game's two views, opened lazily: batches are memory mapped, so windows of
+    many games can be read without holding any."""
 
     def __init__(self, base, vocab):
         self.base, self.vocab = base, vocab
@@ -261,9 +272,9 @@ class Game:
         self.side = float(max(x1 - x0, y1 - y0))
         self.cells = self._cell_index()
         h_ = d["map_terrain_height"].reshape(H, W)[y0:y1, x0:x1]
-        self.static_grid = np.stack(
-            [h_, h_, np.ones_like(h_), np.ones_like(h_)], -1
-        )  # [h, w, C_STATIC]: height per player, then playable and known: zero only where a batch pads
+        # [h, w, C_STATIC]: height per player, then playable and known: zero only where
+        # a batch pads
+        self.static_grid = np.stack([h_, h_, np.ones_like(h_), np.ones_like(h_)], -1)
         self.grp = {
             s: (
                 (self.rest[s]["grp_start"], self.rest[s]["grp_id"])
@@ -277,7 +288,9 @@ class Game:
             for s in (1, 2)
         }
         self.acts = None
-        # any view's unit id -> a flat index over all rows: tags are the same in every view, so a pointer reaches a row in another view, and a neutral's tags all reach its one row
+        # any view's unit id -> a flat index over all rows: tags are the same in every
+        # view, so a pointer reaches a row in another view, and a neutral's tags all
+        # reach its one row
         tags = {s: self.rest[s]["unit_tag"] for s in VIEWS}
         self.flat_off, n, tag_flat = {}, 0, {}
         for s in VIEWS:
@@ -297,8 +310,10 @@ class Game:
         }
 
     def _cell_index(self):
-        """(y, x) real cell of each of the PATCH x PATCH samples of each map token: [TOP, TOP, PATCH * PATCH]. Tokens cover a square of the
-        playable area's longest side, around its center; samples outside the map clip to its edge, where playable is false.
+        """(y, x) real cell of each of the PATCH x PATCH samples of each map token:
+        [TOP, TOP, PATCH * PATCH]. Tokens cover a square of the playable area's longest
+        side, around its center; samples outside the map clip to its edge, where
+        playable is false.
         """
         s = self.side / TOP
         c = (np.arange(TOP) + 0.5) * s - self.side / 2
@@ -318,7 +333,8 @@ class Game:
         return np.clip(y, 0, self.H - 1), np.clip(x, 0, self.W - 1)
 
     def _read(self, s, f0, f1, neutral=False):
-        """View s, frames [f0, f1): its own rows', or the neutrals', columns and list columns, oldest first, already decoded and filtered."""
+        """View s, frames [f0, f1): its own rows', or the neutrals', columns and list
+        columns, oldest first, already decoded and filtered."""
         r, _ = self.views[s]
         out_u, out_l = [], []
         for i in range(
@@ -328,17 +344,19 @@ class Game:
                 self._batches[(s, i)] = arrow_state.read_units(r, i)
             u, l, fr = self._batches[(s, i)]
             keep = _own_mask(u["u_owner"], 0 if neutral else s) & (fr >= f0) & (fr < f1)
-            if (
-                not neutral
-            ):  # a player's own snapshots are not units (see the desync check): tags outside the replay's log
+            # a player's own snapshots are not units (see the desync check): tags
+            # outside the replay's log
+            if not neutral:
                 keep &= u["u_display"] != SNAPSHOT
             out_u.append({k: v[keep] for k, v in u.items()} | {"frame": fr[keep]})
             out_l.append((keep, l))
         return out_u, out_l
 
     def window(self, t0, L, swap=False):
-        """L consecutive frames from frame t0, as one dict of numpy arrays: see the module docstring. One window at a time per game: a window keeps its
-        row map and batches on the game, and two threads reading the same game would map one window's targets with the other's rows.
+        """L consecutive frames from frame t0, as one dict of numpy arrays: see the
+        module docstring. One window at a time per game: a window keeps its row map and
+        batches on the game, and two threads reading the same game would map one
+        window's targets with the other's rows.
         """
         with self._window_lock:
             return self._window(t0, L, swap)
@@ -408,8 +426,10 @@ class Game:
         return out
 
     def _autocast(self, t0, L):
-        """Each row's remembered autocast toggles per frame: [(frame, row, family, button, on)]. A toggle at loop l first shows in the frame after l's, like
-        any other action's effect. A unit never toggled has no entry: its default isn't known.
+        """Each row's remembered autocast toggles per frame: [(frame, row, family,
+        button, on)]. A toggle at loop l first shows in the frame after l's, like any
+        other action's effect. A unit never toggled has no entry: its default isn't
+        known.
         """
         out = []
         for s, events in getattr(self, "autocast", {}).items():
@@ -432,7 +452,8 @@ class Game:
         return np.array(rows, np.int64).reshape(-1, 5)
 
     def _effects(self, t0, L, swap):
-        """Both player views' effects, side by side with no merging, since each view has only some: (frame, type, owner index, x, y, radius)."""
+        """Both player views' effects, side by side with no merging, since each view has
+        only some: (frame, type, owner index, x, y, radius)."""
         rows = []
         for s in (1, 2):
             d = self.rest[s]
@@ -467,7 +488,8 @@ class Game:
         )
 
     def _players(self, t0, L, swap):
-        """[L, 2, C_PLY]: each player's PC_KEYS numbers and camera, from their own view."""
+        """[L, 2, C_PLY]: each player's PC_KEYS numbers and camera, from their own
+        view."""
         out = np.zeros((L, 2, len(PC_KEYS) + 3), np.float32)
         for pi, s in enumerate((1, 2)):
             at = 1 - pi if swap else pi
@@ -498,7 +520,8 @@ class Game:
         return out
 
     def _load_actions(self, avocab):
-        """The game's action tokens, once. The tags of both views' rows stand in for one id space; a neutral's tags all stand for its one row."""
+        """The game's action tokens, once. The tags of both views' rows stand in for one
+        id space; a neutral's tags all stand for its one row."""
         tags, key = [], []
         for s in VIEWS:
             ut = self.rest[s]["unit_tag"]
@@ -513,7 +536,8 @@ class Game:
         stub = types.SimpleNamespace(meta=self.meta, unit_tag=tags, vocab=self.vocab)
         self.acts = GameActions(self.base + ".acts.npz", stub, avocab)
         self.act_key = key
-        # autocast: the observation never shows it, so each toggle's state is remembered per unit: (loop, on, family, button, unit ids) per view
+        # autocast: the observation never shows it, so each toggle's state is remembered
+        # per unit: (loop, on, family, button, unit ids) per view
         table = avocab.ruleset_table(self.meta)
         links = {int(k): v for k, v in table["links"].items()}
         self.autocast = {}
@@ -536,7 +560,8 @@ class Game:
             self.autocast[s] = ev
 
     def _actions(self, t0, L, row_of, swap):
-        """Tokens in frames [t0, t0 + L): an action at loop l is in the frame of that loop, so it reads the state it was given on and affects the next frame."""
+        """Tokens in frames [t0, t0 + L): an action at loop l is in the frame of that
+        loop, so it reads the state it was given on and affects the next frame."""
         tk = self.acts.tok
         lo, hi = t0 + 1, t0 + 1 + L
         idx = np.nonzero((tk["loop"] >= lo) & (tk["loop"] < hi) & (tk["kind"] > 0))[0]
@@ -588,7 +613,8 @@ class Game:
         return d - t0 if t0 <= d < t0 + L else -1
 
     def _fill(self, out, s, t0, L, row_of):
-        """Writes view s's rows of the window into the grid, then bridges passengers and gas workers."""
+        """Writes view s's rows of the window into the grid, then bridges passengers and
+        gas workers."""
         if s == 0:
             return self._fill_neutrals(out, t0, L, row_of)
         lo, hi = max(0, t0 - MARGIN), min(self.F, t0 + L + MARGIN)
@@ -618,7 +644,8 @@ class Game:
             self._contained(out, s, t0, L, row_of, u, bags)
 
     def _fill_neutrals(self, out, t0, L, row_of):
-        """Neutrals from both views: a snapshot first, then what a player sees over it, once. Contents as last seen."""
+        """Neutrals from both views: a snapshot first, then what a player sees over it,
+        once. Contents as last seen."""
         ix = self.index[0]
         nid_row = np.full(len(ix["id"]), -1, np.int64)
         for (s, k), r_ in row_of.items():
@@ -690,7 +717,8 @@ class Game:
                         out["groups"][f, r_, k] = 1
 
     def _bags(self, out, bags, src, fo, ro, s):
-        """Orders, production, buffs and rally points of the window's rows, as flat lists: (frame, row, ...)."""
+        """Orders, production, buffs and rally points of the window's rows, as flat
+        lists: (frame, row, ...)."""
         pos = np.full(sum(len(b[1]) for b in bags), -1, np.int64)
         pos[src] = np.arange(len(src))
         for off, idx, l in bags:
@@ -725,7 +753,8 @@ class Game:
                 out[f"{name}_vals"].append(np.stack(st, 1))
 
     def _contained(self, out, s, t0, L, row_of, u, bags):
-        """Rows missing from their frame: passengers from their transport's list, gas workers from the order they vanished under."""
+        """Rows missing from their frame: passengers from their transport's list, gas
+        workers from the order they vanished under."""
         order = np.lexsort((u["frame"], u["u_id"]))
         ids, fr = u["u_id"][order], u["frame"][order]
         cut = np.nonzero(np.diff(ids) == 0)[0]
@@ -805,7 +834,8 @@ class Game:
         return None
 
     def _dead_rows(self, out, rows, t0, L):
-        """After a death a row keeps its last values with hit points and shields 0, and isn't alive."""
+        """After a death a row keeps its last values with hit points and shields 0, and
+        isn't alive."""
         for r_, (s, k) in enumerate(rows):
             d = self._death(s, k, t0, L)
             died_before = 0 <= self.index[s]["death"][k] < t0
@@ -836,8 +866,9 @@ class Game:
             out["alive"][d + 1 :, r_] = False
 
     def _map_frames(self, t0, L, swap):
-        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen and creep, the next-frame targets; and [L, h, w, C_LIVE], the playable area at its own
-        size with each player's pathable and buildable too, the input."""
+        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen
+        and creep, the next-frame targets; and [L, h, w, C_LIVE], the playable area at
+        its own size with each player's pathable and buildable too, the input."""
         out = np.zeros((L, TOP, TOP, C_DYNAMIC * PATCH * PATCH), np.uint8)
         x0, y0, x1, y1 = self.playable
         grid = np.zeros((L, y1 - y0, x1 - x0, C_LIVE), np.uint8)
@@ -899,7 +930,8 @@ def _blank(L, R):
     return out
 
 
-# the raw numbers each row carries, unscaled: the model embeds them, the raw heads predict them
+# the raw numbers each row carries, unscaled: the model embeds them, the raw heads
+# predict them
 RAW_NUMS = (
     "hp",
     "shield",
@@ -949,12 +981,15 @@ def _set(out, u, src, fo, ro, game):
 
 
 QUEUE, PROD = 8, 8  # order and production slots with targets (physics.RowHead)
-CODE = 64  # a row's identity code: random per window, so it means nothing but which row, and pointers can be read by matching it
+# a row's identity code: random per window, so it means nothing but which row, and
+# pointers can be read by matching it
+CODE = 64
 FORCED = 16  # map tokens under effects always among each frame's decoded sample
 
 
 def collate(windows, vocab, rng=None):
-    """Windows of the same length -> one batch of tensors: grids [B, F, R, ...], lists flat by (B * F + f) * R + r. rng: for the rows' identity codes."""
+    """Windows of the same length -> one batch of tensors: grids [B, F, R, ...], lists
+    flat by (B * F + f) * R + r. rng: for the rows' identity codes."""
     import torch
 
     B, F_ = len(windows), windows[0]["mask"].shape[0]
@@ -1002,7 +1037,8 @@ def collate(windows, vocab, rng=None):
         "map_id",
     ):
         out[k] = torch.from_numpy(np.stack([w[k] for w in windows]))
-    # the map at its own size, zero past its edge: the known layer tells. Sizes are multiples of 8, the tower's reduction
+    # the map at its own size, zero past its edge: the known layer tells. Sizes are
+    # multiples of 8, the tower's reduction
     gh, gw = (
         int(np.ceil(max(w["grid"].shape[i] for w in windows) / 8)) * 8 for i in (1, 2)
     )
@@ -1162,7 +1198,8 @@ def collate(windows, vocab, rng=None):
     out["birth_b"], out["birth_f"], out["birth_r"], out["birth_p"] = (
         torch.tensor(x, dtype=torch.int64) for x in (bb, ff, rr, pp)
     )
-    # actions: each frame has K slots per player, player 0's then player 1's, in the order given; a player's timeline is its slots frame after frame
+    # actions: each frame has K slots per player, player 0's then player 1's, in the
+    # order given; a player's timeline is its slots frame after frame
     K = 1
     for w in windows:
         if len(w["actions"]["frame"]):

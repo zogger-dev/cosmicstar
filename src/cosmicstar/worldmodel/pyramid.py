@@ -1,7 +1,7 @@
 """Pyramid state encoder: entities and the map grid, joined level by level.
 
-Levels (cell size in map units; the canvas is the map at one cell per map unit, padded to a
-multiple of 16):
+Levels (cell size in map units; the canvas is the map at one cell per map unit, padded
+to a multiple of 16):
 
     Every level runs 3 conv blocks on the map (depthwise 3 x 3 + MLP), then 3 attention blocks.
 
@@ -15,21 +15,23 @@ multiple of 16):
     s = 8, 16     full levels: CLS, players, every map cell, every unit and effect and a null token
                   in one sequence under full self-attention (after the level's conv blocks on the map).
 
-All attention uses 2D RoPE in map units (offsets from the playable area's center): units at their
-exact positions, cells at their centers, CLS / players / null at the origin. The null key gives
-softmax attention a way to say "little here", so twenty zerglings don't read like one.
+All attention uses 2D RoPE in map units (offsets from the playable area's center): units
+at their exact positions, cells at their centers, CLS / players / null at the origin.
+The null key gives softmax attention a way to say "little here", so twenty zerglings
+don't read like one.
 
-Entity tokens are the flat encoder's (encoder.StateEncoder.entity_tokens) plus layout 2: the
-list-valued state pooled into the token (orders, production, buffs, available abilities, rally
-points: per item a table embedding + an MLP of its numbers, averaged, then a linear map of the mean
-and the log count per list)
-and a pointer to the unit's container or building (its token through a linear map). Units keep
-width d through every level, and so do the map cells (decision, user, 2026-10-31: one width
-throughout, so units and cells exchange information at full width with no projection; a narrower
-map at the fine levels is a later option, `widths`, which then projects units into it).
+Entity tokens are the flat encoder's (encoder.StateEncoder.entity_tokens) plus layout 2:
+the list-valued state pooled into the token (orders, production, buffs, available
+abilities, rally points: per item a table embedding + an MLP of its numbers, averaged,
+then a linear map of the mean and the log count per list)
+and a pointer to the unit's container or building (its token through a linear map).
+Units keep width d through every level, and so do the map cells (decision, user,
+2026-10-31: one width throughout, so units and cells exchange information at full width
+with no projection; a narrower map at the fine levels is a later option, `widths`, which
+then projects units into it).
 
-Output: the token sequence [CLS, players, units, effects, the s = 16 map cells] with its mask and
-the predictor's rotation angles; units sit at [1 + P, 1 + P + N_units).
+Output: the token sequence [CLS, players, units, effects, the s = 16 map cells] with its
+mask and the predictor's rotation angles; units sit at [1 + P, 1 + P + N_units).
 """
 
 import torch
@@ -63,8 +65,9 @@ def _rot(x, ang):
 def _pairs_within(cell_key, valid, offsets_key, n_per):
     """Pairs (query i, key j) with key j's cell in query i's 3 x 3 neighborhood.
 
-    cell_key [M]: flat (sample, cell) key of each item; valid [M]; offsets_key [M, 9]: the 9
-    neighbor keys of each query (-1 = off the canvas). Returns query and key indices (flat).
+    cell_key [M]: flat (sample, cell) key of each item; valid [M]; offsets_key [M, 9]:
+    the 9 neighbor keys of each query (-1 = off the canvas). Returns query and key
+    indices (flat).
     """
     idx = torch.nonzero(valid, as_tuple=True)[0]
     keys = cell_key[idx]
@@ -91,9 +94,9 @@ def _pairs_within(cell_key, valid, offsets_key, n_per):
 def _segment_softmax_merge(dense_logits, dense_vals, pair_logits, pair_q, pair_v, n_q):
     """One softmax per query over dense keys and sparse (pair) keys.
 
-    dense_logits [Q, H, K] with -inf for missing keys, dense_vals: a function (weights [Q, H, K])
-    -> [Q, H, dh] weighted sum; pair_logits [Pp, H], pair_q [Pp] query index, pair_v [Pp, H, dh].
-    Returns [Q, H, dh]."""
+    dense_logits [Q, H, K] with -inf for missing keys, dense_vals: a function (weights
+    [Q, H, K]) -> [Q, H, dh] weighted sum; pair_logits [Pp, H], pair_q [Pp] query index,
+    pair_v [Pp, H, dh]. Returns [Q, H, dh]."""
     H = dense_logits.shape[1]
     with torch.no_grad():
         m = dense_logits.amax(-1)
@@ -115,8 +118,8 @@ def _segment_softmax_merge(dense_logits, dense_vals, pair_logits, pair_q, pair_v
 
 
 class ConvBlock(nn.Module):
-    """Map conv block, ConvNeXt style: depthwise 3 x 3 (the spatial mixing), LayerNorm, pointwise
-    MLP, residual. [B, h, w, d] -> same."""
+    """Map conv block, ConvNeXt style: depthwise 3 x 3 (the spatial mixing), LayerNorm,
+    pointwise MLP, residual. [B, h, w, d] -> same."""
 
     def __init__(self, d, mlp_ratio=4.0):
         super().__init__()
@@ -129,9 +132,9 @@ class ConvBlock(nn.Module):
 
 
 class LocalLevel(nn.Module):
-    """One local attention block: 3 x 3 neighborhood joint attention of map cells, units /
-    effects and globals (CLS, players), with a null key, then MLPs (cells at the level's width,
-    units and globals at d)."""
+    """One local attention block: 3 x 3 neighborhood joint attention of map cells, units
+    / effects and globals (CLS, players), with a null key, then MLPs (cells at the
+    level's width, units and globals at d)."""
 
     def __init__(self, dl, D, mlp_ratio=4.0, dh=32):
         super().__init__()
@@ -141,7 +144,8 @@ class LocalLevel(nn.Module):
         self.rope = RoPE2D(self.dh, lo=1.0, hi=256.0)
         # joint attention
         self.nc, self.ne = nn.LayerNorm(dl), nn.LayerNorm(D)
-        # units and globals join at the level's width: the same width as the map (no projection) by default
+        # units and globals join at the level's width: the same width as the map (no
+        # projection) by default
         self.down = nn.Identity() if dl == D else nn.Linear(D, dl)
         self.qkv = nn.Linear(dl, 3 * dl)
         self.o = nn.Linear(dl, dl)
@@ -154,8 +158,9 @@ class LocalLevel(nn.Module):
         self.nE, self.Emlp = nn.LayerNorm(D), mlp(D, D, int(D * mlp_ratio))
 
     def forward(self, C, cmask, s, E, emask, epos, G, gmask, center):
-        """C [B, h, w, dl] map; cmask [B, h, w] cells on the map; s cell size (map units);
-        E [B, N, D] units + effects, emask [B, N], epos [B, N, 2] centered map units;
+        """C [B, h, w, dl] map; cmask [B, h, w] cells on the map; s cell size (map
+        units); E [B, N, D] units + effects, emask [B, N], epos [B, N, 2] centered map
+        units;
         G [B, Gn, D] globals, gmask [B, Gn]; center [B, 2] playable center (map units).
         """
         B, h, w, dl = C.shape
@@ -174,8 +179,9 @@ class LocalLevel(nn.Module):
     debug = False
 
     def attend(self, C, cmask, s, E, emask, epos, G, gmask, center):
-        """The joint attention itself: (cell outputs [B, h, w, H, dh] flat as [Q, H, dh], unit outputs
-        [B * N, H, dh], global outputs [B, Gn, H, dh]), before the output projection."""
+        """The joint attention itself: (cell outputs [B, h, w, H, dh] flat as [Q, H,
+        dh], unit outputs [B * N, H, dh], global outputs [B, Gn, H, dh]), before the
+        output projection."""
         B, h, w, dl = C.shape
         N, Gn, H, dh = E.shape[1], G.shape[1], self.H, self.dh
         dev = C.device
@@ -186,7 +192,8 @@ class LocalLevel(nn.Module):
         qc, kc, vc = c.unbind(3)
         qe, ke, ve = eg[:, :N].unbind(2)
         qg, kg, vg = eg[:, N:].unbind(2)
-        # RoPE: cells at their centers, units at their positions, globals unrotated (the origin)
+        # RoPE: cells at their centers, units at their positions, globals unrotated (the
+        # origin)
         ys = (torch.arange(h, device=dev, dtype=torch.float32) + 0.5) * s
         xs = (torch.arange(w, device=dev, dtype=torch.float32) + 0.5) * s
         cpos = torch.stack(
@@ -346,7 +353,8 @@ class LocalLevel(nn.Module):
 
 
 class PatchMerge(nn.Module):
-    """[B, h, w, din] -> [B, h/2, w/2, dout]: each 2 x 2 block concatenated, normed, projected."""
+    """[B, h, w, din] -> [B, h/2, w/2, dout]: each 2 x 2 block concatenated, normed,
+    projected."""
 
     def __init__(self, din, dout):
         super().__init__()
@@ -399,8 +407,9 @@ class PyramidEncoder(StateEncoder):
         self.cam_save_in = nn.Linear(d, d)
         self.lcfam = nn.Embedding(max(n_families, 1), d)
         # map
-        # one minimap from every player's layers: each player's visible / seen / creep with their
-        # player code, embedded per cell and summed, plus the static layers; then two 3x3 convs
+        # one minimap from every player's layers: each player's visible / seen / creep
+        # with their player code, embedded per cell and summed, plus the static layers;
+        # then two 3x3 convs
         self.grid_static = nn.Conv2d(C_GRID - 3 * N_GRID_PLAYERS, widths[0], 1)
         self.grid_view = nn.Conv2d(3, widths[0], 1)
         self.grid_code = nn.Embedding(N_CODE_EMB, widths[0])
@@ -411,7 +420,8 @@ class PyramidEncoder(StateEncoder):
             nn.GELU(),
             nn.Conv2d(widths[0], widths[0], 3, padding=1),
         )
-        # every level: conv_blocks conv blocks on the map, then attn_blocks attention blocks
+        # every level: conv_blocks conv blocks on the map, then attn_blocks attention
+        # blocks
         self.local_conv = nn.ModuleList(
             [
                 nn.ModuleList([ConvBlock(wd, mlp_ratio) for _ in range(conv_blocks)])
@@ -502,8 +512,9 @@ class PyramidEncoder(StateEncoder):
         return tok + self.ptr(pt) * ok[..., None].to(tok.dtype)
 
     def minimap(self, grid, b):
-        """[B, C_GRID, H, W] -> [B, w0, H, W]: sum over the players whose layers the grid holds of
-        mix(GELU(view(their layers) + code(their player code))), plus static(the map's layers).
+        """[B, C_GRID, H, W] -> [B, w0, H, W]: sum over the players whose layers the
+        grid holds of mix(GELU(view(their layers) + code(their player code))), plus
+        static(the map's layers).
         """
         x = self.grid_static(grid[:, 3 * N_GRID_PLAYERS :])
         ok = b["ply_gridok"] & b["ply_mask"]

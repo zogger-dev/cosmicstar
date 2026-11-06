@@ -1,11 +1,11 @@
 """Inverse dynamics: what did each player do between two frames?
 
-Learned queries, one per player, cross-attend over the slots of a frame and of the frame one
-step later (tagged "before" / "after") and emit a small vector per player: the latent action.
-The window model trained it to agree with the command encoder's summary of the same interval
-(InfoNCE) and to drive the predictor, so it has to encode the part of the change that the
-player's commands explain, and nothing the commands don't say (it can't just copy the next
-frame: the commands don't contain it).
+Learned queries, one per player, cross-attend over the slots of a frame and of the frame
+one step later (tagged "before" / "after") and emit a small vector per player: the
+latent action. The window model trained it to agree with the command encoder's summary
+of the same interval (InfoNCE) and to drive the predictor, so it has to encode the part
+of the change that the player's commands explain, and nothing the commands don't say (it
+can't just copy the next frame: the commands don't contain it).
 """
 
 import torch
@@ -45,9 +45,9 @@ class InverseModel(nn.Module):
             nn.init.normal_(p, std=0.02)
 
     def forward(self, slots_a, slots_b, mask_a, mask_b, P, horizon_loops=None):
-        """slots_a / slots_b [N, S, d]: a frame and the frame one step later; masks [N, S]
-        (True = real slot); horizon_loops [N]: game loops between the frames, when it varies.
-        Returns the latent action of each of the P players, [N, P, d_z]."""
+        """slots_a / slots_b [N, S, d]: a frame and the frame one step later; masks [N,
+        S] (True = real slot); horizon_loops [N]: game loops between the frames, when it
+        varies. Returns the latent action of each of the P players, [N, P, d_z]."""
         N = slots_a.shape[0]
         kv = torch.cat(
             [
@@ -70,17 +70,21 @@ class InverseModel(nn.Module):
         return self.out(q)
 
 
-C_INTENT_ORD = 5  # per order: target offset (x, y), targets a unit, progress, queue position (tokenize.BAGS["ord"])
-C_INTENT_CMD = 8  # per command: no target / point / unit, target offset (x, y), queued, time into the window (2)
+# per order: target offset (x, y), targets a unit, progress, queue position
+# (tokenize.BAGS["ord"])
+C_INTENT_ORD = 5
+# per command: no target / point / unit, target offset (x, y), queued, time into the
+# window (2)
+C_INTENT_CMD = 8
 
 
 class EnemyIntent(nn.Module):
     """What the posterior knows about the enemy in a player view and the prior doesn't
-    (2026-10-31): for each enemy unit the viewer sees, its true order queue and the enemy's
-    commands in the window that selected it (stim, blink, a move), read from the enemy's own
-    view. Each list is pooled per unit (mean + log count, like the encoder's lists) and the
-    result is added to that unit's present token, for the posterior only. The last layer starts
-    at zero, so a fresh model's posterior is unchanged."""
+    (2026-10-31): for each enemy unit the viewer sees, its true order queue and the
+    enemy's commands in the window that selected it (stim, blink, a move), read from the
+    enemy's own view. Each list is pooled per unit (mean + log count, like the encoder's
+    lists) and the result is added to that unit's present token, for the posterior only.
+    The last layer starts at zero, so a fresh model's posterior is unchanged."""
 
     def __init__(self, n_abilities, d):
         super().__init__()
@@ -92,8 +96,9 @@ class EnemyIntent(nn.Module):
         nn.init.zeros_(self.out[-1].bias)
 
     def forward(self, priv, n_tokens, d_dtype):
-        """priv: {ord,cmd}_{idx, ab, feat} flat over the batch (idx = sample * N + unit row);
-        n_tokens = B * N. Returns [B * N, d] to add to the present's unit tokens."""
+        """priv: {ord,cmd}_{idx, ab, feat} flat over the batch (idx = sample * N + unit
+        row); n_tokens = B * N. Returns [B * N, d] to add to the present's unit
+        tokens."""
         pooled = []
         for k, lin in (("ord", self.ord_in), ("cmd", self.cmd_in)):
             idx = priv[f"{k}_idx"]

@@ -1,4 +1,5 @@
-"""The one-pass model's dependencies on a real window, exactly: a frame's clean state holds no action of that frame and nothing later."""
+"""The one-pass model's dependencies on a real window, exactly: a frame's clean state
+holds no action of that frame and nothing later."""
 
 import glob
 import json
@@ -84,7 +85,8 @@ def main():
     )
     tol = 1e-5
 
-    # an action at frame t, its numbers and its target: not the clean state at t or before, not updated before t; updated at t; clean afterwards
+    # an action at frame t, its numbers and its target: not the clean state at t or
+    # before, not updated before t; updated at t; clean afterwards
     c = {k: v.clone() for k, v in b.items()}
     m = c["act_mask"][0, t]
     c["act_num"][0, t][m] += 1.0

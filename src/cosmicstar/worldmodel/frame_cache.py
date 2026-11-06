@@ -1,32 +1,35 @@
-"""Frame cache (2026-11-01): ready-made frames on disk, so training samples moments from every game
-instead of holding a dozen whole games in RAM (the in-memory pool reached ~47 GB and was OOM-killed).
+"""Frame cache (2026-11-01): ready-made frames on disk, so training samples moments from
+every game instead of holding a dozen whole games in RAM (the in-memory pool reached ~47
+GB and was OOM-killed).
 
-A game's state file can't be read frame by frame (statefile.py: units are delta-coded against the
-previous frame, maps XOR'd), and part of a frame comes from whole-game preprocessing (bridged gas
-workers, containers, control groups, latest stats). So the cache is built once: load a game with
-its three views, choose windows while it's decoded, build each frame in all three views (p1, p2, the
-combined view) and write them out. Training then reads single windows.
+A game's state file can't be read frame by frame (statefile.py: units are delta-coded
+against the previous frame, maps XOR'd), and part of a frame comes from whole-game
+preprocessing (bridged gas workers, containers, control groups, latest stats). So the
+cache is built once: load a game with its three views, choose windows while it's
+decoded, build each frame in all three views (p1, p2, the combined view) and write them
+out. Training then reads single windows.
 
-Layout: <root>/vocab.json (the vocabulary the frames were built with: frames carry vocabulary
-indices) and <root>/<split>/<game id>.fcache per game:
+Layout: <root>/vocab.json (the vocabulary the frames were built with: frames carry
+vocabulary indices) and <root>/<split>/<game id>.fcache per game:
 
     MAGIC, an 8-byte header length, a JSON header, then one zstd-compressed pickle per entry.
 
 Two entry kinds:
-- windows (the header's "windows": [{t0, loops, offset, size}], "length" L): L consecutive frames
-  (L = 15: a moment and the 14 frames after it, 56 game loops = 2.5 s at the 4-loop frame step),
-  stored as {"frames": [[p1, p2, combined] per frame]}, compressed together (consecutive frames are
-  nearly identical). For dynamics (sequences) and, one frame at a time, for the encoder.
-- moments (the first cache, header "moments": [{t, loop, offset, size}]): {"views": [p1, p2,
-  combined]}, a window of one.
+- windows (the header's "windows": [{t0, loops, offset, size}], "length" L): L
+  consecutive frames (L = 15: a moment and the 14 frames after it, 56 game loops = 2.5 s
+  at the 4-loop frame step), stored as {"frames": [[p1, p2, combined] per frame]},
+  compressed together (consecutive frames are nearly identical). For dynamics
+  (sequences) and, one frame at a time, for the encoder.
+- moments (the first cache, header "moments": [{t, loop, offset, size}]): {"views": [p1,
+  p2, combined]}, a window of one.
 
-Frames are built with the fixed player codes: the code is the player's index, 0 or 1 (neutral has its
-own), the same in all three views. The reader swaps the two players at random per sample, every frame
-and view of the sample alike (swap_players), so an index identifies a player within a sample and says
-nothing else about them.
+Frames are built with the fixed player codes: the code is the player's index, 0 or 1
+(neutral has its own), the same in all three views. The reader swaps the two players at
+random per sample, every frame and view of the sample alike (swap_players), so an index
+identifies a player within a sample and says nothing else about them.
 
-Choice: --per_game entries per game, one per equal slice of the game (stratified over game time,
-jittered), so openings, mid games and late games are all represented."""
+Choice: --per_game entries per game, one per equal slice of the game (stratified over
+game time, jittered), so openings, mid games and late games are all represented."""
 
 import json
 import os
@@ -52,8 +55,8 @@ def _zstd():
 
 
 def choose_starts(n_frames, per_game, length, rng, margin=8):
-    """Stratified window starts: per_game equal slices of [margin, n_frames - margin - length], one
-    jittered start each (length 1: single moments)."""
+    """Stratified window starts: per_game equal slices of [margin, n_frames - margin -
+    length], one jittered start each (length 1: single moments)."""
     lo, hi = margin, n_frames - margin - length + 1
     if hi - lo < per_game:
         return np.arange(lo, max(lo, hi))
@@ -69,9 +72,10 @@ choose_moments = lambda n_frames, per_game, rng, margin=8: choose_starts(
 
 
 def write_game(path, windows, meta):
-    """windows: an iterable of (t0, [loop per frame], [[p1, p2, combined] per frame]). Each window is
-    compressed as soon as it's built and its frames dropped: uncompressed, a game's 300 windows are
-    13,500 frames (tens of GB across workers; holding them crashed the machine, 2026-11-01).
+    """windows: an iterable of (t0, [loop per frame], [[p1, p2, combined] per frame]).
+    Each window is compressed as soon as it's built and its frames dropped:
+    uncompressed, a game's 300 windows are 13,500 frames (tens of GB across workers;
+    holding them crashed the machine, 2026-11-01).
     """
     c = _zstd().ZstdCompressor(level=6)
     blobs, index, off, L = [], [], 0, 0
@@ -105,7 +109,8 @@ def read_header(path):
 
 
 def _swap_frame(fr):
-    """One frame with players 0 and 1 exchanged: their codes, their tokens' order, their map layers."""
+    """One frame with players 0 and 1 exchanged: their codes, their tokens' order, their
+    map layers."""
     fr = dict(fr)
     for k in TEAM_KEYS + PLAYER_KEYS:
         if k in fr:
@@ -119,15 +124,16 @@ def _swap_frame(fr):
 
 
 def swap_players(views):
-    """[p1, p2, combined] of one frame with the players exchanged: still [player 0's view, player 1's
-    view, combined]."""
+    """[p1, p2, combined] of one frame with the players exchanged: still [player 0's
+    view, player 1's view, combined]."""
     a, b, c = [_swap_frame(fr) for fr in views]
     return [b, a, c]
 
 
 class FrameCache:
-    """The entries (windows, or single moments) of one or more splits: index them from the headers;
-    read any entry; sample moments (a random frame of a random window) or whole windows.
+    """The entries (windows, or single moments) of one or more splits: index them from
+    the headers; read any entry; sample moments (a random frame of a random window) or
+    whole windows.
     """
 
     def __init__(self, root, splits):
@@ -155,7 +161,8 @@ class FrameCache:
         return len(self.items)
 
     def read(self, i):
-        """Entry i with fixed codes: [[p1, p2, combined] per frame] (a moment cache: one frame)."""
+        """Entry i with fixed codes: [[p1, p2, combined] per frame] (a moment cache: one
+        frame)."""
         if self._d is None:
             self._d = _zstd().ZstdDecompressor()
         p, off, size, _ = self.items[i]
@@ -165,8 +172,8 @@ class FrameCache:
         return e["frames"] if "frames" in e else [e["views"]]
 
     def sample(self, rng, n):
-        """n moments, each [player 0's view, player 1's view, combined], players swapped at random per
-        moment: a random frame of a random entry."""
+        """n moments, each [player 0's view, player 1's view, combined], players swapped
+        at random per moment: a random frame of a random entry."""
         out = []
         for i in rng.randint(len(self.items), size=n):
             w = self.read(int(i))
@@ -175,7 +182,8 @@ class FrameCache:
         return out
 
     def sample_windows(self, rng, n):
-        """n whole windows, players swapped at random per window (all its frames and views alike)."""
+        """n whole windows, players swapped at random per window (all its frames and
+        views alike)."""
         out = []
         for i in rng.randint(len(self.items), size=n):
             w = self.read(int(i))

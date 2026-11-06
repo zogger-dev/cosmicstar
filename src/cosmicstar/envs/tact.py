@@ -1,10 +1,11 @@
-"""Blizzard's TACT CDN and the client's local CASC storage: adding an older StarCraft II build
-to an existing install so the engine can play that build's replays.
+"""Blizzard's TACT CDN and the client's local CASC storage: adding an older StarCraft II
+build to an existing install so the engine can play that build's replays.
 
-A replay only plays in the engine build it was recorded on (`Versions/Base<build>/SC2_x64.exe`,
-launched with `-dataVersion <root key>` where the root key is the replay header's
-`m_ngdpRootKey`). The Battle.net client downloads such a build on demand when a player opens an
-old replay; this module does the same without the client, from the CDN (requests only):
+A replay only plays in the engine build it was recorded on
+(`Versions/Base<build>/SC2_x64.exe`, launched with `-dataVersion <root key>` where the
+root key is the replay header's `m_ngdpRootKey`). The Battle.net client downloads such a
+build on demand when a player opens an old replay; this module does the same without the
+client, from the CDN (requests only):
 
   BuildConfig (hash from BlizzTrack / README table)
     -> encoding file         CKey (MD5 of content) -> EKey (MD5 of the BLTE-encoded file)
@@ -13,13 +14,14 @@ old replay; this module does the same without the client, from the CDN (requests
   CDNConfig -> archive indexes: where each EKey lives (archive + offset + size); the rest are
     loose at tpr/sc2/data/xx/yy/<ekey>
 
-and writes what the install does not have yet into its CASC storage (`SC2Data/data`), exactly
-as the Battle.net Agent does: BLTE files appended to the 1 GB `data.NNN` archives behind a
-30-byte header, one `.idx` file per key bucket (new version per bucket), the `shmem` free-space
-table, the BuildConfig copied to `SC2Data/config/xx/yy/`, and a row in `.build.info` (the
-engine reads the rows, loads each BuildConfig and picks the one whose root matches
--dataVersion). Formats: https://wowdev.wiki/CASC and https://wowdev.wiki/TACT; the checksum
-and index-hash algorithms below were verified against the existing storage before use.
+and writes what the install does not have yet into its CASC storage (`SC2Data/data`),
+exactly as the Battle.net Agent does: BLTE files appended to the 1 GB `data.NNN`
+archives behind a 30-byte header, one `.idx` file per key bucket (new version per
+bucket), the `shmem` free-space table, the BuildConfig copied to
+`SC2Data/config/xx/yy/`, and a row in `.build.info` (the engine reads the rows, loads
+each BuildConfig and picks the one whose root matches -dataVersion). Formats:
+https://wowdev.wiki/CASC and https://wowdev.wiki/TACT; the checksum and index-hash
+algorithms below were verified against the existing storage before use.
 
 Usage (from the repo root, with the Wine install found by wine_run_config):
 
@@ -28,12 +30,14 @@ Usage (from the repo root, with the Wine install found by wine_run_config):
     .venv/bin/python -m cosmicstar.envs.tact 93333 --install "<other install>" --force
     .venv/bin/python -m cosmicstar.envs.tact 93333 --revert "<install>/SC2Data/backup-<time>"
 
-Every install backs up .build.info, shmem and the live .idx files first; --revert undoes it
-exactly. Installing into a copy of the install (archives hardlinked, the rest copied; README
-"Older builds from the CDN") leaves the real one untouched; scripts then use it via SC2PATH.
+Every install backs up .build.info, shmem and the live .idx files first; --revert undoes
+it exactly. Installing into a copy of the install (archives hardlinked, the rest copied;
+README "Older builds from the CDN") leaves the real one untouched; scripts then use it
+via SC2PATH.
 
 KNOWN_BUILDS maps base builds to BuildConfig hashes; any other build can be given as
-`<build>=<buildconfig hash>` (hashes: https://blizztrack.com/api/manifest/s2/versions?seqn=...).
+`<build>=<buildconfig hash>` (hashes:
+https://blizztrack.com/api/manifest/s2/versions?seqn=...).
 """
 
 import collections
@@ -66,12 +70,12 @@ def log(msg):
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # CDN
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 class CDN:
-    """Fetches from the TACT CDN with a local cache of configs and manifests (not archive
-    ranges: those go straight into the storage)."""
+    """Fetches from the TACT CDN with a local cache of configs and manifests (not
+    archive ranges: those go straight into the storage)."""
 
     def __init__(
         self, cache_dir=DEFAULT_CACHE, host=CDN_HOST, path=CDN_PATH, threads=8
@@ -140,11 +144,12 @@ def parse_config(text):
     return out
 
 
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # BLTE
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 def blte_decode(data):
-    """Decodes a BLTE-encoded file (zlib 'Z' and raw 'N' chunks; 'F' frames recursively)."""
+    """Decodes a BLTE-encoded file (zlib 'Z' and raw 'N' chunks; 'F' frames
+    recursively)."""
     if data[:4] != b"BLTE":
         raise ValueError("not BLTE")
     hsize = struct.unpack_from(">I", data, 4)[0]
@@ -181,15 +186,15 @@ def _blte_chunk(chunk):
 
 
 def blte_ekey(data):
-    """The EKey of a BLTE file: MD5 of the header (through the chunk table) when there is one,
-    else of the whole file."""
+    """The EKey of a BLTE file: MD5 of the header (through the chunk table) when there
+    is one, else of the whole file."""
     hsize = struct.unpack_from(">I", data, 4)[0]
     return hashlib.md5(data[:hsize] if hsize else data).digest()
 
 
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # TACT manifests
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 def _cstr(buf, pos):
     end = buf.index(b"\0", pos)
     return buf[pos:end].decode("utf-8"), end + 1
@@ -287,14 +292,15 @@ CODE_TAG_TYPE = (
 
 
 def select_by_tags(tags, num_entries, tag_configs):
-    """Indexes of the download-manifest entries an install with the given .build.info tag
-    strings keeps in its storage. Each config ("Windows code US? acct-USA? geoip-US? enUS
-    speech?") names tags (trailing '?' = optional; names that are not tags are ignored); an
-    entry matches a config when, for every tag type the config names (platform, locale,
-    region, speech/text), it carries one of the named tags; the result is the union over the
-    configs, minus the "code" entries (checked against the installed 5.0.17: the rule selects
-    188 576 of its manifest's 608 424 entries, 188 448 of which the storage has, and 192 of the
-    entries it rejects are present too, i.e. it reproduces what the Agent installed to 0.1%).
+    """Indexes of the download-manifest entries an install with the given .build.info
+    tag strings keeps in its storage. Each config ("Windows code US? acct-USA? geoip-US?
+    enUS speech?") names tags (trailing '?' = optional; names that are not tags are
+    ignored); an entry matches a config when, for every tag type the config names
+    (platform, locale, region, speech/text), it carries one of the named tags; the
+    result is the union over the configs, minus the "code" entries (checked against the
+    installed 5.0.17: the rule selects 188 576 of its manifest's 608 424 entries, 188
+    448 of which the storage has, and 192 of the entries it rejects are present too,
+    i.e. it reproduces what the Agent installed to 0.1%).
     """
     by_type = collections.defaultdict(list)
     for name, (typ, mask) in tags.items():
@@ -339,9 +345,9 @@ def parse_archive_index(data):
     return out
 
 
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # Jenkins lookup3 (the checksums the local storage uses)
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 _M = 0xFFFFFFFF
 
 
@@ -423,9 +429,9 @@ _CHECKSUM_TABLE = [
 
 
 def record_header(ekey, size, archive, offset, flags=0):
-    """The 30-byte header in front of a file in data.NNN: reversed EKey, total size (header
-    included), flags, checksum A (lookup3 of the first 0x16 bytes), checksum B (of the first
-    0x1A bytes, keyed by the position in the archive)."""
+    """The 30-byte header in front of a file in data.NNN: reversed EKey, total size
+    (header included), flags, checksum A (lookup3 of the first 0x16 bytes), checksum B
+    (of the first 0x1A bytes, keyed by the position in the archive)."""
     h = bytearray(ekey[::-1]) + struct.pack("<IH", size, flags)
     h += struct.pack("<I", hashlittle2(bytes(h), 0x3D6BE971)[0])
     off = ((offset & 0x3FFFFFFF) | ((archive & 3) << 30)) & _M
@@ -439,9 +445,9 @@ def record_header(ekey, size, archive, offset, flags=0):
     return bytes(h)
 
 
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # Local CASC storage
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 IDX_HEADER = 0x28
 IDX_ENTRY = 18
 ARCHIVE_MAX = 0x40000000  # 30-bit offsets: 1 GB per data.NNN
@@ -498,10 +504,11 @@ class LocalStorage:
         return ekey[:9] in self.entries
 
     def read_shmem(self):
-        """shmem: a header block (type 4 as the Agent writes it, 5 as the engine rewrites it)
-        with the data path, one (size, offset) record pointing at the free-space block and the
-        16 bucket versions at 0x110, then the free-space block (type 1): count, 1090 five-byte
-        sizes and 1090 five-byte (archive << 30 | offset) entries."""
+        """shmem: a header block (type 4 as the Agent writes it, 5 as the engine
+        rewrites it) with the data path, one (size, offset) record pointing at the
+        free-space block and the 16 bucket versions at 0x110, then the free-space block
+        (type 1): count, 1090 five-byte sizes and 1090 five-byte (archive << 30 |
+        offset) entries."""
         with open(os.path.join(self.dir, "shmem"), "rb") as f:
             s = f.read()
         btype, nxt = struct.unpack_from("<II", s, 0)
@@ -533,7 +540,9 @@ class LocalStorage:
                 self.free.append(
                     [raw >> 30, raw & 0x3FFFFFFF, size]
                 )  # archive, offset, free bytes
-        else:  # no usable list (an engine-written template): the archives' tails, then new archives
+        # no usable list (an engine-written template): the archives' tails, then new
+        # archives
+        else:
             log("shmem has no free-space list; rebuilding it from the archive sizes")
             archives = self.archives()
             for a in archives:
@@ -552,10 +561,10 @@ class LocalStorage:
             for f in glob.glob(os.path.join(self.dir, "data.[0-9][0-9][0-9]"))
         )
 
-    # -- writing ------------------------------------------------------------------------------
+    # -- writing -----------------------------------------------------------------------
     def allocate(self, size):
-        """(archive, offset) of `size` free bytes, taken from the free list (lowest archive
-        first, as the Agent fills them)."""
+        """(archive, offset) of `size` free bytes, taken from the free list (lowest
+        archive first, as the Agent fills them)."""
         for e in sorted(self.free, key=lambda e: (e[0], e[1])):
             if e[2] >= size:
                 arch, off = e[0], e[1]
@@ -581,7 +590,8 @@ class LocalStorage:
         return arch, off, size
 
     def new_archive(self, arch, path):
-        """A fresh data.NNN starts with the Agent's 16 marker records (one per bucket)."""
+        """A fresh data.NNN starts with the Agent's 16 marker records (one per
+        bucket)."""
         with open(path, "wb") as f:
             pass
         keys = [bytes([b0, arch]) + MARKER_TAIL for b0 in range(16)]
@@ -640,8 +650,8 @@ class LocalStorage:
         os.replace(tmp, path)
 
     def write_shmem(self):
-        """Writes shmem in the Agent's layout: type-4 header, data path, one record for the
-        free-space block at 0x150, the bucket versions, the free-space block."""
+        """Writes shmem in the Agent's layout: type-4 header, data path, one record for
+        the free-space block at 0x150, the bucket versions, the free-space block."""
         win = "Global\\C:/Program Files (x86)/StarCraft II/SC2Data/data"
         with open(os.path.join(self.dir, "shmem"), "rb") as f:
             old = f.read()
@@ -675,9 +685,9 @@ class LocalStorage:
         self.free = free
 
 
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # A build
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 class Build:
     """One build's TACT metadata, fetched lazily."""
 
@@ -702,7 +712,8 @@ class Build:
         return self.encoding[bytes.fromhex(ckey_hex)][0]
 
     def manifest(self, name):
-        """Decoded install / download / size file (their EKeys are in the BuildConfig)."""
+        """Decoded install / download / size file (their EKeys are in the
+        BuildConfig)."""
         return blte_decode(self.cdn.cached("data", self.config[name][1]))
 
     def metadata_ekeys(self):
@@ -748,13 +759,14 @@ class CDNIndex:
         return data
 
 
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # The install
-# --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 BUILD_INFO_HEADER = (
-    "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|CDN Key!HEX:16|Install Key!HEX:16|IM Size!DEC:4|"
-    "CDN Path!STRING:0|CDN Hosts!STRING:0|CDN Servers!STRING:0|Tags!STRING:0|Armadillo!STRING:0|"
-    "Last Activated!STRING:0|Version!STRING:0|KeyRing!HEX:16|Product!STRING:0"
+    "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|CDN Key!HEX:16|Install Key!HEX:16|IM"
+    " Size!DEC:4|CDN Path!STRING:0|CDN Hosts!STRING:0|CDN"
+    " Servers!STRING:0|Tags!STRING:0|Armadillo!STRING:0|Last"
+    " Activated!STRING:0|Version!STRING:0|KeyRing!HEX:16|Product!STRING:0"
 )
 
 
@@ -768,8 +780,9 @@ def read_build_info(install):
 
 
 def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
-    """What installing `build` (base build number) into `install` takes. Returns a dict with
-    the Build, the CDNIndex, the missing EKeys with sizes, and the install files to write.
+    """What installing `build` (base build number) into `install` takes. Returns a dict
+    with the Build, the CDNIndex, the missing EKeys with sizes, and the install files to
+    write.
     """
     bc_hash = KNOWN_BUILDS.get(build) if isinstance(build, int) else None
     if isinstance(build, str) and "=" in build:
@@ -787,8 +800,8 @@ def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
     b = Build(cdn, bc_hash)
     storage = LocalStorage(os.path.join(install, "SC2Data", "data"))
     log(
-        f"build {build}: BuildConfig {bc_hash}, root {b.root_ckey}; storage has {len(storage.entries)} entries "
-        f"in {len(storage.archives())} archives"
+        f"build {build}: BuildConfig {bc_hash}, root {b.root_ckey}; storage has"
+        f" {len(storage.entries)} entries in {len(storage.archives())} archives"
     )
 
     entries, tags = parse_download(b.manifest("download"))
@@ -798,8 +811,9 @@ def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
         need.setdefault(bytes.fromhex(k), 0)
     missing = {k: s for k, s in need.items() if not storage.has(k)}
     log(
-        f"download manifest: {len(entries)} files, {len(chosen)} for tags {tag_configs}; "
-        f"missing locally: {len(missing)} ({sum(missing.values()) / 1e6:.1f} MB)"
+        f"download manifest: {len(entries)} files, {len(chosen)} for tags"
+        f" {tag_configs}; missing locally: {len(missing)}"
+        f" ({sum(missing.values()) / 1e6:.1f} MB)"
     )
 
     inst, itags = parse_install(b.manifest("install"))
@@ -828,8 +842,8 @@ def plan(install, build, cdn_config_hash=None, cache=DEFAULT_CACHE, threads=8):
 
 
 def sc2_running(max_age=None):
-    """Running processes that use the storage (the engine, the Agent), as (age in seconds,
-    name); with max_age only the ones younger than that."""
+    """Running processes that use the storage (the engine, the Agent), as (age in
+    seconds, name); with max_age only the ones younger than that."""
     import subprocess
 
     out = subprocess.run(
@@ -854,9 +868,9 @@ def sc2_running(max_age=None):
 
 
 def fetch_missing(p, index):
-    """Downloads the build's missing BLTE files into the cache ("blobs/<ekey>"), verified
-    against their EKey; returns {ekey: path}. No storage writes, so this can run while the
-    engine is playing."""
+    """Downloads the build's missing BLTE files into the cache ("blobs/<ekey>"),
+    verified against their EKey; returns {ekey: path}. No storage writes, so this can
+    run while the engine is playing."""
     cdn = p["cdn"]
     blob_dir = os.path.join(cdn.cache_dir, "blobs")
     os.makedirs(blob_dir, exist_ok=True)
@@ -890,11 +904,11 @@ def fetch_missing(p, index):
 
 
 def write_storage(p, paths, force=False):
-    """The critical section: appends the fetched files to the archives and rewrites the .idx
-    files and shmem. The engine rewrites shmem when it starts (and nothing else in the
-    storage), so this refuses while the engine or the Agent runs unless force; with force it
-    waits for a moment when no engine instance is less than 20 s old, writes (a few seconds),
-    and then checks shmem came through."""
+    """The critical section: appends the fetched files to the archives and rewrites the
+    .idx files and shmem. The engine rewrites shmem when it starts (and nothing else in
+    the storage), so this refuses while the engine or the Agent runs unless force; with
+    force it waits for a moment when no engine instance is less than 20 s old, writes (a
+    few seconds), and then checks shmem came through."""
     storage = p["storage"]
     running = sc2_running()
     if running and not force:
@@ -904,7 +918,8 @@ def write_storage(p, paths, force=False):
         )
     if running:
         log(
-            f"{len(running)} engine/Agent processes running; waiting for a gap between launches"
+            f"{len(running)} engine/Agent processes running; waiting for a gap between"
+            " launches"
         )
         while sc2_running(max_age=20):
             time.sleep(1)
@@ -921,8 +936,9 @@ def write_storage(p, paths, force=False):
         size += len(blob)
     storage.commit()
     log(
-        f"storage: {n} files, {size / 1e6:.1f} MB written in {time.time() - t0:.1f} s; "
-        f"archives now {storage.archives()[-1] + 1}, idx versions {[storage.versions[b] for b in range(16)]}"
+        f"storage: {n} files, {size / 1e6:.1f} MB written in {time.time() - t0:.1f} s;"
+        f" archives now {storage.archives()[-1] + 1}, idx versions"
+        f" {[storage.versions[b] for b in range(16)]}"
     )
     if running:
         time.sleep(
@@ -937,8 +953,9 @@ def write_storage(p, paths, force=False):
 
 
 def backup(install, storage):
-    """Copies what the install step rewrites (.build.info, shmem, the live .idx files) to
-    SC2Data/backup-<time>/ with a manifest of the archive sizes, so revert() can undo it.
+    """Copies what the install step rewrites (.build.info, shmem, the live .idx files)
+    to SC2Data/backup-<time>/ with a manifest of the archive sizes, so revert() can undo
+    it.
     """
     import json
 
@@ -962,16 +979,18 @@ def backup(install, storage):
 
 
 def revert(install, bak, build=None):
-    """Undoes an install_build() from its backup folder: restores .build.info, shmem and the
-    .idx files, deletes newer .idx versions, truncates the archives to their recorded sizes
-    and deletes archives created since; with build, also removes Versions/Base<build> and the
-    build's BuildConfig copy. Nothing older than the backup is touched."""
+    """Undoes an install_build() from its backup folder: restores .build.info, shmem and
+    the .idx files, deletes newer .idx versions, truncates the archives to their
+    recorded sizes and deletes archives created since; with build, also removes
+    Versions/Base<build> and the build's BuildConfig copy. Nothing older than the backup
+    is touched."""
     import json
 
     install, bak = os.path.abspath(install), os.path.abspath(bak)
     if not bak.startswith(os.path.join(install, "SC2Data", "backup-")):
         raise ValueError(
-            f"{bak} is not a backup of {install}: refusing to apply another install's sizes"
+            f"{bak} is not a backup of {install}: refusing to apply another install's"
+            " sizes"
         )
     m = json.load(open(os.path.join(bak, "manifest.json")))
     data = os.path.join(install, "SC2Data", "data")

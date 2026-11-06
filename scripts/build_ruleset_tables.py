@@ -1,14 +1,16 @@
-"""Turns each ruleset's balance export (the Editor's XML per unit, scripts/export_balance.py) and
-engine rules dump (scripts/dump_rules.py) into the tables the ruleset encoder reads
-(worldmodel/ruleset.py): one graph per ruleset of unit, ability-command and upgrade-level nodes,
-each with a fixed-width feature vector, plus typed edges between them.
+"""Turns each ruleset's balance export (the Editor's XML per unit,
+scripts/export_balance.py) and engine rules dump (scripts/dump_rules.py) into the tables
+the ruleset encoder reads (worldmodel/ruleset.py): one graph per ruleset of unit,
+ability-command and upgrade-level nodes, each with a fixed-width feature vector, plus
+typed edges between them.
 
-Every optional XML element contributes its numbers and a presence bit (zeros when absent), so
-"has no energy" is stated once. Weapon bonuses are a vector over the attribute tags (Light,
-Armored, ...), one slot per tag, so a unit with no bonus is all zeros and nesting disappears.
-Node names (unit id, "ability/command", upgrade level id) are the stable keys across patches;
-the API ids of each ruleset map onto them through the rules dump (units by name, ability
-commands by link name + command index, upgrades by level name).
+Every optional XML element contributes its numbers and a presence bit (zeros when
+absent), so "has no energy" is stated once. Weapon bonuses are a vector over the
+attribute tags (Light, Armored, ...), one slot per tag, so a unit with no bonus is all
+zeros and nesting disappears. Node names (unit id, "ability/command", upgrade level id)
+are the stable keys across patches; the API ids of each ruleset map onto them through
+the rules dump (units by name, ability commands by link name + command index, upgrades
+by level name).
 
     python scripts/build_ruleset_tables.py   (-> data/worldmodel/rulesets.json)
 """
@@ -50,7 +52,8 @@ COMMAND_TYPES = (
     "build",
     "research",
 )  # the last three: production commands, from
-# the producer's <trains> / <builds> / <researches> lists (the export's <abilities> leave them out)
+# the producer's <trains> / <builds> / <researches> lists (the export's <abilities>
+# leave them out)
 ABILITY_TARGETS = ("None", "Point", "Unit", "PointOrUnit")
 # edge relations between nodes (u = unit, a = ability command, g = upgrade level)
 RELATIONS = (
@@ -73,8 +76,8 @@ RELATIONS = (
     "g_affects_u",
     "u_affected_by_g",
 )
-# per-level upgrade increments on a weapon, from the game data (gamedata.upgrade_effects): the
-# weapon vector carries them after the export's fields
+# per-level upgrade increments on a weapon, from the game data
+# (gamedata.upgrade_effects): the weapon vector carries them after the export's fields
 WEAPON_UPGRADE = (
     "has_gamedata",
     "amount_per_level",
@@ -157,7 +160,8 @@ def unit_scalars(root):
 
 
 def weapon_vector(w, inc=None):
-    """inc: per-level upgrade increments for this weapon from the game data (None: no data)."""
+    """inc: per-level upgrade increments for this weapon from the game data (None: no
+    data)."""
     misc, eff = w.find("misc"), w.find("effect")
     wid, eid = w.get("id"), eff.get("id") if eff is not None else None
     up = [0.0] * (len(WEAPON_UPGRADE) + len(ATTRIBUTES))
@@ -242,9 +246,10 @@ def level_vector(level, k, effects=None, affected=None):
 
 
 def weapon_increments(effects, families):
-    """{(catalog, id, field, key): per-level increment} summed over upgrade families. Each
-    level of a family lists the same increments, so one representative level per family counts
-    (all of its entries: adrenal glands adds 0.2 twice in one upgrade = 0.4)."""
+    """{(catalog, id, field, key): per-level increment} summed over upgrade families.
+    Each level of a family lists the same increments, so one representative level per
+    family counts (all of its entries: adrenal glands adds 0.2 twice in one upgrade =
+    0.4)."""
     rep = {}
     for uid in sorted(effects):
         rep.setdefault(families.get(uid, uid), uid)
@@ -257,10 +262,11 @@ def weapon_increments(effects, families):
 
 
 def build_ruleset(xml_dir, rules, build, links):
-    """One ruleset's graph: nodes with features and API ids, and typed edges. build: the base
-    build whose game data (data/worldmodel/gamedata/<build>) supplies the upgrade effects;
-    links: {catalog link index (str): link name} from data/worldmodel/ability_links.json, which
-    names the production abilities the export only refers to by index."""
+    """One ruleset's graph: nodes with features and API ids, and typed edges. build: the
+    base build whose game data (data/worldmodel/gamedata/<build>) supplies the upgrade
+    effects; links: {catalog link index (str): link name} from
+    data/worldmodel/ability_links.json, which names the production abilities the export
+    only refers to by index."""
     effects, affected, families, mods = {}, {}, {}, []
     if os.path.isdir(os.path.join(gamedata.GAMEDATA, str(build))):
         effects, affected, mods = gamedata.upgrade_effects(build)
@@ -383,8 +389,8 @@ def build_ruleset(xml_dir, rules, build, links):
                     by_catalog[(int(ab.get("index")), int(cmd.get("index") or 0))] = (
                         node["idx"]
                     )
-        # production commands: one node per (producer's ability, command), named by the ability's
-        # link name (stable across patches) and the product
+        # production commands: one node per (producer's ability, command), named by the
+        # ability's link name (stable across patches) and the product
         for section, ctype in (
             ("trains/unit", "train"),
             ("builds/unit", "build"),
@@ -424,8 +430,8 @@ def build_ruleset(xml_dir, rules, build, links):
         if u["producer"] in uidx:
             edge("u_produced_by_u", u["idx"], uidx[u["producer"]])
             edge("u_produces_u", uidx[u["producer"]], u["idx"])
-    # what a command makes: the producer's trains / builds / researches name the product and the
-    # (ability catalog index, command index) of the command that makes it
+    # what a command makes: the producer's trains / builds / researches name the product
+    # and the (ability catalog index, command index) of the command that makes it
     for u in units:
         for name, ab, ci in u["products"]:
             a = by_catalog.get((int(ab), int(ci or 0))) if ab is not None else None
@@ -526,14 +532,16 @@ def main():
             sum(g_["api_id"] >= 0 for g_ in g["upgrades"]),
         )
         print(
-            f"{key}: {len(g['units'])} units ({mapped[0]} with API ids), {len(g['abilities'])} ability commands ({mapped[1]} with API ids), "
+            f"{key}: {len(g['units'])} units ({mapped[0]} with API ids),"
+            f" {len(g['abilities'])} ability commands ({mapped[1]} with API ids), "
             + (
                 f"game data from {len(g['gamedata_mods'])} mods, "
                 if g["gamedata_mods"]
                 else "NO game data (upgrade effects missing), "
             )
-            + f"{len(g['upgrades'])} upgrade levels ({mapped[2]} with API ids), {len(g['edges'])} edges, "
-            f"{sum(len(u['weapons']) for u in g['units'])} weapons (max {max(len(u['weapons']) for u in g['units'])} per unit)"
+            + f"{len(g['upgrades'])} upgrade levels ({mapped[2]} with API ids),"
+            f" {len(g['edges'])} edges, {sum(len(u['weapons']) for u in g['units'])}"
+            f" weapons (max {max(len(u['weapons']) for u in g['units'])} per unit)"
         )
         out["rulesets"][key] = g
     out["names"] = {k: sorted(v) for k, v in names.items()}

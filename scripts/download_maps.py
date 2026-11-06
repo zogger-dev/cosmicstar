@@ -17,8 +17,9 @@ MELEE_PACK = "Melee.zip"
 PASSWORD = b"iagreetotheeula"
 
 # Depot Configuration
-# Serves maps and mods by content hash. The old http://us.depot.battle.net:1119/ hosts stopped
-# resolving in 2026; this is the template the 5.0.17 client carries (cosmicstar/envs/depot.py).
+# Serves maps and mods by content hash. The old http://us.depot.battle.net:1119/ hosts
+# stopped resolving in 2026; this is the template the 5.0.17 client carries
+# (cosmicstar/envs/depot.py).
 from cosmicstar.envs.depot import DEPOT_URL
 
 DEPOT_URL_TEMPLATE = DEPOT_URL.format(region="us", hash="{hash}", ext="{ext}")
@@ -197,8 +198,8 @@ def scan_and_download_deps(replay_dir, maps_dir):
                 continue
 
             # 3. Check if exists in Ladder/Melee folders (approximate check by name?)
-            # This is expensive to scan fully. We assume if it's not in Downloaded, and user
-            # hasn't downloaded usage packs, we might redownload.
+            # This is expensive to scan fully. We assume if it's not in Downloaded, and
+            # user hasn't downloaded usage packs, we might redownload.
             # But downloading from depot is safe (idempotent).
 
             tqdm.write(
@@ -228,7 +229,8 @@ def scan_and_download_deps(replay_dir, maps_dir):
             pass
 
     print(
-        f"\nDependency Scan Complete. Downloaded {count} missing maps to {download_dir}."
+        f"\nDependency Scan Complete. Downloaded {count} missing maps to"
+        f" {download_dir}."
     )
 
 
@@ -287,7 +289,8 @@ def main():
         scan_and_download_deps(args.scan_replays, target_dir)
 
     # 3. Standard Packs
-    # Only run standard downloads if not EXPLICITLY scanning (unless user didn't exclude them)
+    # Only run standard downloads if not EXPLICITLY scanning (unless user didn't exclude
+    # them)
     # Actually, running scan doesn't prevent wanting ladder maps.
 
     if not args.exclude_melee:

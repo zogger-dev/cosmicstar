@@ -1,15 +1,17 @@
-"""Exports each ruleset's balance data with the StarCraft II Editor (see worldmodel/README.md).
+"""Exports each ruleset's balance data with the StarCraft II Editor (see
+worldmodel/README.md).
 
-For every ruleset in <rules>/index.json, one of its replays is exported (trying up to --tries
-replays, since a replay can fail on its own map) with
+For every ruleset in <rules>/index.json, one of its replays is exported (trying up to
+--tries replays, since a replay can fail on its own map) with
 
     SC2Editor_x64.exe -exportreplay <replay> -exportreplaydir <out>/<ruleset>
 
-one at a time (the Editor fetches the replay's dependencies itself). On Linux the Editor runs
-under Wine/Proton like the game (cosmicstar/envs/wine_run_config.py; the output matched a
-Windows export file for file, apart from the locales the install lacks). The outcome, including
-the Editor's error when it can't export, goes to <out>/status.json; replays of rulesets that
-failed are left out of the dataset (extract_states.build_manifest).
+one at a time (the Editor fetches the replay's dependencies itself). On Linux the Editor
+runs under Wine/Proton like the game (cosmicstar/envs/wine_run_config.py; the output
+matched a Windows export file for file, apart from the locales the install lacks). The
+outcome, including the Editor's error when it can't export, goes to <out>/status.json;
+replays of rulesets that failed are left out of the dataset
+(extract_states.build_manifest).
 
     python scripts/export_balance.py
 """
@@ -57,9 +59,9 @@ def editor_command(replay, out):
 
 
 def editor_running():
-    """Whether an SC2Editor process is alive in the prefix (Linux: a Windows command line,
-    `C:\\...\\SC2Editor_x64.exe ...`, in ps; the launcher wrapper itself can outlive the Editor
-    when another Wine process keeps the prefix's wineserver up)."""
+    """Whether an SC2Editor process is alive in the prefix (Linux: a Windows command
+    line, `C:\\...\\SC2Editor_x64.exe ...`, in ps; the launcher wrapper itself can
+    outlive the Editor when another Wine process keeps the prefix's wineserver up)."""
     import re
 
     out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
@@ -71,9 +73,10 @@ def editor_running():
 
 
 def export(replay, out, timeout=1200):
-    """Runs one export; returns (ok, error message). The Editor gets a copy of the replay with
-    a plain file name: its command line parser takes " -" inside the path for an option
-    ("Unable to load replay file [Core: file not found]" for "QM - ShoWTimE vs SHIN.SC2Replay").
+    """Runs one export; returns (ok, error message). The Editor gets a copy of the
+    replay with a plain file name: its command line parser takes " -" inside the path
+    for an option ("Unable to load replay file [Core: file not found]" for "QM -
+    ShoWTimE vs SHIN.SC2Replay").
     """
     import hashlib
     import shutil
@@ -95,9 +98,9 @@ def export(replay, out, timeout=1200):
         if WINDOWS:
             subprocess.run(cmd, env=env, cwd=os.path.dirname(EDITOR), timeout=timeout)
         else:
-            # Under Wine the launcher wrapper does not exit while any other Wine process (the
-            # Battle.net app, another engine) keeps the wineserver alive: wait for the Editor
-            # process itself instead, then drop the wrapper.
+            # Under Wine the launcher wrapper does not exit while any other Wine process
+            # (the Battle.net app, another engine) keeps the wineserver alive: wait for
+            # the Editor process itself instead, then drop the wrapper.
             proc = subprocess.Popen(
                 cmd,
                 env=env,
@@ -175,8 +178,8 @@ def main():
             ok, err = export(replay, out)
             tried.append(dict(replay=os.path.basename(replay), error=err))
             print(
-                f"{key} ({v['games']} games) {os.path.basename(replay)}: {'ok' if ok else 'FAILED: ' + err} "
-                f"[{time.time() - t:.0f}s]",
+                f"{key} ({v['games']} games) {os.path.basename(replay)}:"
+                f" {'ok' if ok else 'FAILED: ' + err} [{time.time() - t:.0f}s]",
                 flush=True,
             )
             if ok:
