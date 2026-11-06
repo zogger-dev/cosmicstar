@@ -2,9 +2,10 @@
 model does. No horizon input, no motion input.
 
     per frame        256 learned tokens per map plus a ResNet over the live map at the anchors of a 16 x 16 grid, entities, globals, effects and action tokens
-    each block       spatial, temporal, feed-forward, then this frame's actions
+    each block       spatial, feed-forward, temporal, feed-forward, then this frame's actions
       spatial        every token reads all tokens of the frame in one softmax. No action of this frame: this is the clean state
-      temporal       rows, cells and globals, each reading earlier frames' action-updated tokens; each player's actions: causal
+      temporal       rows, cells and globals, each reading earlier frames' action-updated tokens; each player's actions: causal, with their own
+                     attention and feed-forward weights
       actions        actions read the state (both players' tokens), not each other: a player's own earlier actions come through its timeline;
                      the state reads the actions. Carried on as a change kept apart from the state
     outputs          a residual per token, s + g(s), trained against an EMA teacher's next token with Barlow Twins, plus the raw heads
@@ -139,14 +140,28 @@ class Heads(nn.Module):
         return self.o(a.transpose(1, 2).flatten(2))
 
 
+class FeedForward(nn.Module):
+    """Pre-norm SwiGLU, added to its input."""
+
+    def __init__(self, d, ff):
+        super().__init__()
+        self.norm = nn.LayerNorm(d)
+        self.w1, self.w2, self.w3 = nn.Linear(d, ff, bias=False), nn.Linear(d, ff, bias=False), nn.Linear(ff, d, bias=False)
+
+    def forward(self, x):
+        y = self.norm(x)
+        return x + self.w3(F.silu(self.w1(y)) * self.w2(y))
+
+
 class Block(nn.Module):
-    """One spatial attention, one temporal attention, one feed-forward, then this frame's actions as a change kept apart from the state."""
+    """Spatial attention and a feed-forward, temporal attention and a feed-forward, then this frame's actions as a change kept apart from the state.
+    The action timeline has weights of its own: action tokens and entity tokens are different kinds of sequence."""
 
     def __init__(self, d, heads, kv_heads, ff):
         super().__init__()
-        self.ns, self.nt, self.nf, self.na = nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d)
-        self.space, self.time, self.act = Heads(d, heads, kv_heads), Heads(d, heads, kv_heads), Heads(d, heads, kv_heads)
-        self.w1, self.w2, self.w3 = nn.Linear(d, ff, bias=False), nn.Linear(d, ff, bias=False), nn.Linear(ff, d, bias=False)
+        self.ns, self.nt, self.na, self.nat = nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d)
+        self.space, self.time, self.act, self.act_time = (Heads(d, heads, kv_heads) for _ in range(4))
+        self.ff_space, self.ff_time, self.ff_act = FeedForward(d, ff), FeedForward(d, ff), FeedForward(d, ff)
         self.ent, self.pair = Attend(), PairAttend()
         self.bias = nn.Parameter(torch.zeros(3, heads))
         nn.init.zeros_(self.act.o.weight)                # starts as the identity: the updated tokens start as the state
@@ -157,18 +172,14 @@ class Block(nn.Module):
         a = self.ent(self.space.query(y, c["ang"]), self.space.key(y, c["ang"]), self.space.value(y), c["valid"])
         return x + self.space.out(a)
 
-    def temporal(self, x, key, mask, t):
+    def temporal(self, x, key, mask, t, heads, norm):
         """x, key [N, T, d], mask [N, T]: each token reads the keys at or before its frame. A token with nothing to read keeps its own frame's key: an empty softmax is NaN."""
         N, T, d = x.shape
-        y, ky = self.nt(x) + t, self.nt(key) + t
+        y, ky = norm(x) + t, norm(key) + t
         tri = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
         allow = (tri[None] & mask[:, None]) | torch.eye(T, dtype=torch.bool, device=x.device)[None]
-        a = F.scaled_dot_product_attention(self.time.query(y), self.time.key(ky), self.time.value(ky), attn_mask=allow[:, None])
-        return torch.where(mask[..., None], x + self.time.out(a), x)
-
-    def ff(self, x):
-        y = self.nf(x)
-        return x + self.w3(F.silu(self.w1(y)) * self.w2(y))
+        a = F.scaled_dot_product_attention(heads.query(y), heads.key(ky), heads.value(ky), attn_mask=allow[:, None])
+        return torch.where(mask[..., None], x + heads.out(a), x)
 
     def actions(self, x, dl, a, c):
         """Frames with an action: actions read the state, not each other (a player's own earlier actions reach it through its causal timeline, and the two players'
@@ -189,14 +200,14 @@ class Block(nn.Module):
 
     def forward(self, x, dl, a, c, last):
         B, F_, d = c["B"], c["F"], x.shape[-1]
-        x = self.spatial(x, c)
+        x = self.ff_space(self.spatial(x, c))
         # timelines: earlier frames' tokens as the last block's actions left them. Effects have none: masked, they come out as they went in
         T = x.shape[1]
         by_token = lambda z: z.view(B, F_, T, d).transpose(1, 2).reshape(B * T, F_, d)
         xr, up, mask = by_token(x), by_token(x + dl), c["t_mask"]
         key = torch.cat([xr[:, :1], torch.where(mask[:, :-1, None], up[:, :-1], xr[:, 1:])], 1)
-        x = self.temporal(xr, key, mask, c["t_frames"]).view(B, T, F_, d).transpose(1, 2).reshape(B * F_, T, d).to(x.dtype)
-        x = self.ff(x)
+        x = self.temporal(xr, key, mask, c["t_frames"], self.time, self.nt).view(B, T, F_, d).transpose(1, 2).reshape(B * F_, T, d).to(x.dtype)
+        x = self.ff_time(x)
         if last:
             return x, dl, a
         a = self._act_timeline(a, c)
@@ -211,7 +222,7 @@ class Block(nn.Module):
         if not m.any():
             return a
         seq = a.view(B, F_, 2, K, d).transpose(1, 2).reshape(B * 2, F_ * K, d)
-        y = torch.where(m[..., None], self.ff(self.temporal(seq, seq, m, c["a_frames"])), seq)
+        y = torch.where(m[..., None], self.ff_act(self.temporal(seq, seq, m, c["a_frames"], self.act_time, self.nat)), seq)
         return y.view(B, 2, F_, K, d).transpose(1, 2).reshape(B * F_, 2 * K, d).to(a.dtype)
 
 
