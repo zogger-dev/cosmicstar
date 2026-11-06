@@ -65,7 +65,10 @@ from .tokenize import C_GROUPS, N_BUFF_IDS, N_EFFECT_IDS, N_RAW_ABILITY_IDS, PC_
 
 I = {n: i for i, n in enumerate(RAW_NUMS)}
 C_PLY = 13  # player numbers: PC_KEYS and the camera's x, y, known
-ROW_NUMS = len(RAW_NUMS) + 8  # embedded numbers per row, see row_numbers
+# place on the map: sin and cos of x and y at wavelengths from 4 to 256 map units
+MAP_WAVES = 6
+# embedded numbers per row, see row_numbers
+ROW_NUMS = len(RAW_NUMS) + 8 + 4 * MAP_WAVES
 N_FLAGS = 16  # flags, flags2 bits
 MAX_BIRTHS, MARGIN = 64, 2  # birth count classes; extra queries per frame
 POS_SCALE = 0.29  # a fast unit's per-loop move, map units
@@ -94,9 +97,11 @@ def cos_sin(ang):
     return torch.stack([ang.cos(), ang.sin()], -1).to(dt)
 
 
-def rotate(x, cs):
-    """x [B, H, T, dh], cs [B, T, dh / 2, 2] from cos_sin."""
+def rotate(x, cs, back=False):
+    """x [B, H, T, dh], cs [B, T, dh / 2, 2] from cos_sin. back: the inverse
+    rotation."""
     c, s = cs[..., 0][:, None].to(x.dtype), cs[..., 1][:, None].to(x.dtype)
+    s = -s if back else s
     x1, x2 = x[..., 0::2], x[..., 1::2]
     return torch.stack([x1 * c - x2 * s, x1 * s + x2 * c], -1).flatten(-2)
 
@@ -156,6 +161,15 @@ def row_numbers(b):
         (g("cloak") == k) for k in (0, 1, 2, 3)
     ]
     out += [b["inside"] == 1, b["inside"] == 2, ~b["alive"], b["parent_row"] >= 0]
+    # where on the map, in map units: map knowledge (ramps, chokes) is tied to place
+    w = (
+        2
+        * math.pi
+        / torch.logspace(math.log10(4.0), math.log10(256.0), MAP_WAVES, device=n.device)
+    )
+    for k in ("x", "y"):
+        a = b[k][..., None].float() * w
+        out += list(a.sin().unbind(-1)) + list(a.cos().unbind(-1))
     return torch.stack([x.to(n.dtype) for x in out], -1)
 
 
@@ -227,14 +241,13 @@ class Heads(nn.Module):
         self.o = nn.Linear(d, d, bias=False)
         self.scale = nn.Parameter(torch.tensor(math.log(10.0)))
 
-    def _kv(self, x, layer):
+    def _kv(self, x, layer, cs=None):
+        """Rotated by cs, if given, at the 4 key-value heads, before they are shared
+        out to the query heads: half the memory."""
         B, T = x.shape[:2]
-        return (
-            layer(x)
-            .view(B, T, self.KV, self.dh)
-            .repeat_interleave(self.H // self.KV, 2)
-            .transpose(1, 2)
-        )
+        z = layer(x).view(B, T, self.KV, self.dh).transpose(1, 2)
+        z = rotate(z, cs) if cs is not None else z
+        return z.repeat_interleave(self.H // self.KV, 1)
 
     def query(self, x, cs=None):
         B, T = x.shape[:2]
@@ -245,15 +258,16 @@ class Heads(nn.Module):
         )
 
     def key(self, x, cs=None):
-        k = self._kv(x, self.k)
-        k = rotate(k, cs) if cs is not None else k
-        return F.normalize(k, dim=-1)
+        return F.normalize(self._kv(x, self.k, cs), dim=-1)
 
-    def value(self, x):
-        return self._kv(x, self.v)
+    def value(self, x, cs=None):
+        """cs: each value rotated by its token's place, so that with out(a, the query's
+        cs) a token reads its keys' contents turned by their offset from it."""
+        return self._kv(x, self.v, cs)
 
-    def out(self, a):
-        """[B, H, T, dh] -> [B, T, d]."""
+    def out(self, a, cs=None):
+        """[B, H, T, dh] -> [B, T, d]; cs: rotated back by the query's place."""
+        a = rotate(a, cs, back=True) if cs is not None else a
         return self.o(a.transpose(1, 2).flatten(2))
 
 
@@ -309,15 +323,16 @@ class Block(nn.Module):
         a = self.ent(
             self.space.query(y, c["ang"]),
             self.space.key(y, c["ang"]),
-            self.space.value(y),
+            self.space.value(y, c["ang"]),
             c["valid"],
         )
-        return x + self.space.out(a)
+        return x + self.space.out(a, c["ang"])
 
-    def temporal(self, x, key, mask, ang, heads, norm):
+    def temporal(self, x, key, mask, ang, heads, norm, place=None):
         """x, key [N, T, d], mask [N, T], ang [N, T, dh / 2, 2] the cosines and sines of
         each frame's rotation by its game loop: each token reads the keys at or before
-        its frame.
+        its frame. place: (the keys' places, the queries' places) [N, T, dh / 2, 2], so
+        a token reads each earlier frame turned by how far it has moved since.
         A token with nothing to read keeps its own frame's key: an empty softmax is NaN.
         """
         N, T, d = x.shape
@@ -329,10 +344,12 @@ class Block(nn.Module):
         a = F.scaled_dot_product_attention(
             heads.query(y, ang),
             heads.key(ky, ang),
-            heads.value(ky),
+            heads.value(ky, place[0] if place else None),
             attn_mask=allow[:, None],
         )
-        return torch.where(mask[..., None], x + heads.out(a), x)
+        return torch.where(
+            mask[..., None], x + heads.out(a, place[1] if place else None), x
+        )
 
     def actions(self, x, dl, a, c):
         """Frames with an action: actions read the state, not each other (a player's own
@@ -344,12 +361,12 @@ class Block(nn.Module):
         q, k, v = (
             self.act.query(y, c["ang"][fa]),
             self.act.key(y, c["ang"][fa]),
-            self.act.value(y),
+            self.act.value(y, c["ang"][fa]),
         )
         qa, ka, va = (
             self.act.query(ya, c["ang_a"][fa]),
             self.act.key(ya, c["ang_a"][fa]),
-            self.act.value(ya),
+            self.act.value(ya, c["ang_a"][fa]),
         )
         bias = (self.bias * torch.tensor([0.0, 1.0, 1.0], device=x.device)[:, None]).to(
             q.dtype
@@ -358,8 +375,10 @@ class Block(nn.Module):
         ra = self.pair(qa, k, v, c["valid"][fa], c["code_ae"], c["rowmap"], bias)
         r = self.pair(q, ka, va, am, c["code_ea"], c["rowmap"], bias)
         a, dl = a.clone(), dl.clone()
-        a[fa] = torch.where(am[..., None], a[fa] + self.act.out(ra), a[fa]).to(a.dtype)
-        dl[fa] = (dl[fa] + self.act.out(r)).to(dl.dtype)
+        a[fa] = torch.where(
+            am[..., None], a[fa] + self.act.out(ra, c["ang_a"][fa]), a[fa]
+        ).to(a.dtype)
+        dl[fa] = (dl[fa] + self.act.out(r, c["ang"][fa])).to(dl.dtype)
         return dl, a
 
     def forward(self, x, dl, a, c, last):
@@ -374,7 +393,7 @@ class Block(nn.Module):
             [xr[:, :1], torch.where(mask[:, :-1, None], up[:, :-1], xr[:, 1:])], 1
         )
         x = (
-            self.temporal(xr, key, mask, c["t_ang"], self.time, self.nt)
+            self.temporal(xr, key, mask, c["t_ang"], self.time, self.nt, c["t_place"])
             .view(B, T, F_, d)
             .transpose(1, 2)
             .reshape(B * F_, T, d)
@@ -719,11 +738,23 @@ class PhysicsEncoder(nn.Module):
         fa = torch.nonzero(act_mask.any(1), as_tuple=True)[0]
         # every rotation as cosines and sines, once: 6 blocks of spatial, temporal and
         # action layers all rotate by these
+        ang = cos_sin(self.rope.angles(pos))  # [BF, T, dh / 2, 2]
+        # the same by token over frames; a key at frame j > 0 is frame j - 1's updated
+        # token where that frame has it, so its value turns by that frame's place
+        p_t = ang.view(B, F_, T, h2, 2).transpose(1, 2).reshape(B * T, F_, h2, 2)
+        p_k = torch.cat(
+            [
+                p_t[:, :1],
+                torch.where(t_mask[:, :-1, None, None], p_t[:, :-1], p_t[:, 1:]),
+            ],
+            1,
+        )
         c = dict(
             B=B,
             F=F_,
             valid=valid,
-            ang=cos_sin(self.rope.angles(pos)),
+            ang=ang,
+            t_place=(p_k, p_t),
             ang_a=cos_sin(self.rope.angles(b["act_xy"].reshape(B * F_, A, 2))),
             act_mask=act_mask,
             t_mask=t_mask,
