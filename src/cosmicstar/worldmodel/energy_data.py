@@ -6,11 +6,14 @@ Tables     a row type's constants: value and build time from unit_data.json, spe
            whether it flies from energy_types.json (scanned from the data; absent, no
            pools and nothing flies by type, and the flag in the frame still says)
 Frames     the encoder: a batch and a list of frames -> State, the next frame's
-           coordinates, and which rows are scored. The semantic context c is a type
-           embedding, a small MLP over the raw numbers the coordinates leave out, and
-           the current order's ability; the input u is the current order (ability,
-           target offset, has a target, progress) and whether the queue changed this
-           step; the player context cp is the race. Velocities and the ledger's rates
+           coordinates, and which rows are scored. The semantic context c is the row
+           type's node from the ruleset encoder (ruleset.py: the patch's balance data,
+           encoded once a pass, trained end to end with the model), a small MLP over
+           the raw numbers the coordinates leave out, and the current order's ability
+           node (its cost, product and range are in the node's numbers); the input u
+           is the ability node again with the order's target offset, has a target,
+           progress, and whether the queue changed this step; the player context cp is
+           the race. Velocities and the ledger's rates
            are one-frame differences from the previous frame (instantaneous: a trip
            landing, a purchase), so a window's first frame is never stepped from.
 
@@ -61,6 +64,7 @@ EXTRAS = (
 # not read: "engaged" (the API's current target) is the pair structure in a unary
 # feature, and would let the own term absorb damage
 N_RACES = 5
+UNKNOWN_ABILITY = 2**31 - 1  # a raw id past every lookup table: the unknown row
 
 
 class Tables:
@@ -120,18 +124,41 @@ class Frames(nn.Module):
     """A batch's frames as State. frames(b, ff) -> (State of M = B · len(ff) frames,
     q_next, p_next, scored). ff: frame indices in [1, F − 2]."""
 
-    def __init__(self, vocab, tables, d, u_dim):
+    def __init__(self, vocab, tables, d, u_dim, rules):
         super().__init__()
-        self.tables = tables
+        self.tables, self.rules = tables, rules
+        if tables.ruleset not in rules.tables.rulesets:
+            raise KeyError(f"ruleset {tables.ruleset} is not in the ruleset tables")
         self.register_buffer("k_type", tables.k)
         self.register_buffer("race", tables.race)
-        self.type_emb = nn.Embedding(vocab.n_units, d)
-        self.abil = nn.Embedding(vocab.n_abilities, d)
+        # the batch's order slots hold vocab ability indices; the ruleset looks
+        # abilities up by raw API id. 0: no order (a zero row), 1: an ability the vocab
+        # does not know (the ruleset's unknown row)
+        raw = torch.zeros(vocab.n_abilities, dtype=torch.long)
+        raw[1] = UNKNOWN_ABILITY
+        for a, i in vocab._abil.items():
+            raw[i] = a
+        self.register_buffer("abil_raw", raw)
+        self.unit_c = nn.Linear(rules.d, d)
+        self.abil_c = nn.Linear(rules.d, d)
+        self.abil_u = nn.Linear(rules.d, u_dim)
         self.extras = E.mlp(len(EXTRAS), d, d)
         self.race_emb = nn.Embedding(N_RACES, d)
-        self.abil_u = nn.Embedding(vocab.n_abilities, u_dim)
         self.reg_u = nn.Linear(5, u_dim)
         self.register_buffer("extras_at", torch.tensor([I[n] for n in EXTRAS]))
+
+    def nodes(self, rtype, abil):
+        """The ruleset encoder's rows for raw unit types and vocab ability indices:
+        the unit node (the unknown row for a type the ruleset lacks) and the ability
+        node (zero where there is no order). The ruleset is encoded once a call."""
+        self.rules.clear()  # a pass's graph is freed by its backward: encode anew
+        key = self.tables.ruleset
+        emb, t = self.rules(key), self.rules._on(key, rtype.device)
+        ulut, alut = t["unit_lut"], t["abil_lut"]
+        unit = emb["unit"][ulut[rtype.clamp(0, len(ulut) - 1)]]
+        raw = self.abil_raw[abil]
+        ability = emb["ability"][alut[raw.clamp(0, len(alut) - 1)]]
+        return unit, ability * (abil > 0)[..., None].to(ability.dtype)
 
     def coords(self, b, ff):
         """[B, nf, R, len(COORDS)] the rows' integrated coordinates at frames ff,
@@ -225,9 +252,10 @@ class Frames(nn.Module):
             -1,
         )
         abil = b["slot_abil"][:, ff, :, 0]
+        unit_node, abil_node = self.nodes(rtype, abil)
         extras = num[..., self.extras_at]
         extras = torch.sign(extras) * torch.log1p(extras.abs())
-        c = self.type_emb(b["type"][:, ff]) + self.extras(extras) + self.abil(abil)
+        c = self.unit_c(unit_node) + self.extras(extras) + self.abil_c(abil_node)
         reg = torch.cat(
             [
                 b["slot_reg"][:, ff, :, 0, :],
@@ -235,7 +263,7 @@ class Frames(nn.Module):
             ],
             -1,
         )
-        u = self.abil_u(abil) + self.reg_u(reg)
+        u = self.abil_u(abil_node) + self.reg_u(reg)
         race = self.race[rtype] * mask
         cp = torch.stack(
             [
@@ -267,7 +295,6 @@ BATCH_KEYS = (
     "x",
     "y",
     "num",
-    "type",
     "rtype",
     "owner",
     "ply_num",

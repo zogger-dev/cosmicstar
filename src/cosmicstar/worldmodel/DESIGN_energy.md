@@ -336,8 +336,31 @@ rate barely grows with army size while the value moved grows fifteenfold. Player
 their peak most of the time, which looks like a small reservoir that refills over seconds rather
 than zero capacity. Open: how the budget enters the action level.
 
+**Types and orders come from the ruleset.** The bank's share of the loss is the purchases, and the
+cost of what an order buys was only a learned per-ability embedding the model had to discover. The
+learned type and ability embeddings are now projections of the ruleset encoder's nodes
+(`worldmodel/ruleset.py`): the patch's balance data, units with their weapons, ability commands with
+their costs and products, upgrade levels, under three layers of attention with a bias per relation.
+It runs once a pass (one ruleset per batch; the cache is cleared every pass because the backward
+frees its graph) and trains end to end with the model, so its weights are in the optimizer and the
+checkpoint. The unit node goes into the context c; the current order's ability node goes into c and
+into the input u. The batch's order slots hold vocab indices, so Frames carries the inverse map to raw
+API ids: no order gives a zero row, an ability the vocab lacks the ruleset's unknown row. On 5.0.14
+batches every alive row's type is in the ruleset and 0.3% of orders hit the unknown row (all of them
+abilities the vocab lacks). The constants k stay numbers from the tables. The name-keyed residuals
+are on, which is safe within one patch; across patches they would need keying by patch and API id
+(no names across patches).
+
+The training loop cuts the graph at the frame encoder's outputs (c, cp, u, the only parts of the
+State that carry gradient). Each chunk of frames backpropagates to fp32 copies of those tensors, and
+one backward through the frame and ruleset encoders at the end of the pass carries the summed
+gradient. Before, every chunk's backward went back through the whole encoder (about 25 traversals a
+pass), which the ruleset encoder made cost 1.2 s a step. Against an fp32 reference both loops' gradients
+are equally close (about 0.5% on the ruleset encoder, bf16's own noise), and a pass takes half the time
+of the old loop.
+
 **Still not built.** Ability cooldowns; a shield-regen delay term; the action energy that pins the
 positional gradient and the attention budget; a contact term for units pushing each other; an
-entity encoder in place of the type embedding; attention in place of the pair loops; upgrades and
+entity encoder over the frame; attention in place of the pair loops; upgrades and
 autocast as inputs; the map-control readout ∬V; chemical potentials μ and tech wells Φ_k (fine
 conceptually, not needed yet). In the physics model: z and heading are still predicted there.

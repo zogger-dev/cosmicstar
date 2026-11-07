@@ -9,6 +9,10 @@ terms are O(rows²) a frame, so frames go through the model in chunks of at most
 --pairs row pairs. Quick validation every --val_every updates goes to the log; the
 full evaluation pauses training after each checkpoint and goes to the log and
 RUN/eval.jsonl. The reader, splits and fixed windows are train_physics's.
+
+Unit types and order abilities enter through the ruleset encoder (worldmodel/ruleset.py)
+over the patch's balance data, run once a pass and trained with the model; it lives
+inside the frame encoder, so its weights are in the optimizer and the checkpoint.
 """
 
 import argparse
@@ -30,6 +34,7 @@ import train_physics as tp
 
 from cosmicstar.worldmodel import energy, energy_data, physics_data
 from cosmicstar.worldmodel.action_tokens import ActionVocab
+from cosmicstar.worldmodel.ruleset import RulesetEncoder, RulesetTables
 from cosmicstar.worldmodel.vocab import Vocab
 
 
@@ -52,10 +57,21 @@ def run_batch(model, enc, b, pairs, backward=True, weight=1.0):
     """One pass's frames (every window, frames 1 to F − 2) through the model in chunks
     of at most `pairs` row pairs, the loss backward per chunk weighted by its share of
     the frames -> the pass's mean logs. The encoder runs once for all frames; only the
-    pair terms are chunk-sized."""
+    pair terms are chunk-sized. The graph is cut at the encoder's outputs (c, cp, u,
+    the only parts of the State that carry gradient): each chunk's backward stops
+    there, and one backward through the encoder and the ruleset encoder at the end of
+    the pass carries the summed gradients, instead of one per chunk."""
     B, F_, R = b["mask"].shape
     with torch.autocast("cuda", dtype=torch.bfloat16):
         s, q_next, p_next, scored = enc.frames(b, list(range(1, F_ - 1)))
+    heads = (s.c, s.cp, s.u)
+    # fp32 leaves: their gradient sums over the chunks (bf16 would round each add)
+    cut = [
+        t.detach().float().requires_grad_(backward and t.requires_grad) for t in heads
+    ]
+    s = energy.State(
+        s.q, s.g, s.k, cut[0], s.owner, s.mask, s.p, cut[1], cut[2]
+    )  # c, cp, u
     M = s.mask.shape[0]
     step = max(1, pairs // max(1, R * R))
     logs = collections.Counter()
@@ -65,12 +81,18 @@ def run_batch(model, enc, b, pairs, backward=True, weight=1.0):
             loss, lg = model(sub(s, sl), q_next[sl], p_next[sl], scored[sl])
         w = min(step, M - i) / M
         if backward:
-            (loss * w * weight).backward(retain_graph=i + step < M)
+            (loss * w * weight).backward()
         for k, v in lg.items():
             logs[k] += float(v) * w
         logs["loss"] += float(loss.detach()) * w
         del loss
-    del s
+    if backward:
+        pairs_ = [
+            (h, c.grad.to(h.dtype)) for h, c in zip(heads, cut) if c.grad is not None
+        ]
+        if pairs_:
+            torch.autograd.backward(*zip(*pairs_))
+    del s, cut, heads
     return logs
 
 
@@ -113,6 +135,17 @@ def main():
     ap.add_argument("--d", type=int, default=64)
     ap.add_argument("--u_dim", type=int, default=32)
     ap.add_argument("--hidden", type=int, default=256)
+    ap.add_argument("--rules_tables", default="data/worldmodel/rulesets.json")
+    ap.add_argument("--rules_d", type=int, default=256, help="ruleset encoder width")
+    ap.add_argument(
+        "--rules_depth", type=int, default=3, help="attention layers over the ruleset"
+    )
+    ap.add_argument("--rules_heads", type=int, default=8)
+    ap.add_argument(
+        "--rules_no_residual",
+        action="store_true",
+        help="no learned per-name residual on the ruleset nodes",
+    )
     ap.add_argument(
         "--pairs", type=int, default=2_000_000, help="row pairs a chunk of frames"
     )
@@ -155,9 +188,20 @@ def main():
     tables = energy_data.Tables(args.base_build)
     print(f"ruleset {tables.ruleset}", flush=True)
     model = energy.EnergyModel(args.d, args.u_dim, args.hidden).cuda()
-    enc = energy_data.Frames(vocab, tables, args.d, args.u_dim).cuda()
+    rules = RulesetEncoder(
+        RulesetTables(args.rules_tables),
+        d=args.rules_d,
+        depth=args.rules_depth,
+        heads=args.rules_heads,
+        residual=not args.rules_no_residual,
+    )
+    enc = energy_data.Frames(vocab, tables, args.d, args.u_dim, rules).cuda()
     params = [p for m in (model, enc) for p in m.parameters() if p.requires_grad]
-    print(f"{sum(p.numel() for p in params) / 1e6:.2f}M parameters", flush=True)
+    print(
+        f"{sum(p.numel() for p in params) / 1e6:.2f}M parameters (ruleset encoder"
+        f" {sum(p.numel() for p in rules.parameters()) / 1e6:.2f}M)",
+        flush=True,
+    )
     val_bases = {
         "unseen_games": tp.of_patch(
             physics_data.base_paths(
@@ -284,6 +328,8 @@ def main():
         opt.step()
         opt.zero_grad(set_to_none=True)
         if args.measure or step % 20 == 0:
+            with torch.no_grad():
+                res_norms = rules.residual_norms()
             print(
                 json.dumps(
                     dict(
@@ -294,6 +340,10 @@ def main():
                         windows=sizes[-1],
                         rows=rows,
                         **{k: round(v, 5) for k, v in logs.items()},
+                        **{
+                            f"rules_res_norm_{k}": round(v, 4)
+                            for k, v in res_norms.items()
+                        },
                     )
                 ),
                 flush=True,
