@@ -36,7 +36,15 @@ from cosmicstar.worldmodel.vocab import Vocab
 def sub(s, sl):
     """The frames sl of a State."""
     return energy.State(
-        s.q[sl], s.k[sl], s.c[sl], s.owner[sl], s.mask[sl], s.p[sl], s.cp[sl], s.u[sl]
+        s.q[sl],
+        s.g[sl],
+        s.k[sl],
+        s.c[sl],
+        s.owner[sl],
+        s.mask[sl],
+        s.p[sl],
+        s.cp[sl],
+        s.u[sl],
     )
 
 

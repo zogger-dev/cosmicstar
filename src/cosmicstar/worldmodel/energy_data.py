@@ -2,7 +2,9 @@
 loop apart, rows on fixed indices, each player's bank and supply.
 
 Tables     a row type's constants: value and build time from unit_data.json, speed and
-           acceleration from the patch's ruleset (rulesets.json)
+           acceleration from the patch's ruleset (rulesets.json), the energy pool and
+           whether it flies from energy_types.json (scanned from the data; absent, no
+           pools and nothing flies by type, and the flag in the frame still says)
 Frames     the encoder: a batch and a list of frames -> State, the next frame's
            coordinates, and which rows are scored. The semantic context c is a type
            embedding, a small MLP over the raw numbers the coordinates leave out, and
@@ -18,6 +20,7 @@ observed next frame on the map; a death is scored (hp 0), a row out of sight is 
 """
 
 import json
+import os
 
 import numpy as np
 import torch
@@ -29,16 +32,17 @@ from .tokenize import PC_KEYS
 
 I = {n: i for i, n in enumerate(RAW_NUMS)}
 PC = {n: i for i, n in enumerate(PC_KEYS)}
-ENERGY_MAX = 200.0
 N_RAW_TYPES = 4096
 LOOPS_PER_SECOND_EXPORT = 16.0  # the ruleset's speeds are per this many loops
 INSTANT_ACCEL = 100.0  # export acceleration at or above which a type is instant
 SPEED_AT, ACCEL_AT = 17, 18  # ruleset unit scalars: speed / 5, log1p(accel) / 8
-# the raw numbers the context reads: what the coordinates leave out
+CLIFF_WALKERS = (49, 4)  # API ids: Reaper, Colossus
+FLYING_BIT = 1  # bit 0 of the raw flags
+# the raw numbers the context reads: what the coordinates, givens and constants leave
+# out
 EXTRAS = (
     "harvesters",
     "ideal_harvesters",
-    "radius",
     "cargo_used",
     "cargo_max",
     "buff_remain",
@@ -60,13 +64,15 @@ N_RACES = 5
 
 class Tables:
     """Per raw unit type (API id): value, build_time (loops), race, speed (map units a
-    loop), mass (loops² a map unit: the inverse of acceleration; 0 when instant)."""
+    loop), mass (loops² a map unit: the inverse of acceleration; 0 when instant),
+    energy_max (0: no pool), flying, cliff."""
 
     def __init__(
         self,
         base_build,
         unit_data="data/worldmodel/unit_data.json",
         rulesets="data/worldmodel/rulesets.json",
+        energy_types="data/worldmodel/energy_types.json",
     ):
         value, build, race = (np.zeros(N_RAW_TYPES, np.float32) for _ in range(3))
         for t, u in json.load(open(unit_data)).items():
@@ -93,13 +99,20 @@ class Tables:
             for a in u["api_ids"]:
                 if 0 <= a < N_RAW_TYPES:
                     speed[a], mass[a] = sp, m
+        energy_max, flying = (np.zeros(N_RAW_TYPES, np.float32) for _ in range(2))
+        if os.path.exists(energy_types):
+            et = json.load(open(energy_types))
+            for t, e in et["energy_max"].items():
+                energy_max[int(t)] = e
+            for t in et["flying"]:
+                flying[t] = 1.0
+        cliff = np.zeros(N_RAW_TYPES, np.float32)
+        cliff[list(CLIFF_WALKERS)] = 1.0
         self.race = torch.from_numpy(race.astype(np.int64))
-        self.k = torch.from_numpy(np.stack([value, mass, speed, build], 1))
-
-
-def wrap(a):
-    """Angles to (−π, π]."""
-    return (a + np.pi) % (2 * np.pi) - np.pi
+        # value, mass, speed, build_time, energy_max, flying, cliff
+        self.k = torch.from_numpy(
+            np.stack([value, mass, speed, build, energy_max, flying, cliff], 1)
+        )
 
 
 class Frames(nn.Module):
@@ -120,31 +133,39 @@ class Frames(nn.Module):
         self.register_buffer("extras_at", torch.tensor([I[n] for n in EXTRAS]))
 
     def coords(self, b, ff):
-        """[B, nf, R, len(COORDS)] the rows' coordinates at frames ff, velocities from
-        the frame before (0 where either frame lacks the row)."""
+        """[B, nf, R, len(COORDS)] the rows' integrated coordinates at frames ff,
+        velocities from the frame before (0 where either frame lacks the row)."""
         x, y, num = b["x"][:, ff], b["y"][:, ff], b["num"][:, ff]
-        px, py, pnum = b["x"][:, ff - 1], b["y"][:, ff - 1], b["num"][:, ff - 1]
+        px, py = b["x"][:, ff - 1], b["y"][:, ff - 1]
         both = (b["mask"][:, ff] & b["mask"][:, ff - 1]).to(x.dtype)
-        z, pz = num[..., I["z"]], pnum[..., I["z"]]
-        facing, pfacing = num[..., I["facing"]], pnum[..., I["facing"]]
         hp_max, sh_max = num[..., I["hp_max"]], num[..., I["shield_max"]]
         cols = [
             x,
             y,
-            z,
             (x - px) * both,
             (y - py) * both,
-            (z - pz) * both,
-            facing,
-            wrap(facing - pfacing) * both,
             num[..., I["hp"]] / hp_max.clamp(min=1),
             num[..., I["shield"]] / sh_max.clamp(min=1),
-            num[..., I["energy"]] / ENERGY_MAX,
-            num[..., I["weapon_cooldown"]],
-            num[..., I["build"]],
+            num[..., I["energy"]] / E.ENERGY_UNIT,
             num[..., I["contents"]],
         ]
         return torch.stack(cols, -1)
+
+    def givens(self, b, ff):
+        """[B, nf, R, len(GIVEN)] height, heading as cosine and sine, weapon cooldown,
+        build progress."""
+        num = b["num"][:, ff]
+        facing = num[..., I["facing"]]
+        return torch.stack(
+            [
+                num[..., I["z"]],
+                facing.cos(),
+                facing.sin(),
+                num[..., I["weapon_cooldown"]],
+                num[..., I["build"]],
+            ],
+            -1,
+        )
 
     def ledger(self, b, ff):
         """[B, nf, P, len(PLAYER)] bank and supply (the batch stores log1p / 8) and
@@ -167,6 +188,7 @@ class Frames(nn.Module):
         B, _, R = b["mask"].shape
         nf = len(ff)
         q, q_next = self.coords(b, ff), self.coords(b, ff + 1)
+        g = self.givens(b, ff)
         p, p_next = self.ledger(b, ff), self.ledger(b, ff + 1)
         rtype = b["rtype"][:, ff].clamp(0, N_RAW_TYPES - 1)
         owner = b["owner"][:, None].expand(B, nf, R)
@@ -175,8 +197,17 @@ class Frames(nn.Module):
         mask = on_map(ff) & b["alive"][:, ff]
         scored = mask & on_map(ff + 1)
         num = b["num"][:, ff]
-        kt = self.k_type[rtype]  # value, mass, speed, build_time
+        kt = self.k_type[
+            rtype
+        ]  # value, mass, speed, build_time, energy_max, flying, cliff
         value = torch.where(owner == E.GROUND, q[..., E.Q["contents"]], kt[..., 0])
+        # a pool the table missed shows as energy in the frame: a full pool then
+        energy_max = torch.where(
+            (kt[..., 4] <= 0) & (num[..., I["energy"]] > 0), E.ENERGY_UNIT, kt[..., 4]
+        )
+        flying = torch.maximum(
+            kt[..., 5], (num[..., I["flags"]].long() & FLYING_BIT).to(kt.dtype)
+        )
         k = torch.stack(
             [
                 value,
@@ -184,8 +215,11 @@ class Frames(nn.Module):
                 kt[..., 2],
                 num[..., I["hp_max"]],
                 num[..., I["shield_max"]],
-                torch.full_like(value, ENERGY_MAX),
+                energy_max,
                 kt[..., 3],
+                num[..., I["radius"]],
+                flying,
+                kt[..., 6],
             ],
             -1,
         )
@@ -213,6 +247,7 @@ class Frames(nn.Module):
         flat = lambda t: t.reshape(B * nf, *t.shape[2:])
         s = E.State(
             flat(q),
+            flat(g),
             flat(k),
             flat(c),
             flat(owner),
