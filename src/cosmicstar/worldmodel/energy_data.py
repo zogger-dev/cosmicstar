@@ -8,10 +8,9 @@ Frames     the encoder: a batch and a list of frames -> State, the next frame's
            embedding, a small MLP over the raw numbers the coordinates leave out, and
            the current order's ability; the input u is the current order (ability,
            target offset, has a target, progress) and whether the queue changed this
-           step; the player context cp is the race. Velocities are differences from the
-           previous frame, so a window's first frame is never stepped from; the ledger's
-           rates are backward differences over up to RATE_LOOPS loops, since the bank
-           moves in a worker trip's steps and a one-loop difference is spikes.
+           step; the player context cp is the race. Velocities and the ledger's rates
+           are one-frame differences from the previous frame (instantaneous: a trip
+           landing, a purchase), so a window's first frame is never stepped from.
 
 Rows: real when present, alive and on the map (passengers and units in gas buildings
 stand where their parent is, so they are left out). A row is scored when it has an
@@ -30,7 +29,6 @@ from .tokenize import PC_KEYS
 
 I = {n: i for i, n in enumerate(RAW_NUMS)}
 PC = {n: i for i, n in enumerate(PC_KEYS)}
-RATE_LOOPS = 22  # a second: the ledger's rates average over this many loops
 ENERGY_MAX = 200.0
 N_RAW_TYPES = 4096
 LOOPS_PER_SECOND_EXPORT = 16.0  # the ruleset's speeds are per this many loops
@@ -150,7 +148,7 @@ class Frames(nn.Module):
 
     def ledger(self, b, ff):
         """[B, nf, P, len(PLAYER)] bank and supply (the batch stores log1p / 8) and
-        their rates over up to RATE_LOOPS loops back."""
+        their one-frame rates (ff ≥ 1)."""
         pl = b["ply_num"]
 
         def raw(f):
@@ -161,13 +159,8 @@ class Frames(nn.Module):
                 -1,
             )
 
-        out = []
-        for f in ff.tolist():
-            kk = min(f, RATE_LOOPS)
-            now = raw(f)
-            rate = (now - raw(f - kk)) / kk if kk else torch.zeros_like(now)
-            out.append(torch.cat([now, rate], -1))
-        return torch.stack(out, 1)
+        now, before = raw(ff), raw(ff - 1)
+        return torch.cat([now, now - before], -1)
 
     def frames(self, b, ff):
         ff = torch.as_tensor(ff, device=b["mask"].device)

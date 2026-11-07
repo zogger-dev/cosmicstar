@@ -1,9 +1,11 @@
 # Energy model: design discussion checkpoint (2026-11-06)
 
-Status: discussion only, nothing built, nothing approved for building. This records where the
-conversation stood when it was checkpointed. Items marked **Open** have no decision yet. The
-untracked draft `thermodynamic_model.py` from earlier the same day predates this discussion and is
-superseded by it (see "Why the first draft could not train").
+Status: the sections up to "Not decided, not approved" record where the conversation stood when it
+was checkpointed on 2026-11-06. Items marked **Open** had no decision then. The untracked draft
+`thermodynamic_model.py` from earlier the same day predates this discussion and is superseded by it
+(see "Why the first draft could not train"). The last section, "What was built", records the
+decisions taken since and the model that embodies them (`energy.py`, `energy_data.py`,
+`scripts/train_energy.py`); where it differs from the earlier sections, it wins.
 
 ## The picture
 
@@ -192,9 +194,99 @@ raw heads on observed deltas are the pin; the Barlow term is the one collapse-ca
 contribution is untested. Its backbone (entity encoders, map tower, spatial and temporal attention)
 is the natural parameterization of the positional potential and of the physics-level denoiser.
 
-## Not decided, not approved
+## Not decided, not approved (as of 2026-11-06)
 
-- Nothing here is approved for implementation.
 - Exact time scales; the intent bottleneck; the 30 s summary (Gram or learned); the source of
   lower-level games; how APM constrains the sampler; whether regeneration is ever modeled.
 - Whether to ablate the Barlow term in the current physics model.
+
+## What was built (2026-11-06 to 2026-11-07)
+
+The physics level was built first, from scratch, on state vectors read out of the physics batches
+(`energy_data.py`), not by changing `physics.py`. The decisions, in the order they were taken.
+
+**Form.** ẋ = J ∇H + B u with no R term. Energy leaves the system when a row dies: the row
+vanishes and its value with it. The dissipation is bookkeeping on what happened (the logs report
+the value lost to damage and the value of the rows that died per owner), not a rate the model
+predicts, and the first-law identity dH₁/dt + dH₂/dt = −D is an energy balance on the ledger, not a
+term in H.
+
+**Two instances of one Hamiltonian.** Shared weights, the owner enters only as a relation. Each
+player owns T_p and V_p; the objective of a player is L_p = T_p − V_p and the game's action is
+∫(L₁ − L₂) dt. The even game (equal flows, equal potentials) is an unstable equilibrium: a
+snowball with a defender's advantage.
+
+**Mass is conversion delay.** Momentum is committed but unrealized energy. For rows the mass is the
+inverse of the type's acceleration (0 for instant types); a learned economic mass has no
+physics-level signal and is left to a higher level. T is read out of observed velocities and never
+differentiated.
+
+**The state.** Rows carry x, y, z, vx, vy, vz, heading, turn, hp, shield, energy, weapon cooldown,
+build progress and contents; each is scored against the observed next frame. The ledger is bank
+(minerals, vespene) and supply (used, cap, free) with their observed one-loop rates. Ability
+cooldowns are not in the API and were left out of the state by decision. Army, structure and worker
+value were dropped: they are sums over rows. Autocast and upgrades are not inputs yet.
+
+**Orders are the input.** B u is what this frame's commands do: a force on the actuated coordinates
+(velocity, turn, a cast, a cancel) and spending on the ledger. Units move by orders and the motion
+tables; the field exerts no spatial force. Where units go in the field is the player's choice,
+pinned at the action level later; at this level the positional gradient is a readout.
+
+**hp is first order, position is second order.** Damage is instantaneous, so hp is a gradient flow
+in the field with no inertia; "velocity in the hp dimension is the change in hp" and ½ m ḣ² is a
+readout. Position integrates a velocity that the input accelerates. No per-type mobility or armor
+table: the learned field absorbs any per-type scale, and hp_max is among the constants.
+
+**Sources carry their clocks.** Weapon cooldown, energy and build progress enter the pair terms on
+the source side, so the field oscillates at the weapon period under continuous fire (a disruptor
+that has fired is a low threat for twenty seconds). Sources do not carry their own hp or shield: a
+tank at 10 hp fires the same shell, and a projection that read its own hp would move that hp for
+firing.
+
+**The interaction is an antisymmetric bilinear pairing, not a signed scalar field.** The first
+build had V_p(x) = Σ_enemy φ − Σ_own φ with the sign by perspective, so V₁(x) + V₂(x) = 0 at every
+point, plus a separate one-signed damage term. That makes the ground under your own tank a well of
+the same depth as the enemy's hill there, and nothing grounds the well: no hp flows between friendly
+units. It was replaced on 2026-11-07 by one cross-player pair term e(probe i, source j): source j's
+projection meeting probe i's presence, added to i's owner's V and subtracted from j's owner's. So
+V₁ + V₂ = 0 pair by pair, every term is an expected damage flow (its gradient on i's hp is the
+damage), same-owner pairs contribute nothing (no friendly fire, no healing by sign), and the
+positional gradient decomposes into repulsion from incoming fire and attraction toward what one can
+hit; the umbrella under a tank is emergent (enemy presence cannot stand there), not a synthetic
+well. The pair function is a general MLP of which the literal bilinear form is a special case.
+Particle to particle, no raster grid: the shared density field Ψ(x) remains a deferred map-control
+readout. The neutral term ψ (patches pull workers, workers drain patches) rides on the same
+pair-sized hidden layer.
+
+**The ledger is first order too (2026-11-07).** The first build paired bank and rate like (x, v),
+stepped both and scored both, with the rate a backward difference over up to 22 loops. That target
+was mostly spending impulses over shrinking windows and took two thirds of the loss. Now the rate
+is the one-frame difference (a trip landing, a purchase), read as an input coordinate and neither
+integrated nor scored; the field's gradient on the bank and supply plus the orders' spending is the
+flow, and the bank is scored (it equals the next rate; one residual, not two).
+
+**Scales (2026-11-07).** Coordinates stay in their raw units and every network reads them through a
+fixed per-column scale (velocities by a fast unit's move a loop, angles by π, cooldown by 100,
+contents by 1,000, value by 500, hp_max by 1,000, build_time by 1,000, mass as log1p, bank by 1,000,
+supply by 100), so no axis dwarfs another at a linear layer. The gradient flows run with unit
+mobility in the scaled coordinates (Δq = −scale² ∂V/∂q): the flow a network sees in its own units,
+so a change of unit changes nothing but a constant.
+
+**Gauge.** The final layers of every potential term are zero-initialized and have no bias: a random
+init summed over N² pairs put V in the millions, and a bias times the number of pairs is a free
+drift of V that the residual never sees (the first run's neutral term drifted to −10,000).
+
+**Training.** One objective, the force residual: the step's coordinates against the observed next
+ones, smooth L1 per axis with fixed weights, rows and players; the cooldown and the rates are
+logged but not trained on. Every frame of a 24-frame window is a sample; the pair terms are O(N²)
+and run in chunks of 2M row pairs. Quick validation every 25 updates on fixed windows of unseen
+games, checkpoint and full evaluation every 500. The copy baseline (nothing moves) is logged beside
+every residual; "works" means hp, contents and the ledger below it. The first run
+(`energy_2850e6f_20261107_000540`, 8 h, 5.0.14 only) trained stably and learned velocity from
+orders and a little of the rate target, and nothing on hp: the two 2026-11-07 changes above are the
+answer.
+
+**Still not built.** Ability cooldowns; a shield-regen delay term; the action energy that pins the
+positional gradient; an entity encoder in place of the type embedding; attention in place of the
+pair loops; upgrades and autocast as inputs; the map-control readout ∬V; chemical potentials μ and
+tech wells Φ_k (fine conceptually, not needed yet).
