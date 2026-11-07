@@ -4,35 +4,50 @@ system in port-Hamiltonian form,
     ẋ = J ∇H(x) + B u
 
 with no dissipation term: energy leaves the system only when a row dies, which is the row
-vanishing and its value with it, not a rate the model predicts. Damage is the opponent's
-field acting on a row's hp coordinate, a force like any other.
+vanishing and its value with it, not a rate the model predicts.
 
 A skeleton: the pieces and the shapes that pass between them, on state vectors handed in.
 No entity encoding (the semantic context c of each row arrives as a vector), no training
 loop, nothing tested yet. Each class says which part of the design it is.
 
+What moves, and what moves it:
+
+    position, velocity, heading    orders and the motion tables only (second order: the
+                                   input is a force, mass from the type's acceleration).
+                                   The field exerts no spatial force: a well is the
+                                   safest place to be, not a pull. Where units go in the
+                                   field is the player's choice, pinned at the action
+                                   level, not here
+    hp, shield, contents           first order: a gradient flow in the field. Damage is
+                                   the enemy's sources making the field climb with a
+                                   row's hp, so hp runs down; a healer makes it fall.
+                                   No inertia: hp moves at the rate the field sets.
+                                   Zero hp is death
+    energy, cooldown, progress     known rates from the tables; resets are the engine's
+                                   events, which the model does not predict
+    the ledger                     bank and supply move by their rates plus spending;
+                                   the rates flow in the field the player's own rows
+                                   make (workers mining, depots finishing)
+
 The pieces, in the order a step runs them:
 
-    State        what one frame is. Rows: coordinates q (observed, differentiable),
-                 constants k (from the patch's tables), context c (semantic: type,
-                 orders, buffs... as a vector), owner, mask. Players: coordinates p (the
-                 ledger: bank, income, supply, value; observed, differentiable) and
-                 context cp. The inputs u (what this frame's commands do, as vectors)
-    Hamiltonian  H = T + V, read out per owner: H_0 the ground, H_1, H_2 the players.
-                 One function, two instances: the owner enters only as a relation (same,
-                 enemy, neutral) in the pair term, so the two players share every weight
-                 (swap symmetry). The pair term is the port: the field one player's
-                 sources create at the other's rows. The player term couples a player's
-                 ledger to its own rows
-    Dynamics     one step of J ∇H + B u: ∇V by autograd on rows and players (T is read
-                 out, not a force); J the position-velocity pairing (second order with
-                 the type's acceleration, overdamped when it is instant) and a plain
-                 gradient flow on hp, shield and the ledger; a row whose hp reaches zero
-                 is dead and leaves; B u the inputs, acting only on the owner's own rows
-    ForceResidual the only objective: the step's coordinates against the observed next
-                 ones, per axis, rows and players
-    EnergyModel  the three together: forward(state, next coordinates) -> loss, logs;
-                 step(state) -> next coordinates
+    State          one frame: rows (q, k, c, owner, mask), players (p, cp), inputs u
+    TacticalField  V_p(x): the field player p sees at a point. +φ for every enemy source,
+                   −φ for every own source, so V_1(x) + V_2(x) = 0 at every x: one
+                   player's well is the other's hill, which is what makes the game
+                   adversarial. A readout at this level (no spatial force), evaluable
+                   anywhere; the Hamiltonian samples it at the rows
+    DamageField    δ: what enemy sources do to a row's hp and shields, what own healers
+                   do; one-signed, reads the probe's hp. Its gradient is the damage.
+                   This is the dissipative part and sits outside the zero-sum identity
+    NeutralField   ψ: pairs with the ground, symmetric: patches pull workers, workers
+                   drain patches
+    PlayerPotential a player's ledger in the field of its own rows
+    Hamiltonian    H = T + V per owner: T the observed flows read out, V the terms above
+    Dynamics       one step of J ∇H + B u, as laid out above
+    ForceResidual  the only objective: the step's coordinates against the observed next
+                   ones, per axis, rows and players
+    EnergyModel    the three together: forward(state, next coordinates) -> loss, logs
 """
 
 from dataclasses import dataclass
@@ -43,13 +58,17 @@ from torch import nn
 
 # ---------------------------------------------------------------- the state's layout
 
-# q: a row's observed coordinates, map units and loops; hp, shield and energy as
-# fractions of their maxima; contents the resources left in a patch
+# q: a row's observed coordinates. Map units and loops; heading in radians; hp, shield
+# and energy as fractions of their maxima; contents the resources left in a patch
 COORDS = (
     "x",
     "y",
+    "z",
     "vx",
     "vy",
+    "vz",
+    "heading",
+    "turn",
     "hp",
     "shield",
     "energy",
@@ -58,40 +77,42 @@ COORDS = (
     "contents",
 )
 Q = {n: i for i, n in enumerate(COORDS)}
-POS, VEL = slice(Q["x"], Q["y"] + 1), slice(Q["vx"], Q["vy"] + 1)
-HP = slice(Q["hp"], Q["shield"] + 1)  # flow down the field's gradient; zero hp is death
-CLOCKS = ("cooldown", "progress")  # known rates, reset by events the model predicts
-MOBILITY = 1.0  # fraction of max hp a loop per unit of the field's gradient
+POS, VEL = slice(Q["x"], Q["z"] + 1), slice(Q["vx"], Q["vz"] + 1)
+HP = slice(Q["hp"], Q["shield"] + 1)
+# what a term may read of a row's own state: everything but where it is, so the only
+# place a position enters is the geometry between rows (translation invariance)
+PHYS = [i for n, i in Q.items() if n not in ("x", "y", "z")]
+# the coordinates an order pushes on: motion and heading (as forces), energy (a cast),
+# progress (a cancel). Nothing else is a player's to move directly
+ACTUATED = ("vx", "vy", "vz", "turn", "energy", "progress")
 
-# p: a player's observed coordinates, the ledger, in resource units and loops: the
-# bank, its rates (the flows: income less spending), supply, the value standing in
-# units and structures, workers. Their velocities are the imbalance of flow between
-# the players; the player's own rows are their sources
+# p: a player's observed coordinates, the ledger: bank and supply, and their rates,
+# paired like position and velocity. Resource units, food, per loop
 PLAYER = (
     "minerals",
     "vespene",
-    "mineral_rate",
-    "vespene_rate",
     "food_used",
     "food_cap",
-    "army_value",
-    "structure_value",
-    "workers",
+    "food_free",
+    "d_minerals",
+    "d_vespene",
+    "d_food_used",
+    "d_food_cap",
+    "d_food_free",
 )
 PL = {n: i for i, n in enumerate(PLAYER)}
-BANK, RATES = (
-    slice(PL["minerals"], PL["vespene"] + 1),
-    slice(PL["mineral_rate"], PL["vespene_rate"] + 1),
-)
+LEDGER, LRATES = slice(0, 5), slice(5, 10)
 
-# k: a row's constants from the patch's tables (physics_data.motion_table and the cost
-# table, later): value its cost in resource units (a patch: its contents' worth), mass
-# the inverse of its acceleration (0: instant), speed its cap, the maxima
-CONSTS = ("value", "mass", "speed", "hp_max", "shield_max", "energy_max")
+# k: a row's constants from the patch's tables: value its cost in resource units (a
+# patch: its contents' worth), mass the inverse of its acceleration (0: instant), speed
+# its cap, the maxima, build_time in loops (0: not built)
+CONSTS = ("value", "mass", "speed", "hp_max", "shield_max", "energy_max", "build_time")
 K = {n: i for i, n in enumerate(CONSTS)}
 
 GROUND, P1, P2 = 0, 1, 2  # owners: the ground (neutral), the players
 OWNERS = 3
+GEOM = 4  # Δx, Δy, Δz, distance between a probe and a source
+SCALE = 8.0  # map units the geometry is divided by
 
 
 @dataclass
@@ -132,51 +153,127 @@ def mlp(d_in, d_out, hidden):
     return nn.Sequential(nn.Linear(d_in, hidden), nn.GELU(), nn.Linear(hidden, d_out))
 
 
-# ---------------------------------------------------------------- the Hamiltonian
+def geometry(x, s):
+    """x [M, 3] points -> ([M, N, GEOM] Δ and distance to every row, scaled)."""
+    delta = s.q[None, :, POS] - x[:, None]
+    return torch.cat([delta, delta.norm(dim=-1, keepdim=True)], -1) / SCALE
 
 
-class PairPotential(nn.Module):
-    """The port between the players: the field each row's sources create at every other
-    row, summed. g(c_i, c_j, q_j − q_i, relation) for all real pairs i, j, with the
-    relation same / enemy / neutral the only place the owner enters, so swapping the
-    players changes nothing. O(N²) here; attention with a pair bias later."""
+def sources(s):
+    """[N, d + len(PHYS) + len(CONSTS)] what a row is as a source: its context, its own
+    state (cooldown, energy, progress... a disruptor that has fired is a different
+    source from one that has not) and its constants."""
+    return torch.cat([s.c, s.q[:, PHYS], s.k], -1)
+
+
+def expand_pair(a, b, geom):
+    """a [M, A] probes, b [N, B] sources, geom [M, N, GEOM] -> [M, N, A + B + GEOM]."""
+    M, N = geom.shape[:2]
+    return torch.cat([a[:, None].expand(M, N, -1), b[None].expand(M, N, -1), geom], -1)
+
+
+def not_self(M, N, exclude, device):
+    """[M, N] bool: False where probe m is row exclude[m]."""
+    valid = torch.ones(M, N, dtype=torch.bool, device=device)
+    if exclude is not None:
+        valid &= torch.arange(N, device=device)[None, :] != exclude[:, None]
+    return valid
+
+
+# ---------------------------------------------------------------- the fields
+
+
+class TacticalField(nn.Module):
+    """V_p(x) = Σ_{j enemy of p} φ_j(x) − Σ_{j own} φ_j(x), for a probe of a given type at
+    x. φ is one function of the source (its context, state and constants), the probe's
+    type and constants, and the geometry between them; the sign is the relation. So
+    V_1(x) + V_2(x) = 0 at every x: adversarial by construction. The ground projects no
+    tactical field and feels none. The probe's hp is not read here: what a row has to
+    lose is the damage term's business, and a sign-tied term that read it would make a
+    friendly tank heal."""
 
     def __init__(self, d, hidden):
         super().__init__()
-        self.rel = nn.Embedding(3, hidden)  # same, enemy, neutral
-        self.g = mlp(2 * d + 3, 1, hidden)  # both contexts, dx, dy, distance
+        probe, source = d + len(CONSTS), d + len(PHYS) + len(CONSTS)
+        self.phi = mlp(probe + source + GEOM, 1, hidden)
+
+    def forward(self, s, x, pc, pk, perspective, exclude=None):
+        """s the frame (the sources); x [M, 3] points; pc [M, d], pk [M, len(CONSTS)]
+        the probes' context and constants; perspective [M] long the player whose field
+        it is; exclude [M] long a row index to leave out (the probe itself) -> [M]."""
+        geom = geometry(x, s)
+        phi = self.phi(expand_pair(torch.cat([pc, pk], -1), sources(s), geom))
+        src = s.owner[None, :]
+        sign = torch.where(
+            src == perspective[:, None],
+            -1.0,
+            torch.where(src == GROUND, 0.0, 1.0),
+        ) * (perspective[:, None] != GROUND)
+        valid = s.mask[None, :] & not_self(x.shape[0], s.q.shape[0], exclude, x.device)
+        return (phi.squeeze(-1) * sign * valid).sum(1)
+
+
+class DamageField(nn.Module):
+    """δ at each row: what the enemy's sources do to its hp and shields, what its own
+    healers do. Reads the probe's full state (hp, shields: what there is to lose) and
+    the source's (cooldown: a weapon mid-cycle does nothing). The relation is learned,
+    not a sign: enemy sources take, own sources give or do nothing. No ground on either
+    side. The gradient on hp is the damage, so this is where the field's scale is
+    grounded: a hot zone where nothing loses hp is wrong."""
+
+    def __init__(self, d, hidden):
+        super().__init__()
+        row = d + len(PHYS) + len(CONSTS)
+        self.g = mlp(2 * row + GEOM, 1, hidden)
+        self.rel = nn.Embedding(2, hidden)  # same, enemy
 
     def forward(self, s):
-        """-> [N] the potential at each row from all the others."""
+        """-> [N]."""
         N = s.q.shape[0]
-        d = s.q[None, :, POS] - s.q[:, None, POS]  # [N, N, 2] from i to j
-        dist = d.norm(dim=-1, keepdim=True)
+        src = sources(s)
+        pair = expand_pair(src, src, geometry(s.q[:, POS], s))
         same = s.owner[:, None] == s.owner[None, :]
-        neutral = (s.owner[:, None] == GROUND) | (s.owner[None, :] == GROUND)
-        rel = torch.where(neutral, 2, torch.where(same, 0, 1))
-        pair = torch.cat(
-            [
-                s.c[:, None].expand(N, N, -1),
-                s.c[None, :].expand(N, N, -1),
-                torch.cat([d / 8, dist / 8], -1),
-            ],
-            -1,
+        h = self.g[0](pair) + self.rel((~same).long())
+        delta = self.g[2](F.gelu(h)).squeeze(-1)
+        player = s.owner != GROUND
+        valid = (
+            (s.mask & player)[:, None]
+            & (s.mask & player)[None, :]
+            & not_self(N, N, torch.arange(N, device=s.q.device), s.q.device)
         )
-        h = self.g[0](pair) + self.rel(rel)
-        v = self.g[2](F.gelu(h)).squeeze(-1)  # [N, N]
+        return (delta * valid).sum(1)
+
+
+class NeutralField(nn.Module):
+    """ψ at each row from pairs with the ground, one function either way: a patch pulls
+    the workers that can mine it, the workers mining it drain its contents (the
+    gradient on contents). Zero unless exactly one of the pair is the ground."""
+
+    def __init__(self, d, hidden):
+        super().__init__()
+        row = d + len(PHYS) + len(CONSTS)
+        self.psi = mlp(2 * row + GEOM, 1, hidden)
+
+    def forward(self, s):
+        """-> [N]."""
+        N = s.q.shape[0]
+        src = sources(s)
+        psi = self.psi(expand_pair(src, src, geometry(s.q[:, POS], s))).squeeze(-1)
+        ground = s.owner == GROUND
         valid = (
             s.mask[:, None]
             & s.mask[None, :]
-            & ~torch.eye(N, dtype=torch.bool, device=v.device)
+            & (ground[:, None] ^ ground[None, :])
+            & not_self(N, N, torch.arange(N, device=s.q.device), s.q.device)
         )
-        return (v * valid).sum(1)
+        return (psi * valid).sum(1)
 
 
 class PlayerPotential(nn.Module):
     """A player's ledger in the field of its own rows: h(cp, p, the sum of the player's
-    row contexts). Its gradient on p is the flow of the bank, supply and value that the
-    rows cause: workers mining, structures producing, an army standing. The sum over
-    rows is the plainest posture summary; a Gram or an attention pooling later."""
+    row contexts). Its gradient on the rates is what the rows do to income and supply:
+    workers mining, a depot finishing, an army being built. The sum over rows is the
+    plainest posture summary; a Gram or an attention pooling later."""
 
     def __init__(self, d, hidden):
         super().__init__()
@@ -190,91 +287,114 @@ class PlayerPotential(nn.Module):
         return self.h(torch.cat([s.cp, s.p, rows[P1 : P1 + P]], -1)).squeeze(-1)
 
 
+# ---------------------------------------------------------------- the Hamiltonian
+
+
 class Hamiltonian(nn.Module):
     """H = T + V per owner.
 
-    T   kinetic: ½ mass |v|² per row, mass from the tables (0 for instant types); for a
-        player, ½ |rates|², the energy of the flow through its ledger
-    V   learned: a self term f(c, q) per row, the pair term across rows, the player term
-        on the ledger
+    T   kinetic, read out of the observed velocities: ½ mass |v|² per row (the mass
+        from the tables, 0 for instant types), ½ |rates|² per player: the flow through
+        its ledger. Velocity in every axis is observed, so T is never differentiated
+    V   learned: a self term f(c, q without position, k) per row; the tactical field
+        sampled at the rows; the damage and neutral terms; the player term on the ledger
     """
 
     def __init__(self, d, hidden=256):
         super().__init__()
-        self.f = mlp(d + len(COORDS), 1, hidden)
-        self.pair = PairPotential(d, hidden)
+        self.f = mlp(d + len(PHYS) + len(CONSTS), 1, hidden)
+        self.tactical = TacticalField(d, hidden)
+        self.damage = DamageField(d, hidden)
+        self.neutral = NeutralField(d, hidden)
         self.player = PlayerPotential(d, hidden)
 
     def kinetic(self, s):
-        """[OWNERS] ½ m |v|² over each owner's rows, and ½ |rates|² for each player."""
+        """[OWNERS]."""
         t = by_owner(
             0.5 * s.k[:, K["mass"]] * s.q[:, VEL].square().sum(-1), s.owner, s.mask
         )
-        t[P1:] = t[P1:] + 0.5 * s.p[:, RATES].square().sum(-1)
+        t[P1:] = t[P1:] + 0.5 * s.p[:, LRATES].square().sum(-1)
         return t
 
     def potential(self, s):
-        """[OWNERS] the learned part: each row's own term, what every other row's field
-        is worth at it (the coupling: a player's rows sit in the field the other player's
-        sources make), and the player term on its ledger."""
-        own = self.f(torch.cat([s.c, s.q], -1)).squeeze(-1)
-        v = by_owner(own + self.pair(s), s.owner, s.mask)
-        v[P1:] = v[P1:] + self.player(s)
-        return v
+        """-> (V [OWNERS], its parts by owner)."""
+        N = s.q.shape[0]
+        own = self.f(sources(s)).squeeze(-1)
+        tact = self.tactical(
+            s, s.q[:, POS], s.c, s.k, s.owner, torch.arange(N, device=s.q.device)
+        )
+        parts = {
+            "own": by_owner(own, s.owner, s.mask),
+            "tactical": by_owner(tact, s.owner, s.mask),
+            "damage": by_owner(self.damage(s), s.owner, s.mask),
+            "neutral": by_owner(self.neutral(s), s.owner, s.mask),
+        }
+        v = sum(parts.values())
+        v = torch.cat([v[:P1], v[P1:] + self.player(s)])
+        return v, parts
 
     def forward(self, s):
-        """-> dict: H [OWNERS] and its parts; total their sum."""
-        parts = dict(T=self.kinetic(s), V=self.potential(s))
-        H = parts["T"] + parts["V"]
-        return dict(H=H, total=H.sum(), **parts)
+        """-> dict: H [OWNERS], T, V, and V's parts; total their sum."""
+        T = self.kinetic(s)
+        V, parts = self.potential(s)
+        H = T + V
+        return dict(H=H, total=H.sum(), T=T, V=V, **parts)
+
+    def zero_sum_error(self, s, x, pc, pk):
+        """max |V_1(x) + V_2(x)| over points x for probes (pc, pk): zero up to float
+        error, by construction. A check, free to run on any grid."""
+        v = [
+            self.tactical(s, x, pc, pk, torch.full_like(s.owner[:1], p).expand(len(x)))
+            for p in (P1, P2)
+        ]
+        return (v[0] + v[1]).abs().max()
 
 
 # ---------------------------------------------------------------- the dynamics
 
 
 class Input(nn.Module):
-    """B u: what this frame's commands do, as a force on the row's own coordinates and
-    on its player's ledger (a spend, a queued unit). A player's input reaches only that
-    player's rows (B is block diagonal by owner, which the per-row u already is)."""
+    """B u: what this frame's commands do: a force on the row's actuated coordinates
+    (motion, heading, a cast, a cancel), and spending on its player's ledger. A
+    player's input reaches only that player's rows (B is block diagonal by owner, which
+    the per-row u already is)."""
 
     def __init__(self, u_dim, hidden=256):
         super().__init__()
         self.rows = mlp(u_dim, len(COORDS), hidden)
         self.player = mlp(u_dim, len(PLAYER), hidden)
+        act = torch.zeros(len(COORDS))
+        act[[Q[n] for n in ACTUATED]] = 1.0
+        self.register_buffer("act", act)
+        led = torch.zeros(len(PLAYER))
+        led[LEDGER] = 1.0
+        self.register_buffer("led", led)
 
     def forward(self, s):
         """-> (on rows [N, len(COORDS)], on players [P, len(PLAYER)])."""
         m = s.mask[:, None].to(s.u.dtype)
-        on_rows = self.rows(s.u) * m
+        on_rows = self.rows(s.u) * m * self.act
         on_players = torch.zeros(
             OWNERS, len(PLAYER), device=s.u.device, dtype=on_rows.dtype
-        ).index_add(0, s.owner, self.player(s.u) * m)
+        ).index_add(0, s.owner, self.player(s.u) * m * self.led)
         return on_rows, on_players[P1 : P1 + s.p.shape[0]]
 
 
 class Dynamics(nn.Module):
-    """One step of ẋ = J ∇H + B u.
+    """One step of ẋ = J ∇H + B u, as the module docstring lays out.
 
-    The force is −∇V, the learned potential's gradient by autograd on the rows' q and
-    the players' p; T is read out of H but not differentiated. J pairs position with
-    velocity: ẋ = v, and v̇ = force / mass, capped at the type's speed; a type with
-    mass 0 (instant acceleration) is the overdamped limit, its velocity set directly by
-    the force. On hp and shield the step is a plain gradient flow: the opponent's
-    sources make the field climb with a row's hp, so it flows down, and a same-owner
-    healer makes it fall, so it flows up. Nothing is subtracted for dissipation: a row
-    whose hp reaches zero is dead, and its value leaves with it. The ledger flows the
-    same way: the player term's gradient on p is income and growth, the inputs are
-    spending. Energy (mana) regenerates by a known rate and is spent by inputs; the
-    clocks run at known rates.
+    The force is −∇V by autograd on the rows' q and the players' p. It is used on hp,
+    shield and contents (gradient flow, mobility 1: any per-type scale is the field's
+    to learn) and on the ledger's rates; nowhere else. Position, velocity and heading
+    answer to the inputs and the motion tables only. Energy regenerates, the cooldown
+    counts down, progress runs at the type's build time; their resets are the engine's.
+    A row whose hp reaches zero is dead; nothing is subtracted for it, its value leaves
+    with the row.
     """
 
     def __init__(self, d, u_dim, hidden=256):
         super().__init__()
         self.B = Input(u_dim, hidden)
-        self.cooldown_rate, self.progress_rate = (
-            1.0,
-            0.0,
-        )  # loops per loop; progress' rate is a type's build time, from k later
         self.energy_regen = 0.7875 / 22.4 / 200  # per loop, as a fraction of 200
 
     def forward(self, s, H):
@@ -282,55 +402,63 @@ class Dynamics(nn.Module):
         [P, len(PLAYER)], pieces)."""
         q = s.q.detach().requires_grad_(True)
         p = s.p.detach().requires_grad_(True)
-        sq = s.replace(q=q, p=p)
-        out = H(sq)
+        out = H(s.replace(q=q, p=p))
         grad_q, grad_p = torch.autograd.grad(
             out["V"].sum(), (q, p), create_graph=torch.is_grad_enabled()
         )
-        force, force_p = -grad_q, -grad_p  # −∇V on every coordinate
+        force, force_p = -grad_q, -grad_p
         k, dt = s.k, s.loop
         mass, speed = k[:, K["mass"]], k[:, K["speed"]]
-        # J: position and velocity. Instant types take the force as their velocity;
-        # the rest accelerate by force / mass. The cap is the type's speed.
-        v = q[:, VEL]
-        instant = mass <= 0
-        v_next = torch.where(
-            instant[:, None],
-            force[:, POS],
-            v + force[:, POS] / mass.clamp(min=1e-6)[:, None] * dt,
-        )
+        bu, bu_p = self.B(s)
+        # motion and heading: the input is the force; instant types take it as their
+        # velocity, the rest accelerate by force / mass; the cap is the type's speed
+        instant = (mass <= 0)[:, None]
+        m = mass.clamp(min=1e-6)[:, None]
+        v_next = torch.where(instant, bu[:, VEL], q[:, VEL] + bu[:, VEL] / m * dt)
         v_next = v_next * (
             speed[:, None] / v_next.norm(dim=-1, keepdim=True).clamp(min=1e-6)
         ).clamp(max=1.0)
         pos_next = q[:, POS] + v_next * dt
-        # hp and shield: gradient flow in the field; at zero hp the row is dead
-        hp = (q[:, HP] + MOBILITY * force[:, HP] * dt).clamp(0, 1)
+        turn_next = torch.where(
+            instant[:, 0],
+            bu[:, Q["turn"]],
+            q[:, Q["turn"]] + bu[:, Q["turn"]] / m[:, 0] * dt,
+        )
+        heading = q[:, Q["heading"]] + turn_next * dt
+        # gradient flows: hp and shield down the damage term, contents down the neutral
+        hp = (q[:, HP] + force[:, HP] * dt).clamp(0, 1)
         alive = hp[:, 0] > 0
-        energy = (q[:, Q["energy"]] + self.energy_regen * dt).clamp(0, 1)
-        cooldown = (q[:, Q["cooldown"]] - self.cooldown_rate * dt).clamp(min=0)
-        progress = (q[:, Q["progress"]] + self.progress_rate * dt).clamp(0, 1)
-        contents = q[:, Q["contents"]]
-        bu, bu_p = self.B(s)  # the inputs: a command's push on every coordinate
-        q_next = (
-            torch.cat(
-                [
-                    pos_next,
-                    v_next,
-                    hp,
-                    energy[:, None],
-                    cooldown[:, None],
-                    progress[:, None],
-                    contents[:, None],
-                ],
-                -1,
-            )
-            + bu * dt
+        contents = (q[:, Q["contents"]] + force[:, Q["contents"]] * dt).clamp(min=0)
+        # clocks, at known rates
+        energy = (
+            q[:, Q["energy"]] + self.energy_regen * dt + bu[:, Q["energy"]] * dt
+        ).clamp(0, 1)
+        cooldown = (q[:, Q["cooldown"]] - dt).clamp(min=0)
+        build = k[:, K["build_time"]]
+        progress = (
+            q[:, Q["progress"]]
+            + torch.where(build > 0, dt / build.clamp(min=1), 0.0)
+            + bu[:, Q["progress"]] * dt
+        ).clamp(0, 1)
+        q_next = torch.cat(
+            [
+                pos_next,
+                v_next,
+                heading[:, None],
+                turn_next[:, None],
+                hp,
+                energy[:, None],
+                cooldown[:, None],
+                progress[:, None],
+                contents[:, None],
+            ],
+            -1,
         )
-        # the ledger: the bank moves by its rates, everything flows in the field
-        p_next = p + (force_p + bu_p) * dt
-        p_next = torch.cat(
-            [p_next[:, BANK] + p[:, RATES] * dt, p_next[:, PL["mineral_rate"] :]], -1
-        )
+        # the ledger: bank and supply move by their rates and the spending; the rates
+        # flow in the player term's field
+        ledger = p[:, LEDGER] + p[:, LRATES] * dt + bu_p[:, LEDGER] * dt
+        rates = p[:, LRATES] + force_p[:, LRATES] * dt
+        p_next = torch.cat([ledger, rates], -1)
         return q_next, p_next, dict(force=force, force_p=force_p, alive=alive, **out)
 
 
@@ -340,21 +468,25 @@ class Dynamics(nn.Module):
 class ForceResidual(nn.Module):
     """The one training signal: the step's coordinates against the observed next ones,
     rows and players. Observed coordinates, observed inputs, observed changes: a
-    constant H attributes every change to the inputs alone and fails where units keep
-    walking and workers keep mining, so H is forced to be non-constant
-    (DESIGN_energy.md, why it cannot collapse). Per-axis weights put position, hp, the
-    clocks and the ledger on one scale."""
+    constant H attributes every change to the inputs alone and fails where hp keeps
+    falling and workers keep mining, so H is forced to be non-constant
+    (DESIGN_energy.md, why it cannot collapse). Scales put the axes on one footing;
+    the cooldown is scored but not trained on: its residual is the fire events, which
+    this model has no head for, and training on it would only bend the countdown."""
 
     def __init__(self):
         super().__init__()
         w = torch.ones(len(COORDS))
-        w[POS] = 1 / 0.29  # a fast unit's move a loop, map units
-        w[VEL] = 1 / 0.29
-        w[Q["hp"]] = w[Q["shield"]] = 10.0  # fractions a loop are small
+        w[POS] = w[VEL] = 1 / 0.29  # a fast unit's move a loop, map units
+        w[Q["hp"]] = w[Q["shield"]] = w[Q["progress"]] = 10.0  # fractions a loop
+        w[Q["contents"]] = 1 / 5  # a worker's trip
         self.register_buffer("w", w)
-        wp = torch.ones(len(PLAYER)) / 50  # resource units; a worker trip is 5
-        wp[RATES] = 1.0
-        wp[PL["food_used"]] = wp[PL["food_cap"]] = wp[PL["workers"]] = 1 / 8
+        use = torch.ones(len(COORDS))
+        use[Q["cooldown"]] = 0.0
+        self.register_buffer("use", use)
+        wp = torch.ones(len(PLAYER))
+        wp[PL["minerals"]] = wp[PL["vespene"]] = 1 / 50
+        wp[PL["food_used"]] = wp[PL["food_cap"]] = wp[PL["food_free"]] = 1 / 8
         self.register_buffer("wp", wp)
 
     def forward(self, q_pred, q_next, mask, p_pred, p_next):
@@ -364,7 +496,7 @@ class ForceResidual(nn.Module):
         players = F.smooth_l1_loss(
             p_pred * self.wp, p_next * self.wp, reduction="none"
         ).mean(0)
-        return rows.sum() + players.sum(), rows, players
+        return (rows * self.use).sum() + players.sum(), rows, players
 
 
 # ---------------------------------------------------------------- together
@@ -373,9 +505,9 @@ class ForceResidual(nn.Module):
 class EnergyModel(nn.Module):
     """Hamiltonian, dynamics and residual. forward(state, q_next, p_next) -> (loss,
     logs); step(state) -> the next coordinates. The two players are two instances of
-    the same Hamiltonian read out per owner, coupled only through the pair term; at
-    play time the opponent's rows and ledger come from the belief instead of the frame,
-    and nothing else changes."""
+    the same Hamiltonian read out per owner, coupled through the tactical and damage
+    fields; at play time the opponent's rows and ledger come from the belief instead
+    of the frame, and nothing else changes."""
 
     def __init__(self, d, u_dim, hidden=256):
         super().__init__()
@@ -391,10 +523,19 @@ class EnergyModel(nn.Module):
         loss, rows, players = self.residual(q_pred, q_next, s.mask, p_pred, p_next)
         logs = {f"res_{n}": rows[i].detach() for n, i in Q.items()}
         logs.update({f"res_{n}": players[i].detach() for n, i in PL.items()})
-        logs.update(
-            {f"H_{o}": pieces["H"][o].detach() for o in range(OWNERS)},
-            T=pieces["T"].detach(),
-            V=pieces["V"].detach(),
-            advantage=(pieces["H"][P1] - pieces["H"][P2]).detach(),
-        )
+        for name in ("H", "T", "V", "tactical"):
+            logs.update(
+                {f"{name}_{o}": pieces[name][o].detach() for o in range(OWNERS)}
+            )
+        logs["advantage"] = (pieces["H"][P1] - pieces["H"][P2]).detach()
+        # the accounting, from what happened: value lost to damage this step, and the
+        # value of the rows that died (the dissipation)
+        value = s.k[:, K["value"]]
+        lost = -(q_next[:, HP] - s.q[:, HP]).sum(-1) * value
+        died = ((s.q[:, Q["hp"]] > 0) & (q_next[:, Q["hp"]] <= 0)).to(value.dtype)
+        for o in range(OWNERS):
+            logs[f"damage_{o}"] = by_owner(lost, s.owner, s.mask)[o].detach()
+            logs[f"dissipated_{o}"] = by_owner(died * value, s.owner, s.mask)[
+                o
+            ].detach()
         return loss, logs
