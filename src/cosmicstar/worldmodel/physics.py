@@ -4,7 +4,9 @@ input.
 
     per frame        256 learned tokens per map plus a ResNet over the live map at the anchors of a 16 x 16 grid, entities, globals, effects and action tokens
     each block       spatial, feed-forward, temporal, feed-forward, then this frame's actions
-      spatial        every token reads all tokens of the frame in one softmax. No action of this frame: this is the clean state
+      spatial        every token reads all tokens of the frame in one softmax. No action of this frame: this is the clean state.
+                     On every spatial_every-th frame from the block's offset and the window's first (1: every frame): the pair
+                     structure changes slowly, a unit's clocks every frame, and the frames between carry the context in time
       temporal       rows, cells and globals, each reading earlier frames' action-updated tokens; each player's actions: causal, with their own
                      attention and feed-forward weights
       actions        actions read the state (both players' tokens), not each other: a player's own earlier actions come through its timeline;
@@ -230,8 +232,13 @@ class Block(nn.Module):
     weights of its own: action tokens and entity tokens are different kinds of sequence.
     """
 
-    def __init__(self, d, heads, kv_heads, ff):
+    def __init__(self, d, heads, kv_heads, ff, spatial_every=1, offset=0):
         super().__init__()
+        # spatial attention runs on every spatial_every-th frame from this block's
+        # offset, and on the window's first frame; the other frames keep the pair
+        # context their tokens carry forward in time. Blocks take different offsets, so
+        # the stack refreshes the configuration more often than any one block pays for
+        self.every, self.offset = spatial_every, offset % max(1, spatial_every)
         self.ns, self.nt, self.na, self.nat = (
             nn.LayerNorm(d),
             nn.LayerNorm(d),
@@ -319,9 +326,30 @@ class Block(nn.Module):
         dl[fa] = (dl[fa] + self.act.out(r, c["ang"][fa])).to(dl.dtype)
         return dl, a
 
+    def frames(self, F_, device):
+        """The frames this block's spatial attention runs on."""
+        f = torch.arange(F_, device=device)
+        return torch.nonzero((f % self.every == self.offset) | (f == 0), as_tuple=True)[
+            0
+        ]
+
+    def spatial_frames(self, x, c):
+        """Spatial attention and its feed-forward on this block's frames only; the other
+        frames pass through unchanged. The pair structure (who is in range of whom)
+        changes slowly, a unit's own clocks every frame, so the frames between read
+        the last spatial frame's pair context through their own timelines."""
+        if self.every <= 1:
+            return self.ff_space(self.spatial(x, c))
+        B, F_ = c["B"], c["F"]
+        fs = self.frames(F_, x.device)
+        idx = (torch.arange(B, device=x.device)[:, None] * F_ + fs[None]).reshape(-1)
+        sub = {"valid": c["valid"][idx], "ang": c["ang"][idx]}
+        y = self.ff_space(self.spatial(x[idx], sub))
+        return x.index_copy(0, idx, y.to(x.dtype))
+
     def forward(self, x, dl, a, c, last):
         B, F_, d = c["B"], c["F"], x.shape[-1]
-        x = self.ff_space(self.spatial(x, c))
+        x = self.spatial_frames(x, c)
         # timelines: earlier frames' tokens as the last block's actions left them.
         # Effects have none: masked, they come out as they went in
         T = x.shape[1]
@@ -393,10 +421,20 @@ class PhysicsEncoder(nn.Module):
     globals twice, the clean state and the action-updated tokens."""
 
     def __init__(
-        self, vocab, avocab, d=512, blocks=6, heads=8, kv_heads=4, ff=1365, n_maps=1
+        self,
+        vocab,
+        avocab,
+        d=512,
+        blocks=6,
+        heads=8,
+        kv_heads=4,
+        ff=1365,
+        n_maps=1,
+        spatial_every=1,
     ):
         super().__init__()
         self.d = d
+        self.spatial_every = spatial_every
         self.acts = ActionEncoder(avocab, d)
         self.entities = EntityEncoder(vocab, d, self.acts)
         # map
@@ -406,8 +444,18 @@ class PhysicsEncoder(nn.Module):
         )  # what each place of each map is, whatever is on it now
         self.rope = RoPE2D(d // heads, lo=ROPE_SHORTEST, hi=256.0)
         self.rope_t = RoPE1D(d // heads)
+        # the blocks' spatial frames are spread over the stride, so with 6 blocks and
+        # a stride of 8 the stack refreshes the pair structure at offsets 0 1 3 4 5 7
         self.blocks = nn.ModuleList(
-            Block(d, heads, kv_heads, ff) for _ in range(blocks)
+            Block(
+                d,
+                heads,
+                kv_heads,
+                ff,
+                spatial_every,
+                (i * spatial_every + blocks // 2) // blocks,
+            )
+            for i in range(blocks)
         )
         self.norm_e, self.norm_c, self.norm_g = (
             nn.LayerNorm(d),
@@ -617,9 +665,10 @@ def pointer_pairs(target, fa, A, n, g0, sel=None):
     uq, inv = torch.unique(fi, return_inverse=True)
     rowmap = torch.full((len(fa),), -1, device=t.device)
     rowmap[uq] = torch.arange(len(uq), device=t.device)
-    ae, ea = torch.zeros(
-        len(uq), A, n, dtype=torch.uint8, device=t.device
-    ), torch.zeros(len(uq), n, A, dtype=torch.uint8, device=t.device)
+    ae, ea = (
+        torch.zeros(len(uq), A, n, dtype=torch.uint8, device=t.device),
+        torch.zeros(len(uq), n, A, dtype=torch.uint8, device=t.device),
+    )
     ae[inv, ai, row] = code.to(torch.uint8)
     ea[inv, row, ai] = (code + 1).to(torch.uint8)
     return ae, ea, rowmap
@@ -802,8 +851,8 @@ class Physics(nn.Module):
         if self.demean:
             n = int(rows_t.max()) + 1
             cnt = torch.bincount(rows_t, minlength=n).clamp(min=1)[:, None].to(zp.dtype)
-            sub = (
-                lambda z: z
+            sub = lambda z: (
+                z
                 - (
                     torch.zeros(
                         n, z.shape[1], device=z.device, dtype=z.dtype
@@ -891,7 +940,7 @@ class Physics(nn.Module):
         neg = (bce * (valid - tgt)).sum(1) / (valid - tgt).sum(1).clamp(min=1)
         loss = 0.5 * (pos + neg).mean()
         with torch.no_grad():
-            f1 = lambda p_: (2 * (p_ * tgt).sum() / (p_.sum() + tgt.sum()).clamp(min=1))
+            f1 = lambda p_: 2 * (p_ * tgt).sum() / (p_.sum() + tgt.sum()).clamp(min=1)
             who = b["act_player"].reshape(B * F_, A)[fb, sl]
             own = b["owner"].repeat_interleave(F_, 0)[fb] == who[:, None]
             sel = (b["groups"][..., 10] > 0).reshape(B * F_, R)[fb] & own
@@ -1226,8 +1275,9 @@ class Physics(nn.Module):
                     lt = F.log_softmax(head["type"][i].float(), -1)
                     cost = torch.cdist(pos[i].float(), txy, p=1) - lt[:, tt]
                     qi, ti = linear_sum_assignment(cost.detach().cpu().numpy())
-                    qi, ti = torch.as_tensor(qi, device=x.device), torch.as_tensor(
-                        ti, device=x.device
+                    qi, ti = (
+                        torch.as_tensor(qi, device=x.device),
+                        torch.as_tensor(ti, device=x.device),
                     )
                     target[i, qi] = 1
                     w = torch.where(

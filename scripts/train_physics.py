@@ -412,6 +412,13 @@ def main():
         ),
     )
     ap.add_argument("--blocks", type=int, default=6, help="spatial-temporal blocks")
+    ap.add_argument(
+        "--spatial_every",
+        type=int,
+        default=1,
+        help="spatial attention on every n-th frame of a block (offsets spread over the"
+        " blocks); the window's first frame always",
+    )
     ap.add_argument("--run", default="")
     ap.add_argument(
         "--gpu_gb",
@@ -487,6 +494,7 @@ def main():
         moving_neutrals=physics_data.MOVING_NEUTRALS,
         blocks=args.blocks,
         n_maps=len(map_ids),
+        spatial_every=args.spatial_every,
     ).cuda()
     model.enc.grad_ckpt = args.ckpt
     if not args.no_compile:
