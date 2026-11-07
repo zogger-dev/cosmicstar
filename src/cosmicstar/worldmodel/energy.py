@@ -185,6 +185,13 @@ W_Q = {
     for n in COORDS
 }
 
+# the axes scored by squared error (half the square, in the units above): their
+# changes are rare impulses (a hit, a purchase) whose expected size a field's flow is,
+# and squared error's optimum is the expectation, where smooth L1's is the median: zero
+# for an event a row sees once in a thousand frames. Below one unit the two agree
+SQUARED = ("hp", "shield")
+SQUARED_P = ("minerals", "vespene")
+
 GROUND, P1, P2 = 0, 1, 2  # owners: the ground (neutral), the players
 OWNERS = 3
 # Δx, Δy, distance in the plane, Δz, and the bearing of the probe from the source's
@@ -617,7 +624,8 @@ class ForceResidual(nn.Module):
     falling and workers keep mining, so H is forced to be non-constant
     (DESIGN_energy.md, why it cannot collapse). The energy axes are scored in resource
     units with one weight, so the loss on a bar is proportional to what the bar is
-    worth; position and velocity in a fast unit's move. The kinematic axes are not
+    worth; position and velocity in a fast unit's move. hp, shield and the bank are
+    scored by squared error (SQUARED), the rest by smooth L1. The kinematic axes are not
     scored on the frame a row dies in (the engine freezes them there); the ledger's
     rates are read, not predicted, so they are logged but not trained on."""
 
@@ -633,6 +641,18 @@ class ForceResidual(nn.Module):
         use_p = torch.ones(len(PLAYER))
         use_p[LRATES] = 0.0
         self.register_buffer("use_p", use_p)
+        self.register_buffer("sq", torch.tensor([n in SQUARED for n in COORDS]))
+        self.register_buffer("sq_p", torch.tensor([n in SQUARED_P for n in PLAYER]))
+
+    @staticmethod
+    def metric(pred, target, squared):
+        """Per element: half the squared error where `squared`, smooth L1 elsewhere."""
+        d = pred - target
+        return torch.where(
+            squared,
+            0.5 * d.square(),
+            F.smooth_l1_loss(pred, target, reduction="none"),
+        )
 
     def forward(self, q_pred, q_next, mask, alive_next, k, p_pred, p_next):
         """mask [M, N] the rows scored, alive_next [M, N] the rows alive in the next
@@ -640,12 +660,12 @@ class ForceResidual(nn.Module):
         [len(PLAYER)])."""
         v = row_values(k)
         w = torch.where(v > 0, v, torch.ones_like(v)) * self.w
-        r = F.smooth_l1_loss(q_pred * w, q_next * w, reduction="none")
+        r = self.metric(q_pred * w, q_next * w, self.sq)
         m = mask[..., None] & (~self.kinematic | alive_next[..., None])
         rows = (r * m).sum((0, 1)) / m.sum((0, 1)).clamp(min=1)
-        players = F.smooth_l1_loss(
-            p_pred * self.wp, p_next * self.wp, reduction="none"
-        ).mean((0, 1))
+        players = self.metric(p_pred * self.wp, p_next * self.wp, self.sq_p).mean(
+            (0, 1)
+        )
         return rows.sum() + (players * self.use_p).sum(), rows, players
 
 

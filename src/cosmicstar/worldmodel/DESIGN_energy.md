@@ -359,6 +359,20 @@ pass), which the ruleset encoder made cost 1.2 s a step. Against an fp32 referen
 are equally close (about 0.5% on the ruleset encoder, bf16's own noise), and a pass takes half the time
 of the old loop.
 
+**Squared error on the impulses.** The first 500-step run with the ruleset (energy_66c6c93) left hp
+exactly at the copy baseline, and measuring its force showed why. Only one player row in 1,600 loses hp
+in a frame, and a hit is about 0.11 of the bar, some ten resource units, at once; 4.5% of rows gain hp
+(construction). The cross-player term had grown a small upward push that models construction and
+predicted nothing on the rows that were hit. Smooth L1 puts a hit in its linear range, where the best
+prediction for a rare event is the median, zero. A field's flow is an expected rate (the chance of a hit
+times its size), which is squared error's optimum. hp, shield, minerals and vespene are now scored by half
+the squared error in trip units, which agrees with smooth L1 below one trip. On the copy baseline that
+makes the loss about fourteen times larger, with hp and the bank most of it and position and velocity
+about 1%; separate parameters carry those axes and Adam scales each, so the shift mostly reaches the
+shared encoders. Contents and supply move in jumps too (a trip, a train's food) and stay smooth L1 for
+now. Position is stepped from the predicted velocity and the observed velocity is the one-frame
+difference, so the x and vx residuals are the same number: velocity error is scored twice.
+
 **Still not built.** Ability cooldowns; a shield-regen delay term; the action energy that pins the
 positional gradient and the attention budget; a contact term for units pushing each other; an
 entity encoder over the frame; attention in place of the pair loops; upgrades and
