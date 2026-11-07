@@ -268,9 +268,20 @@ flow, and the bank is scored (it equals the next rate; one residual, not two).
 **Scales (2026-11-07).** Coordinates stay in their raw units and every network reads them through a
 fixed per-column scale (velocities by a fast unit's move a loop, angles by π, cooldown by 100,
 contents by 1,000, value by 500, hp_max by 1,000, build_time by 1,000, mass as log1p, bank by 1,000,
-supply by 100), so no axis dwarfs another at a linear layer. The gradient flows run with unit
-mobility in the scaled coordinates (Δq = −scale² ∂V/∂q): the flow a network sees in its own units,
-so a change of unit changes nothing but a constant.
+supply by 100), so no axis dwarfs another at a linear layer. The residual measures each axis in
+its change unit (a hit is a tenth of a bar, a trip is 5 contents, a purchase 50 minerals), and the
+gradient flows run with unit mobility in those same units (Δq = −∂V/∂q / W²), so every flow is as
+sensitive to V as the loss is to the flow. A first attempt used the input scale as the metric
+(Δq = −scale² ∂V/∂q); it made contents 40,000 times more sensitive than hp and ran away in 60 steps.
+
+**Each row flows down its owner's potential.** The force was first taken from the total V₀ + V₁ +
+V₂, in which the antisymmetric interaction cancels exactly, so neither the first run's signed field
+nor the rebuilt interaction ever exerted a force (the first run's damage term δ was one-signed, which
+is why it alone moved). The interaction's force is read from interaction_1 with the owner's sign
+(+ for player 1, − for player 2), on both the probe and the source side of each pair; the own and
+neutral terms sit in the probe's owner's V and are differentiated on the probe side only. The code
+holds the rows' coordinates twice, as probes and as sources, to tell the two sides apart; a
+brute-force per-owner gradient on a toy state matches to float error.
 
 **Gauge.** The final layers of every potential term are zero-initialized and have no bias: a random
 init summed over N² pairs put V in the millions, and a bias times the number of pairs is a free

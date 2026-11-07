@@ -31,8 +31,14 @@ What moves, and what moves it:
 
 Coordinates are raw (map units, loops, resource units) and the networks read them
 through fixed scales (Q_SCALE, K_SCALE, P_SCALE), so no axis dwarfs another at a linear
-layer. The gradient flows run with unit mobility in those scaled coordinates: a change
-of a coordinate's unit changes nothing but a constant.
+layer. The residual measures every axis in its change unit (W_Q, W_P: a hit, a trip, a
+purchase), and the gradient flows run with unit mobility in those same units
+(Δq = −∂V/∂q / W²), so each flow is as sensitive to V as the loss is to the flow.
+
+Each row flows down its owner's potential, not the total: the interaction cancels in
+V_1 + V_2 exactly, so its gradient has to be read from one side (the owner's sign on
+∂interaction_1/∂q, both as probe and as source). The other terms (own, ψ, player) sit
+in the probe's owner's V, so their gradient is taken on the probe side only.
 
 The pieces, in the order a step runs them:
 
@@ -124,6 +130,21 @@ CONSTS = ("value", "mass", "speed", "hp_max", "shield_max", "energy_max", "build
 K = {n: i for i, n in enumerate(CONSTS)}
 K_SCALE = (500, 8, 0.29, 1000, 500, 200, 1000)
 
+# the residual's metric: each axis in its change unit a loop. A fast unit's move for
+# positions and velocities; a tenth of a bar for hp, shield and progress; a worker's trip
+# for contents; a small purchase for the bank, a supply step for food
+W_Q = {n: 1.0 for n in COORDS}
+for _n in ("x", "y", "z", "vx", "vy", "vz"):
+    W_Q[_n] = 1 / 0.29
+for _n in ("hp", "shield", "progress"):
+    W_Q[_n] = 10.0
+W_Q["contents"] = 1 / 5
+W_P = {n: 1.0 for n in PLAYER}
+for _n in ("minerals", "vespene"):
+    W_P[_n] = 1 / 50
+for _n in ("food_used", "food_cap", "food_free"):
+    W_P[_n] = 1 / 8
+
 GROUND, P1, P2 = 0, 1, 2  # owners: the ground (neutral), the players
 OWNERS = 3
 GEOM = 4  # Δx, Δy, Δz, distance between a probe and a source
@@ -144,8 +165,16 @@ class State:
     cp: torch.Tensor  # [M, P, d] float: the players' context (race, upgrades, ...)
     u: torch.Tensor  # [M, N, u_dim] float: this frame's inputs to each row (commands)
     loop: float = 1.0  # loops a step
+    # the rows' coordinates as sources, when they are to be told apart from the rows'
+    # coordinates as probes (the dynamics differentiates the two sides separately);
+    # the same values as q
+    qs: torch.Tensor | None = None
 
-    def replace(self, q=None, p=None):
+    @property
+    def q_source(self):
+        return self.q if self.qs is None else self.qs
+
+    def replace(self, q=None, p=None, qs=None):
         return State(
             self.q if q is None else q,
             self.k,
@@ -156,6 +185,7 @@ class State:
             self.cp,
             self.u,
             self.loop,
+            self.qs if qs is None else qs,
         )
 
 
@@ -208,12 +238,13 @@ def source(s):
     """[M, N, d + len(SRC) + len(CONSTS)] what a row is as a source: its context, its
     state without hp and shields (cooldown, energy, progress... a disruptor that has
     fired is a different source from one that has not) and its constants."""
-    return torch.cat([s.c, scaled(s.q, Q_SCALE)[..., SRC], constants(s.k)], -1)
+    return torch.cat([s.c, scaled(s.q_source, Q_SCALE)[..., SRC], constants(s.k)], -1)
 
 
 def geometry(x, s):
-    """x [M, X, 3] points -> [M, X, N, GEOM] Δ and distance to every row, scaled."""
-    delta = s.q[:, None, :, POS] - x[:, :, None]
+    """x [M, X, 3] points -> [M, X, N, GEOM] Δ and distance to every row (as sources),
+    scaled."""
+    delta = s.q_source[:, None, :, POS] - x[:, :, None]
     return torch.cat([delta, delta.norm(dim=-1, keepdim=True)], -1) / SCALE
 
 
@@ -408,9 +439,11 @@ class Input(nn.Module):
 class Dynamics(nn.Module):
     """One step of ẋ = J ∇H + B u, as the module docstring lays out.
 
-    The force is −∇V by autograd on the rows' q and the players' p. It moves hp, shield
-    and contents, and the bank and supply, as gradient flows with unit mobility in the
-    scaled coordinates (Δq = −scale² ∂V/∂q: the flow a network sees in its own units);
+    The force on a row is −∇ of its owner's V by autograd on the rows' q and the
+    players' p: the own and neutral terms on the probe side, the interaction on both
+    sides through interaction_1 with the owner's sign, since it cancels in the total.
+    It moves hp, shield and contents, and the bank and supply, as
+    gradient flows with unit mobility in the residual's units (Δq = −∂V/∂q / W²);
     nothing else. Position, velocity and heading answer to the inputs and the motion
     tables only. Energy regenerates, the cooldown counts down, progress runs at the
     type's build time; their resets are the engine's. A row whose hp reaches zero is
@@ -423,23 +456,35 @@ class Dynamics(nn.Module):
         self.energy_regen = 0.7875 / 22.4 / 200  # per loop, as a fraction of 200
         mob = torch.zeros(len(COORDS))
         for n in FLOW:
-            mob[Q[n]] = Q_SCALE[Q[n]] ** 2
+            mob[Q[n]] = 1 / W_Q[n] ** 2
         self.register_buffer("mobility", mob)
         mob_p = torch.zeros(len(PLAYER))
-        mob_p[LEDGER] = torch.tensor(P_SCALE[LEDGER], dtype=torch.float) ** 2
+        for n in PLAYER[LEDGER]:
+            mob_p[PL[n]] = 1 / W_P[n] ** 2
         self.register_buffer("mobility_p", mob_p)
+        # the owner's side of the antisymmetric term: +1 for P1, −1 for P2, 0 ground
+        self.register_buffer("side", torch.tensor([0.0, 1.0, -1.0]))
 
     def forward(self, s, H):
         """s the frames, H the Hamiltonian -> (q_next [M, N, len(COORDS)], p_next
         [M, P, len(PLAYER)], pieces)."""
+        # the rows' coordinates twice, as probes and as sources, so the two sides of
+        # the pair terms are told apart: a row's own potential holds the pairs where it
+        # is the probe (own, ψ) and, in the interaction, both sides with its owner's
+        # sign (the interaction cancels in the total, so it is read from P1's side)
         q = s.q.detach().requires_grad_(True)
+        qs = s.q.detach().requires_grad_(True)
         p = s.p.detach().requires_grad_(True)
-        out = H(s.replace(q=q, p=p))
+        out = H(s.replace(q=q, p=p, qs=qs))
         # training differentiates through the force (double backward); evaluation
         # needs the force but no graph behind it, and runs under enable_grad
         grad_q, grad_p = torch.autograd.grad(
-            out["V"].sum(), (q, p), create_graph=self.training
+            out["V"].sum(), (q, p), create_graph=self.training, retain_graph=True
         )
+        anti_q, anti_qs = torch.autograd.grad(
+            out["interaction"][:, P1].sum(), (q, qs), create_graph=self.training
+        )
+        grad_q = grad_q + self.side[s.owner][..., None] * (anti_q + anti_qs)
         flow, flow_p = -grad_q * self.mobility, -grad_p * self.mobility_p
         k, dt = s.k, s.loop
         mass, speed = k[..., K["mass"]], k[..., K["speed"]]
@@ -509,18 +554,11 @@ class ForceResidual(nn.Module):
 
     def __init__(self):
         super().__init__()
-        w = torch.ones(len(COORDS))
-        w[POS] = w[VEL] = 1 / 0.29  # a fast unit's move a loop, map units
-        w[Q["hp"]] = w[Q["shield"]] = w[Q["progress"]] = 10.0  # fractions a loop
-        w[Q["contents"]] = 1 / 5  # a worker's trip
-        self.register_buffer("w", w)
+        self.register_buffer("w", torch.tensor([W_Q[n] for n in COORDS]))
         use = torch.ones(len(COORDS))
         use[Q["cooldown"]] = 0.0
         self.register_buffer("use", use)
-        wp = torch.ones(len(PLAYER))
-        wp[PL["minerals"]] = wp[PL["vespene"]] = 1 / 50
-        wp[PL["food_used"]] = wp[PL["food_cap"]] = wp[PL["food_free"]] = 1 / 8
-        self.register_buffer("wp", wp)
+        self.register_buffer("wp", torch.tensor([W_P[n] for n in PLAYER]))
         use_p = torch.ones(len(PLAYER))
         use_p[LRATES] = 0.0
         self.register_buffer("use_p", use_p)
