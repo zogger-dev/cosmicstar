@@ -57,8 +57,9 @@ EXTRAS = (
     "display",
     "cloak",
     "add_on",
-    "engaged",
 )
+# not read: "engaged" (the API's current target) is the pair structure in a unary
+# feature, and would let the own term absorb damage
 N_RACES = 5
 
 

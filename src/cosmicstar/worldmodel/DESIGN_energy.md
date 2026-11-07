@@ -221,11 +221,20 @@ inverse of the type's acceleration (0 for instant types); a learned economic mas
 physics-level signal and is left to a higher level. T is read out of observed velocities and never
 differentiated.
 
-**The state.** Rows carry x, y, z, vx, vy, vz, heading, turn, hp, shield, energy, weapon cooldown,
-build progress and contents; each is scored against the observed next frame. The ledger is bank
-(minerals, vespene) and supply (used, cap, free) with their observed one-loop rates. Ability
-cooldowns are not in the API and were left out of the state by decision. Army, structure and worker
-value were dropped: they are sums over rows. Autocast and upgrades are not inputs yet.
+**The state, in three columns (2026-11-07, after the first rebuild).** Integrated: x, y, vx, vy,
+hp, shield, energy, and a patch's contents; these the dynamics steps and the residual scores. Given:
+z, heading as cosine and sine, weapon cooldown, build progress; read by the networks, never stepped
+or scored. z is the terrain under the unit plus 3.75 for flyers (measured: flyers sit at 11.75,
+13.75, 15.75, 17.75 against ground levels 8, 10, 12, 14) and jumps two units at a cliff edge; the
+heading follows the order and the target. Integrating either credited the players with work they
+never did (a cliff crossing looked like forty to four hundred times the unit's kinetic energy;
+heading was a fifth to a third of the loss). Constants: value, mass, speed, hp and shield maxima,
+energy pool (per type, scanned from the data; 0 means none), build time, radius, flying,
+cliff-walking. The ledger is bank (minerals, vespene) and supply (used, cap, free) with their
+observed one-loop rates. Ability cooldowns are not in the API and were left out of the state by
+decision. Army, structure and worker value were dropped: they are sums over rows. Autocast and
+upgrades are not inputs yet; the API's `engaged` target is deliberately not read, since it is the
+pair structure in a unary feature.
 
 **Orders are the input.** B u is what this frame's commands do: a force on the actuated coordinates
 (velocity, turn, a cast, a cancel) and spending on the ledger. Units move by orders and the motion
@@ -265,27 +274,44 @@ is the one-frame difference (a trip landing, a purchase), read as an input coord
 integrated nor scored; the field's gradient on the bank and supply plus the orders' spending is the
 flow, and the bank is scored (it equals the next rate; one residual, not two).
 
-**Scales (2026-11-07).** Coordinates stay in their raw units and every network reads them through a
-fixed per-column scale (velocities by a fast unit's move a loop, angles by π, cooldown by 100,
-contents by 1,000, value by 500, hp_max by 1,000, build_time by 1,000, mass as log1p, bank by 1,000,
-supply by 100), so no axis dwarfs another at a linear layer. The residual measures each axis in
-its change unit (a hit is a tenth of a bar, a trip is 5 contents, a purchase 50 minerals), and the
-gradient flows run with unit mobility in those same units (Δq = −∂V/∂q / W²), so every flow is as
-sensitive to V as the loss is to the flow. A first attempt used the input scale as the metric
-(Δq = −scale² ∂V/∂q); it made contents 40,000 times more sensitive than hp and ran away in 60 steps.
+**Scales and units (2026-11-07).** Coordinates stay in their raw units and every network reads them
+through a fixed per-column scale (velocities by a fast unit's move a loop, cooldown by 100, contents
+by 1,000, value by 500, hp_max by 1,000, build_time by 1,000, mass as log1p, bank by 1,000, supply
+by 100), so no axis dwarfs another at a linear layer. V and T are in resource units, because
+energy is value: a row's hp bar is worth its value's hp share (value × hp_max / (hp_max +
+shield_max)), the shield bar the rest, contents and the bank are resource units already, a point of
+supply is a depot's price per point (12.5). The residual scores every energy axis in those units
+with one weight (a worker's trip, 1/5), so a 28-mineral loss is the same loss on a zergling or a
+battlecruiser, and the gradient flows run with unit mobility in those units (ΔE = −∂V/∂E). T is
+½ · value · (speed / max speed)² per row: the value in motion, with mass left to the dynamics.
+Two earlier metrics were wrong: the input scale squared as the mobility made contents 40,000 times
+more sensitive than hp and ran away in 60 steps; one mobility for all types in fraction-of-bar units
+made V count health bars, a zergling's the same as a battlecruiser's.
 
 **Each row flows down its owner's potential.** The force was first taken from the total V₀ + V₁ +
 V₂, in which the antisymmetric interaction cancels exactly, so neither the first run's signed field
 nor the rebuilt interaction ever exerted a force (the first run's damage term δ was one-signed, which
-is why it alone moved). The interaction's force is read from interaction_1 with the owner's sign
-(+ for player 1, − for player 2), on both the probe and the source side of each pair; the own and
-neutral terms sit in the probe's owner's V and are differentiated on the probe side only. The code
-holds the rows' coordinates twice, as probes and as sources, to tell the two sides apart; a
-brute-force per-owner gradient on a toy state matches to float error.
+is why it alone moved). For every cross-player pair the term enters the probe's owner with + and the
+source's owner with −, whichever player each is, so every owner's side of the interaction is the
+probe side of the plain sum of the pair term over all cross pairs. The own and neutral terms sit in
+the probe's owner's V too. So the force is one gradient, of own + ψ + player + Σe, on the rows as
+probes, with the rows as sources held fixed (the code carries the coordinates twice to tell the
+sides apart). A brute-force per-owner gradient on a toy state matches exactly. Each term reads only
+the coordinates it may move: the interaction and the own term never see contents, ψ never sees hp
+or shields, so damage is the interaction's alone, mining is ψ's alone, and the own term holds what
+a row does to itself (regeneration); the toy check asserts each of these gradients is zero.
 
 **Gauge.** The final layers of every potential term are zero-initialized and have no bias: a random
 init summed over N² pairs put V in the millions, and a bias times the number of pairs is a free
-drift of V that the residual never sees (the first run's neutral term drifted to −10,000).
+drift of V that the residual never sees (the first run's neutral term drifted to −10,000). V's
+level is still unobservable (a constant feature acts as a bias), so the logged magnitudes of the
+terms mean nothing; only their gradients do.
+
+**Bookkeeping (2026-11-07, from a code review).** Energy regenerates only where the type has a
+pool (`scripts/scan_energy_types.py` writes the table; the Shield Battery's is 100, the rest 200; a
+pool the table missed shows as energy in the frame). The kinematic axes are not scored on the frame
+a row dies in, where the engine freezes them, while the killing blow on hp and shield is. The
+dissipation log weights hp and shield by what each bar is worth.
 
 **Training.** One objective, the force residual: the step's coordinates against the observed next
 ones, smooth L1 per axis with fixed weights, rows and players; the cooldown and the rates are
@@ -297,7 +323,21 @@ every residual; "works" means hp, contents and the ledger below it. The first ru
 orders and a little of the rate target, and nothing on hp: the two 2026-11-07 changes above are the
 answer.
 
+**The player as a power source (2026-11-07, measured, not built).** A player generates attention at
+a bounded rate into a bank of near-zero capacity: whatever is not converted into an action that loop
+is gone, and actions are the only way energy enters the unit dynamics from outside (a stationary
+unit moves because an order was created). Attention and game energy have different units: one
+click moves a 200-supply army, so the cap is on the control channel and efficiency is energy set in
+motion per unit of attention. `scripts/measure_attention.py` on 3,988 player-seconds of the 5.0.14
+pros: 8.2 actions a second (2.4 commands, 2.8 selections, 1.9 camera), 95th percentile 16.8, 99th
+25.2; about 100 resource units set in motion per action at every rate, so energy per second rises
+almost linearly with attention; 70% of actions move no energy themselves (selection, camera); the
+rate barely grows with army size while the value moved grows fifteenfold. Players sit at a third of
+their peak most of the time, which looks like a small reservoir that refills over seconds rather
+than zero capacity. Open: how the budget enters the action level.
+
 **Still not built.** Ability cooldowns; a shield-regen delay term; the action energy that pins the
-positional gradient; an entity encoder in place of the type embedding; attention in place of the
-pair loops; upgrades and autocast as inputs; the map-control readout ∬V; chemical potentials μ and
-tech wells Φ_k (fine conceptually, not needed yet).
+positional gradient and the attention budget; a contact term for units pushing each other; an
+entity encoder in place of the type embedding; attention in place of the pair loops; upgrades and
+autocast as inputs; the map-control readout ∬V; chemical potentials μ and tech wells Φ_k (fine
+conceptually, not needed yet). In the physics model: z and heading are still predicted there.

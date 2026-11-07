@@ -41,17 +41,27 @@ What moves, and what moves it:
                                    finishing) plus the orders' spending. The observed
                                    rates are read, not integrated
 
-Coordinates are raw (map units, loops, resource units) and the networks read them
-through fixed scales (Q_SCALE, G_SCALE, K_SCALE, P_SCALE), so no axis dwarfs another at
-a linear layer. The residual measures every axis in its change unit (W_Q, W_P: a hit, a
-trip, a purchase), and the gradient flows run with unit mobility in those same units
-(Δq = −∂V/∂q / W²), so each flow is as sensitive to V as the loss is to the flow.
+Energy is value in resource units, and so is V. Every axis the field moves is measured
+in resource units: a row's hp bar is worth its value's hp share (value × hp_max / (hp_max
++ shield_max)), its shield bar the rest, a patch's contents are resource units already,
+so is the bank, and a point of supply is worth what a depot charges for it. The residual
+scores all of them with one weight (a worker's trip), and the gradient flows run with
+unit mobility in those units: ΔE = −∂V/∂E. A zergling's bar and a battlecruiser's bar are
+then different amounts of energy, not the same unit, and a 28-mineral loss is the same
+loss whichever row it happens to. Position and velocity have their own scale (a fast
+unit's move a loop) and are not energy.
+
+Coordinates are stored raw and the networks read them through fixed scales (Q_SCALE,
+G_SCALE, K_SCALE, P_SCALE), so no axis dwarfs another at a linear layer.
 
 Each row flows down its owner's potential, not the total: the interaction cancels in
 V_1 + V_2 exactly, so its gradient is read from the probe's side of the plain sum of the
 pair term over all cross-player pairs, which is the same for both owners. The other
 terms (own, ψ, player) sit in the probe's owner's V. So one gradient, on the rows as
-probes, with the rows as sources held fixed.
+probes, with the rows as sources held fixed. Each term reads only the coordinates it
+may move: the interaction and the own term never see a patch's contents, ψ never sees hp
+or shields, so the interaction is the only damage, ψ the only mining, and the own term
+holds what a row does to itself (regeneration).
 
 The pieces, in the order a step runs them:
 
@@ -61,8 +71,8 @@ The pieces, in the order a step runs them:
                    i's owner and subtracted from j's. So V_1 + V_2 = 0 pair by pair:
                    adversarial by construction, and every term is grounded, since each
                    is an expected damage flow. Same-owner pairs contribute nothing, so
-                   nothing heals by sign. ψ, pairs with the ground, rides on the same
-                   hidden layer: patches pull workers, workers drain patches
+                   nothing heals by sign
+    Neutral        ψ, pairs with the ground: patches pull workers, workers drain patches
     PlayerPotential a player's ledger in the field of its own rows
     Hamiltonian    H = T + V per owner: T the observed flows read out, V the terms above
     Dynamics       one step of J ∇H + B u, as laid out above
@@ -85,13 +95,16 @@ COORDS = ("x", "y", "vx", "vy", "hp", "shield", "energy", "contents")
 Q = {n: i for i, n in enumerate(COORDS)}
 POS, VEL = slice(Q["x"], Q["y"] + 1), slice(Q["vx"], Q["vy"] + 1)
 HP = slice(Q["hp"], Q["shield"] + 1)
-# what a term may read of a row's own state: everything but where it is, so the only
-# place a position enters is the geometry between rows (translation invariance)
+# what a term may read of a row's own state, by term: everything but where it is, so
+# the only place a position enters is the geometry between rows (translation
+# invariance), and only the flows it may move
 PHYS = [i for n, i in Q.items() if n not in ("x", "y")]
+PROBE_E = [i for n, i in Q.items() if n not in ("x", "y", "contents")]
+PROBE_PSI = [i for n, i in Q.items() if n not in ("x", "y", "hp", "shield")]
 # what a row shows as a source: its state without hp and shield. A tank at 10 hp fires
 # the same shell, and a projection that read its own hp would move that hp for firing
 SRC = [i for n, i in Q.items() if n not in ("x", "y", "hp", "shield")]
-# the coordinates the field moves (gradient flows)
+# the coordinates the field moves (gradient flows), in resource units
 FLOW = ("hp", "shield", "contents")
 # the coordinates an order pushes on: motion (as a force) and energy (a cast). Nothing
 # else is a player's to move directly
@@ -127,6 +140,20 @@ PLAYER = (
 PL = {n: i for i, n in enumerate(PLAYER)}
 LEDGER, LRATES = slice(0, 5), slice(5, 10)
 P_SCALE = (1000, 1000, 100, 100, 100, 5, 5, 1, 1, 1)
+FOOD_VALUE = 100.0 / 8.0  # resource units a point of supply: a depot
+# a ledger coordinate's worth in resource units
+P_VALUE = (
+    1,
+    1,
+    FOOD_VALUE,
+    FOOD_VALUE,
+    FOOD_VALUE,
+    1,
+    1,
+    FOOD_VALUE,
+    FOOD_VALUE,
+    FOOD_VALUE,
+)
 
 # k: a row's constants from the patch's tables: value its cost in resource units (a
 # patch: its contents' worth), mass the inverse of its acceleration (0: instant), speed
@@ -148,24 +175,21 @@ CONSTS = (
 K = {n: i for i, n in enumerate(CONSTS)}
 K_SCALE = (500, 8, 0.29, 1000, 500, 200, 1000, 4, 1, 1)
 
-# the residual's metric: each axis in its change unit a loop. A fast unit's move for
-# positions and velocities; a tenth of a bar for hp and shield; a worker's trip for
-# contents; a small purchase for the bank, a supply step for food
-W_Q = {n: 1.0 for n in COORDS}
-for _n in ("x", "y", "vx", "vy"):
-    W_Q[_n] = 1 / 0.29
-for _n in ("hp", "shield"):
-    W_Q[_n] = 10.0
-W_Q["contents"] = 1 / 5
-W_P = {n: 1.0 for n in PLAYER}
-for _n in ("minerals", "vespene"):
-    W_P[_n] = 1 / 50
-for _n in ("food_used", "food_cap", "food_free"):
-    W_P[_n] = 1 / 8
+# the residual's metric. Energy axes (hp, shield, contents, the ledger) in resource
+# units, one weight: a worker's trip. Position and velocity: a fast unit's move a loop.
+# Unit energy: a fraction of its pool
+W_ENERGY = 1 / 5
+W_MOVE = 1 / 0.29
+W_Q = {
+    n: W_ENERGY if n in FLOW else W_MOVE if n in ("x", "y", "vx", "vy") else 1.0
+    for n in COORDS
+}
 
 GROUND, P1, P2 = 0, 1, 2  # owners: the ground (neutral), the players
 OWNERS = 3
-GEOM = 4  # Δx, Δy, distance in the plane, Δz between a probe and a source
+# Δx, Δy, distance in the plane, Δz, and the bearing of the probe from the source's
+# heading (cosine, sine) between a probe and a source
+GEOM = 6
 SCALE = 8.0  # map units the plane geometry is divided by
 Z_SCALE = 2.0  # a cliff level
 ROWS_SCALE = 64.0  # the summed row contexts of a player are divided by this
@@ -251,11 +275,23 @@ def constants(k):
     return scaled(k, K_SCALE)
 
 
-def probe(s):
-    """What a row is as a probe: its context, its whole state but position (hp and
-    shields: what there is to lose), its givens, its constants."""
+def row_values(k):
+    """[M, N, len(COORDS)] what a unit of each coordinate is worth in resource units:
+    hp and shield by the value's share, contents 1, the rest 0 (not energy)."""
+    hm, sm = k[..., K["hp_max"]], k[..., K["shield_max"]]
+    share = k[..., K["value"]] / (hm + sm).clamp(min=1)
+    v = torch.zeros(*k.shape[:-1], len(COORDS), device=k.device, dtype=k.dtype)
+    v[..., Q["hp"]] = share * hm
+    v[..., Q["shield"]] = share * sm
+    v[..., Q["contents"]] = 1.0
+    return v
+
+
+def features(s, phys):
+    """What a row is to a term: its context, the coordinates `phys` of its state, its
+    givens, its constants."""
     return torch.cat(
-        [s.c, scaled(s.q, Q_SCALE)[..., PHYS], scaled(s.g, G_SCALE), constants(s.k)],
+        [s.c, scaled(s.q, Q_SCALE)[..., phys], scaled(s.g, G_SCALE), constants(s.k)],
         -1,
     )
 
@@ -275,22 +311,25 @@ def source(s):
     )
 
 
-D_PROBE = len(PHYS) + len(GIVEN) + len(CONSTS)
-D_SOURCE = len(SRC) + len(GIVEN) + len(CONSTS)
+def d_features(phys):
+    return len(phys) + len(GIVEN) + len(CONSTS)
 
 
-def geometry(x, s):
-    """x [M, X, 2] points in the plane with heights z [M, X] -> [M, X, N, GEOM] Δ and
-    distance in the plane and Δz to every row (as sources), scaled."""
-    x, z = x
-    delta = s.q_source[:, None, :, POS] - x[:, :, None]
-    dz = s.g[:, None, :, G["z"]] - z[:, :, None]
+def geometry(s):
+    """[M, N, N, GEOM] from every probe (rows as probes, q) to every source (rows as
+    sources, q_source): Δ and distance in the plane, Δz, and the bearing of the probe
+    seen from the source's heading, as cosine and sine. Scaled."""
+    x, xs = s.q[..., POS], s.q_source[..., POS]
+    delta = xs[:, None] - x[:, :, None]  # probe -> source
+    dist = delta.norm(dim=-1, keepdim=True)
+    dz = (s.g[:, None, :, G["z"]] - s.g[:, :, None, G["z"]])[..., None]
+    # the direction from the source to the probe against the source's heading
+    d = -delta / dist.clamp(min=1e-6)
+    hc, hs = s.g[:, None, :, G["cos"]], s.g[:, None, :, G["sin"]]
+    cos_b = d[..., 0] * hc + d[..., 1] * hs
+    sin_b = hc * d[..., 1] - hs * d[..., 0]
     return torch.cat(
-        [
-            delta / SCALE,
-            delta.norm(dim=-1, keepdim=True) / SCALE,
-            dz[..., None] / Z_SCALE,
-        ],
+        [delta / SCALE, dist / SCALE, dz / Z_SCALE, cos_b[..., None], sin_b[..., None]],
         -1,
     )
 
@@ -307,56 +346,59 @@ class PairMLP(nn.Module):
         self.g = nn.Linear(GEOM, hidden)
         self.out = zero(nn.Linear(hidden, outputs, bias=False))
 
-    def forward(self, a, b, geom, extra=None):
-        """a [M, X, d_a], b [M, N, d_b], geom [M, X, N, GEOM], extra [M, X, N, hidden]
-        added to the hidden layer (a relation embedding) -> [M, X, N, outputs]."""
+    def forward(self, a, b, geom):
+        """a [M, X, d_a], b [M, N, d_b], geom [M, X, N, GEOM] -> [M, X, N, outputs]."""
         h = self.a(a)[:, :, None] + self.b(b)[:, None] + self.g(geom)
-        if extra is not None:
-            h = h + extra
         return self.out(F.gelu(h))
 
 
 # ---------------------------------------------------------------- the fields
 
-ENEMY, NEUTRAL_REL = 0, 1
-
 
 class Interaction(nn.Module):
-    """The pair terms, two outputs of one pair-sized hidden layer (the pair terms are
-    the memory, so they share it), with the relation enemy / neutral embedded into it.
-
-    e   the cross-player term: e(probe i, source j, geometry) for every pair of rows of
-        different players, source j's projection (its type, cooldown, energy, the
-        range and the angle) meeting probe i's presence (its type, hp, shields). It
-        enters i's owner's V with + and j's owner's with −, so the two players' sums
-        cancel pair by pair. Its gradient on i's hp is the damage; on i's position it
-        is repulsion from incoming fire, on j's position attraction toward what j can
-        hit, both unused here (no spatial force) and the action level's to read.
-        Same-owner pairs contribute nothing: no friendly fire, no healing by sign
-    ψ   the neutral term at each row from pairs with the ground, one function either
-        way: a patch pulls the workers that can mine it, the workers mining it drain
-        its contents (the gradient on contents). Exactly one side the ground
-    """
+    """The cross-player pair term: e(probe i, source j, geometry) for every pair of rows
+    of different players, source j's projection (its type, cooldown, energy, the range,
+    the bearing) meeting probe i's presence (its type, hp, shields). It enters i's
+    owner's V with + and j's owner's with −, so the two players' sums cancel pair by
+    pair. Its gradient on i's hp is the damage; on i's position it is repulsion from
+    incoming fire, on j's position attraction toward what j can hit, both unused here
+    (no spatial force) and the action level's to read. Same-owner pairs contribute
+    nothing: no friendly fire, no healing by sign. The probe's contents are not read:
+    this term moves hp and shields only."""
 
     def __init__(self, d, hidden):
         super().__init__()
-        self.g = PairMLP(d + D_PROBE, d + D_SOURCE, hidden, outputs=2)
-        self.rel = nn.Embedding(2, hidden)
+        self.e = PairMLP(d + d_features(PROBE_E), d + d_features(SRC), hidden)
 
-    def forward(self, s):
+    def forward(self, s, geom):
         """-> (absorbed [M, N]: Σ_j e_ij at each probe, projected [M, N]: Σ_i e_ij at
-        each source, ψ [M, N])."""
-        geom = geometry((s.q[..., POS], s.g[..., G["z"]]), s)
+        each source)."""
         ground = s.owner == GROUND
         gi, gj = ground[:, :, None], ground[:, None, :]
-        neutral = gi ^ gj
         cross = (s.owner[:, :, None] != s.owner[:, None, :]) & ~gi & ~gj
         both = s.mask[:, :, None] & s.mask[:, None, :]
-        rel = torch.where(neutral, NEUTRAL_REL, ENEMY)
-        out = self.g(probe(s), source(s), geom, self.rel(rel))
-        e = out[..., 0] * (both & cross)
-        psi = (out[..., 1] * (both & neutral)).sum(-1)
-        return e.sum(-1), e.sum(-2), psi
+        e = self.e(features(s, PROBE_E), source(s), geom).squeeze(-1) * (both & cross)
+        return e.sum(-1), e.sum(-2)
+
+
+class Neutral(nn.Module):
+    """ψ, the neutral term at each row from its pairs with the ground, one function
+    either way: a patch pulls the workers that can mine it, the workers mining it drain
+    its contents (the gradient on the patch's contents, with the patch as the probe).
+    Exactly one side the ground. The probe's hp and shields are not read: the ground
+    does no damage."""
+
+    def __init__(self, d, hidden):
+        super().__init__()
+        self.psi = PairMLP(d + d_features(PROBE_PSI), d + d_features(SRC), hidden)
+
+    def forward(self, s, geom):
+        """-> ψ [M, N] at each probe."""
+        ground = s.owner == GROUND
+        neutral = ground[:, :, None] ^ ground[:, None, :]
+        both = s.mask[:, :, None] & s.mask[:, None, :]
+        psi = self.psi(features(s, PROBE_PSI), source(s), geom).squeeze(-1)
+        return (psi * (both & neutral)).sum(-1)
 
 
 class PlayerPotential(nn.Module):
@@ -391,44 +433,47 @@ class PlayerPotential(nn.Module):
 
 
 class Hamiltonian(nn.Module):
-    """H = T + V per owner.
+    """H = T + V per owner, in resource units.
 
-    T   kinetic, read out of the observed velocities: ½ mass |v|² per row (the mass
-        from the tables, 0 for instant types), ½ |rates|² per player in the scaled
-        units: the flow through its ledger. Every velocity is observed, so T is never
-        differentiated
-    V   learned: a self term f(c, q without position, g, k) per row; the interaction,
-        + at the probe's owner and − at the source's; the neutral term; the player term
+    T   kinetic, read out of the observed velocities: ½ value (|v| / speed)² per row,
+        the value in motion (mass is the dynamics' business: how fast an order becomes
+        motion); ½ |rates|² per player, the ledger's one-loop flows in resource units.
+        Every velocity is observed, so T is never differentiated
+    V   learned: a self term f(c, q without position or contents, g, k) per row; the
+        interaction, + at the probe's owner and − at the source's; the neutral term;
+        the player term
     """
 
     def __init__(self, d, hidden=256):
         super().__init__()
-        self.f = mlp(d + D_PROBE, 1, hidden, bias=False)
+        self.f = mlp(d + d_features(PROBE_E), 1, hidden, bias=False)
         zero(self.f[2])
         self.interaction = Interaction(d, hidden)
+        self.neutral = Neutral(d, hidden)
         self.player = PlayerPotential(d, hidden)
 
     def kinetic(self, s):
         """[M, OWNERS]."""
-        t = by_owner(
-            0.5 * s.k[..., K["mass"]] * s.q[..., VEL].square().sum(-1), s.owner, s.mask
-        )
-        rates = 0.5 * scaled(s.p, P_SCALE)[..., LRATES].square().sum(-1)
+        speed = s.k[..., K["speed"]]
+        frac = s.q[..., VEL].norm(dim=-1) / speed.clamp(min=1e-6) * (speed > 0)
+        t = by_owner(0.5 * s.k[..., K["value"]] * frac.square(), s.owner, s.mask)
+        rates = 0.5 * (s.p * s.p.new_tensor(P_VALUE))[..., LRATES].square().sum(-1)
         return torch.cat([t[:, :P1], t[:, P1:] + rates], 1)
 
     def potential(self, s):
         """-> (V [M, OWNERS], its parts by owner). `absorbed` is what each player's rows
         take, `interaction` the zero-sum difference (absorbed minus projected),
         `player` the ledger term (0 for the ground)."""
-        own = self.f(probe(s)).squeeze(-1)
-        absorbed, projected, psi = self.interaction(s)
+        geom = geometry(s)
+        own = self.f(features(s, PROBE_E)).squeeze(-1)
+        absorbed, projected = self.interaction(s, geom)
         absorbed = by_owner(absorbed, s.owner, s.mask)
         player = self.player(s)
         player = torch.cat([torch.zeros_like(player[:, :1]), player], 1)
         parts = {
             "own": by_owner(own, s.owner, s.mask),
             "interaction": absorbed - by_owner(projected, s.owner, s.mask),
-            "neutral": by_owner(psi, s.owner, s.mask),
+            "neutral": by_owner(self.neutral(s, geom), s.owner, s.mask),
             "player": player,
         }
         v = sum(parts.values())
@@ -490,24 +535,26 @@ class Dynamics(nn.Module):
     The force on a row is −∇ of its owner's V by autograd on the rows' q (as probes;
     the rows as sources are held fixed) and the players' p: one gradient of own + ψ +
     player + the plain sum of the cross-player pair term. It moves hp, shield and
-    contents, and the bank and supply, as gradient flows with unit mobility in the
-    residual's units (Δq = −∂V/∂q / W²); nothing else. Position and velocity answer to
-    the inputs and the motion tables only. Energy regenerates where the type has a
-    pool. A row whose hp reaches zero is dead; nothing is subtracted for it, its value
-    leaves with the row.
+    contents, and the bank and supply, as gradient flows with unit mobility in
+    resource units (ΔE = −∂V/∂E, so Δq = −∂V/∂q / value²); nothing else. Position and
+    velocity answer to the inputs and the motion tables only. Energy regenerates where
+    the type has a pool. A row whose hp reaches zero is dead; nothing is subtracted for
+    it, its value leaves with the row.
     """
 
     def __init__(self, d, u_dim, hidden=256):
         super().__init__()
         self.B = Input(u_dim, hidden)
-        mob = torch.zeros(len(COORDS))
-        for n in FLOW:
-            mob[Q[n]] = 1 / W_Q[n] ** 2
-        self.register_buffer("mobility", mob)
         mob_p = torch.zeros(len(PLAYER))
         for n in PLAYER[LEDGER]:
-            mob_p[PL[n]] = 1 / W_P[n] ** 2
+            mob_p[PL[n]] = 1 / P_VALUE[PL[n]] ** 2
         self.register_buffer("mobility_p", mob_p)
+
+    @staticmethod
+    def mobility(k):
+        """[M, N, len(COORDS)] 1 / value² on the flow axes, 0 elsewhere."""
+        v = row_values(k)
+        return torch.where(v > 0, 1 / v.clamp(min=1e-6).square(), torch.zeros_like(v))
 
     def forward(self, s, H):
         """s the frames, H the Hamiltonian -> (q_next [M, N, len(COORDS)], p_next
@@ -524,7 +571,7 @@ class Dynamics(nn.Module):
         grad_q, grad_p = torch.autograd.grad(
             own_side, (q, p), create_graph=self.training
         )
-        flow, flow_p = -grad_q * self.mobility, -grad_p * self.mobility_p
+        flow, flow_p = -grad_q * self.mobility(s.k), -grad_p * self.mobility_p
         k, dt = s.k, s.loop
         mass, speed = k[..., K["mass"]], k[..., K["speed"]]
         bu, bu_p = self.B(s)
@@ -568,10 +615,11 @@ class ForceResidual(nn.Module):
     rows and players. Observed coordinates, observed inputs, observed changes: a
     constant H attributes every change to the inputs alone and fails where hp keeps
     falling and workers keep mining, so H is forced to be non-constant
-    (DESIGN_energy.md, why it cannot collapse). Scales put the axes on one footing.
-    The kinematic axes are not scored on the frame a row dies in (the engine freezes
-    them there); the ledger's rates are read, not predicted, so they are logged but
-    not trained on."""
+    (DESIGN_energy.md, why it cannot collapse). The energy axes are scored in resource
+    units with one weight, so the loss on a bar is proportional to what the bar is
+    worth; position and velocity in a fast unit's move. The kinematic axes are not
+    scored on the frame a row dies in (the engine freezes them there); the ledger's
+    rates are read, not predicted, so they are logged but not trained on."""
 
     def __init__(self):
         super().__init__()
@@ -579,15 +627,20 @@ class ForceResidual(nn.Module):
         kin = torch.zeros(len(COORDS), dtype=torch.bool)
         kin[[Q[n] for n in KINEMATIC]] = True
         self.register_buffer("kinematic", kin)
-        self.register_buffer("wp", torch.tensor([W_P[n] for n in PLAYER]))
+        self.register_buffer(
+            "wp", torch.tensor([W_ENERGY * v for v in P_VALUE], dtype=torch.float)
+        )
         use_p = torch.ones(len(PLAYER))
         use_p[LRATES] = 0.0
         self.register_buffer("use_p", use_p)
 
-    def forward(self, q_pred, q_next, mask, alive_next, p_pred, p_next):
+    def forward(self, q_pred, q_next, mask, alive_next, k, p_pred, p_next):
         """mask [M, N] the rows scored, alive_next [M, N] the rows alive in the next
-        frame -> (loss, per-axis residuals [len(COORDS)], [len(PLAYER)])."""
-        r = F.smooth_l1_loss(q_pred * self.w, q_next * self.w, reduction="none")
+        frame, k the constants -> (loss, per-axis residuals [len(COORDS)],
+        [len(PLAYER)])."""
+        v = row_values(k)
+        w = torch.where(v > 0, v, torch.ones_like(v)) * self.w
+        r = F.smooth_l1_loss(q_pred * w, q_next * w, reduction="none")
         m = mask[..., None] & (~self.kinematic | alive_next[..., None])
         rows = (r * m).sum((0, 1)) / m.sum((0, 1)).clamp(min=1)
         players = F.smooth_l1_loss(
@@ -622,7 +675,7 @@ class EnergyModel(nn.Module):
         alive_next = q_next[..., Q["hp"]] > 0
         q_pred, p_pred, pieces = self.step(s)
         loss, rows, players = self.residual(
-            q_pred, q_next, scored, alive_next, p_pred, p_next
+            q_pred, q_next, scored, alive_next, s.k, p_pred, p_next
         )
         logs = {f"res_{n}": rows[i].detach() for n, i in Q.items()}
         logs.update({f"res_{n}": players[i].detach() for n, i in PL.items()})
@@ -638,7 +691,9 @@ class EnergyModel(nn.Module):
             }
         )
         # the copy baseline: nothing moves. What a constant H would score
-        _, crows, cplayers = self.residual(s.q, q_next, scored, alive_next, s.p, p_next)
+        _, crows, cplayers = self.residual(
+            s.q, q_next, scored, alive_next, s.k, s.p, p_next
+        )
         logs.update({f"copy_{n}": crows[i].detach() for n, i in Q.items()})
         logs.update({f"copy_{n}": cplayers[i].detach() for n, i in PL.items()})
         for name in ("H", "T", "V", "own", "interaction", "absorbed", "neutral"):
@@ -650,16 +705,14 @@ class EnergyModel(nn.Module):
             )
         logs["advantage"] = (pieces["H"][:, P1] - pieces["H"][:, P2]).mean().detach()
         # the accounting, from what happened: value lost to damage this step (hp and
-        # shield fractions weighted by their maxima), and the value of the rows that
-        # died (the dissipation)
-        value = s.k[..., K["value"]]
-        hm, sm = s.k[..., K["hp_max"]], s.k[..., K["shield_max"]]
-        d = q_next[..., HP] - s.q[..., HP]
-        lost = -(d[..., 0] * hm + d[..., 1] * sm) / (hm + sm).clamp(min=1) * value
-        died = ((s.q[..., Q["hp"]] > 0) & ~alive_next).to(value.dtype)
+        # shield in resource units), and the value of the rows that died (the
+        # dissipation)
+        v = row_values(s.k)
+        lost = -((q_next[..., HP] - s.q[..., HP]) * v[..., HP]).sum(-1)
+        died = ((s.q[..., Q["hp"]] > 0) & ~alive_next).to(v.dtype)
         lost, died = (
             by_owner(lost, s.owner, scored),
-            by_owner(died * value, s.owner, scored),
+            by_owner(died * s.k[..., K["value"]], s.owner, scored),
         )
         for o in range(OWNERS):
             logs[f"lost_{o}"] = lost[:, o].mean().detach()
