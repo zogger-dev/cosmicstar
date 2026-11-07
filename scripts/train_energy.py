@@ -53,6 +53,17 @@ def sub(s, sl):
     )
 
 
+def report(logs, digits=5):
+    """Logs for printing: the mean squared errors averaged over chunks and passes
+    become their roots (rmse_*, copy_rmse_*: trips, like the smooth L1 residuals)."""
+    out = {}
+    for k, v in logs.items():
+        if k.startswith(("mse_", "copy_mse_")):
+            k, v = k.replace("mse_", "rmse_"), max(v, 0.0) ** 0.5
+        out[k] = round(v, digits)
+    return out
+
+
 def run_batch(model, enc, b, pairs, backward=True, weight=1.0):
     """One pass's frames (every window, frames 1 to F − 2) through the model in chunks
     of at most `pairs` row pairs, the loss backward per chunk weighted by its share of
@@ -115,7 +126,7 @@ def evaluate(model, enc, games, windows, seqs, L, workers, pairs):
             n += 1
             del b
     model.train()
-    return {k: round(v / n, 5) for k, v in logs.items()}
+    return report({k: v / n for k, v in logs.items()})
 
 
 def main():
@@ -339,7 +350,7 @@ def main():
                         gpu_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
                         windows=sizes[-1],
                         rows=rows,
-                        **{k: round(v, 5) for k, v in logs.items()},
+                        **report(logs),
                         **{
                             f"rules_res_norm_{k}": round(v, 4)
                             for k, v in res_norms.items()

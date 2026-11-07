@@ -370,7 +370,9 @@ the squared error in trip units, which agrees with smooth L1 below one trip. On 
 makes the loss about fourteen times larger, with hp and the bank most of it and position and velocity
 about 1%; separate parameters carry those axes and Adam scales each, so the shift mostly reaches the
 shared encoders. Contents and supply move in jumps too (a trip, a train's food) and stay smooth L1 for
-now. Position is stepped from the predicted velocity and the observed velocity is the one-frame
+now. The logs keep units: the squared axes are logged as mean squared errors (mse_*), averaged over chunks
+and passes, and printed as their roots (rmse_*, copy_rmse_*, in trips like the smooth L1 residuals res_*
+and copy_res_*). Position is stepped from the predicted velocity and the observed velocity is the one-frame
 difference, so the x and vx residuals are the same number: velocity error is scored twice.
 
 **Still not built.** Ability cooldowns; a shield-regen delay term; the action energy that pins the

@@ -697,8 +697,21 @@ class EnergyModel(nn.Module):
         loss, rows, players = self.residual(
             q_pred, q_next, scored, alive_next, s.k, p_pred, p_next
         )
-        logs = {f"res_{n}": rows[i].detach() for n, i in Q.items()}
-        logs.update({f"res_{n}": players[i].detach() for n, i in PL.items()})
+
+        # the residual per axis in trips: smooth L1 as scored; the squared axes as their
+        # mean squared error, which averages over chunks and passes, and whose root the
+        # report prints (rmse_*, in trips like the rest)
+        def per_axis(prefix, rows, players):
+            out = {}
+            for names, idx, vals in ((SQUARED, Q, rows), (SQUARED_P, PL, players)):
+                for n, i in idx.items():
+                    if n in names:
+                        out[f"{prefix}mse_{n}"] = 2 * vals[i].detach()
+                    else:
+                        out[f"{prefix}res_{n}"] = vals[i].detach()
+            return out
+
+        logs = per_axis("", rows, players)
         # each trained axis's share of the loss
         total = loss.detach().clamp(min=1e-12)
         use_p = self.residual.use_p
@@ -714,8 +727,7 @@ class EnergyModel(nn.Module):
         _, crows, cplayers = self.residual(
             s.q, q_next, scored, alive_next, s.k, s.p, p_next
         )
-        logs.update({f"copy_{n}": crows[i].detach() for n, i in Q.items()})
-        logs.update({f"copy_{n}": cplayers[i].detach() for n, i in PL.items()})
+        logs.update(per_axis("copy_", crows, cplayers))
         for name in ("H", "T", "V", "own", "interaction", "absorbed", "neutral"):
             logs.update(
                 {
