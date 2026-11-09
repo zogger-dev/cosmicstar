@@ -1,49 +1,63 @@
-"""The energy model's State from the physics batches (physics_data.collate): frames a
-loop apart, rows on fixed indices, each player's bank and supply.
+"""The energy model's State from the physics batches (physics_data.collate).
 
 Tables     a row type's constants: value and build time from unit_data.json, speed and
            acceleration from the patch's ruleset (rulesets.json), the energy pool and
-           whether it flies from energy_types.json (scanned from the data; absent, no
-           pools and nothing flies by type, and the flag in the frame still says)
-Frames     the encoder: a batch and a list of frames -> State, the next frame's
-           coordinates, and which rows are scored. The semantic context c is the row
-           type's node from the ruleset encoder (ruleset.py: the patch's balance data,
-           encoded once a pass, trained end to end with the model), a small MLP over
-           the raw numbers the coordinates leave out, and the current order's ability
-           node (its cost, product and range are in the node's numbers); the input u
-           is the ability node again with the order's target offset, has a target,
-           progress, and whether the queue changed this step; the player context cp is
-           the race. Velocities and the ledger's rates
-           are one-frame differences from the previous frame (instantaneous: a trip
-           landing, a purchase), so a window's first frame is never stepped from.
-
-Rows: real when present, alive and on the map (passengers and units in gas buildings
-stand where their parent is, so they are left out). A row is scored when it has an
-observed next frame on the map; a death is scored (hp 0), a row out of sight is not.
+           whether it flies from energy_types.json
+Frames     the spatiotemporal encoder: a batch and frame indices -> (State at t, State at t+1).
+           1. Grounded per-unit columns Q = (1, x, y, vx, vy, hp, shield, energy)
+              scaled to [-1, 1] / [0, 1].
+           2. Continuous localized potential field sampled at each entity's position and
+              on a 2D grid of continuous anchor coordinates (Fourier features + local
+              5-point terrain/visibility/creep/pathability stencil via grid_sample).
+           3. 6 spatiotemporal transformer blocks over entities + continuous field tokens:
+              - Spatial self-attention with 2D RoPE (rotating Q, K, V and inverse-rotating
+                outputs into each token's local frame).
+              - Causal temporal self-attention along each token's timeline with 1D RoPE
+                over game loops (and 2D spatial value rotation across frames).
+           4. Contextualized entity tokens project to r = 8 latent tactical modes
+              Z = tanh(W_z c), forming the per-player Gram matrix
+              G_full = (1 / N_0) [Q | Z]^T [Q | Z] and ledger (minerals, vespene) in fp32.
+           5. Per-player commands u_p are sum-pooled over the frame's active physical
+              commands and order changes (exact 0 when idle).
 """
 
 import json
+import math
 import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from . import energy as E
-from .physics_data import NEUTRAL, RAW_NUMS
-from .tokenize import PC_KEYS
+from .direct import RoPE2D
+from .physics import (
+    ROPE_SHORTEST,
+    FeedForward,
+    Heads,
+    RoPE1D,
+    cos_sin,
+    rotate,
+)
+from .physics_data import C_LIVE, C_STATIC, NEUTRAL, QUEUE, RAW_NUMS
+from .tokenize import N_EFFECT_IDS, PC_KEYS
 
 I = {n: i for i, n in enumerate(RAW_NUMS)}
 PC = {n: i for i, n in enumerate(PC_KEYS)}
+C_PLY = 14
+MAP_WAVES = 6  # wavelengths from 4 to 256 map units
+EFF_WAVES = 6  # wavelengths from 4 to 1024 game loops
 N_RAW_TYPES = 4096
-LOOPS_PER_SECOND_EXPORT = 16.0  # the ruleset's speeds are per this many loops
-INSTANT_ACCEL = 100.0  # export acceleration at or above which a type is instant
-SPEED_AT, ACCEL_AT = 17, 18  # ruleset unit scalars: speed / 5, log1p(accel) / 8
-CLIFF_WALKERS = (49, 4)  # API ids: Reaper, Colossus
-FLYING_BIT = 1  # bit 0 of the raw flags
-# the raw numbers the context reads: what the coordinates, givens and constants leave
-# out
+LOOPS_PER_SECOND_EXPORT = 16.0
+INSTANT_ACCEL = 100.0
+SPEED_AT, ACCEL_AT = 17, 18
+CLIFF_WALKERS = (49, 4)
+FLYING_BIT = 1
+# Raw numbers read into the entity token context (including contents for neutral patches)
 EXTRAS = (
+    "contents",
     "harvesters",
     "ideal_harvesters",
     "cargo_used",
@@ -60,17 +74,21 @@ EXTRAS = (
     "display",
     "cloak",
     "add_on",
+    "z",
+    "weapon_cooldown",
+    "build",
+    "radius",
 )
-# not read: "engaged" (the API's current target) is the pair structure in a unary
-# feature, and would let the own term absorb damage
 N_RACES = 5
-UNKNOWN_ABILITY = 2**31 - 1  # a raw id past every lookup table: the unknown row
+UNKNOWN_ABILITY = 2**31 - 1
 
 
 class Tables:
     """Per raw unit type (API id): value, build_time (loops), race, speed (map units a
     loop), mass (loops² a map unit: the inverse of acceleration; 0 when instant),
-    energy_max (0: no pool), flying, cliff."""
+    energy_max (0: no pool), flying, cliff, plus static ruleset feature vectors for
+    units (unit_scal + summed weapons) and abilities (abil_feat + produced unit_scal +
+    researched upg_feat)."""
 
     def __init__(
         self,
@@ -86,14 +104,29 @@ class Tables:
                 value[t] = u["minerals"] + u["vespene"]
                 build[t] = u["build_time"]
                 race[t] = u["race"]
-        rs = json.load(open(rulesets))["rulesets"]
+        rs_doc = json.load(open(rulesets))
+        widths = rs_doc["widths"]
+        rels = list(rs_doc["relations"])
+        rs = rs_doc["rulesets"]
         keys = [k for k in rs if k.split("_")[0] == str(base_build)]
         self.ruleset = keys[0] if keys else sorted(rs)[-1]
+        g = rs[self.ruleset]
+
+        w_u, w_w, w_a, w_g = (
+            widths["unit"],
+            widths["weapon"],
+            widths["ability"],
+            widths["upgrade"],
+        )
+        self.unit_feat_dim = w_u + w_w
+        self.abil_feat_dim = w_a + w_u + w_g
+
         speed, mass = (
             np.zeros(N_RAW_TYPES, np.float32),
             np.zeros(N_RAW_TYPES, np.float32),
         )
-        for u in rs[self.ruleset]["units"]:
+        unit_feat = np.zeros((N_RAW_TYPES, self.unit_feat_dim), np.float32)
+        for u in g["units"]:
             sp = u["scal"][SPEED_AT] * 5 / LOOPS_PER_SECOND_EXPORT
             ac = float(np.expm1(u["scal"][ACCEL_AT] * 8))
             m = (
@@ -101,9 +134,40 @@ class Tables:
                 if ac >= INSTANT_ACCEL or ac <= 0
                 else LOOPS_PER_SECOND_EXPORT**2 / ac
             )
+            scal = np.asarray(u["scal"], dtype=np.float32)
+            wpn = (
+                np.sum(u["weapons"], axis=0, dtype=np.float32)
+                if u["weapons"]
+                else np.zeros(w_w, np.float32)
+            )
+            uf = np.concatenate([scal, wpn])
             for a in u["api_ids"]:
                 if 0 <= a < N_RAW_TYPES:
                     speed[a], mass[a] = sp, m
+                    unit_feat[a] = uf
+
+        rel_u = rels.index("a_makes_u")
+        rel_g = rels.index("a_makes_g")
+        makes_u = {s: d_ for r, s, d_ in g["edges"] if r == rel_u}
+        makes_g = {s: d_ for r, s, d_ in g["edges"] if r == rel_g}
+        self.abil_by_raw = {}
+        for i, ab in enumerate(g["abilities"]):
+            af = np.asarray(ab["feat"], dtype=np.float32)
+            u_sc = (
+                np.asarray(g["units"][makes_u[i]]["scal"], dtype=np.float32)
+                if i in makes_u
+                else np.zeros(w_u, np.float32)
+            )
+            g_ft = (
+                np.asarray(g["upgrades"][makes_g[i]]["feat"], dtype=np.float32)
+                if i in makes_g
+                else np.zeros(w_g, np.float32)
+            )
+            vec = np.concatenate([af, u_sc, g_ft])
+            for a_id in ab["api_ids"]:
+                if a_id is not None and a_id >= 0:
+                    self.abil_by_raw[int(a_id)] = vec
+
         energy_max, flying = (np.zeros(N_RAW_TYPES, np.float32) for _ in range(2))
         if os.path.exists(energy_types):
             et = json.load(open(energy_types))
@@ -114,178 +178,787 @@ class Tables:
         cliff = np.zeros(N_RAW_TYPES, np.float32)
         cliff[list(CLIFF_WALKERS)] = 1.0
         self.race = torch.from_numpy(race.astype(np.int64))
-        # value, mass, speed, build_time, energy_max, flying, cliff
         self.k = torch.from_numpy(
             np.stack([value, mass, speed, build, energy_max, flying, cliff], 1)
         )
+        self.unit_feat = torch.from_numpy(unit_feat)
+
+    def abil_feat(self, vocab):
+        """[vocab.n_abilities, abil_feat_dim] static feature tensor indexed by vocab ability id."""
+        out = np.zeros((vocab.n_abilities, self.abil_feat_dim), np.float32)
+        for raw_a, idx in vocab._abil.items():
+            if raw_a in self.abil_by_raw and 0 <= idx < vocab.n_abilities:
+                out[idx] = self.abil_by_raw[raw_a]
+        return torch.from_numpy(out)
+
+
+def _compute_dtype(ref: torch.Tensor) -> torch.dtype:
+    return (
+        torch.get_autocast_dtype("cuda")
+        if torch.is_autocast_enabled("cuda")
+        else ref.dtype
+    )
+
+
+class ContinuousPotentialField(nn.Module):
+    """Continuous localized potential/terrain field V_loc(x, y) over the map.
+    Instead of a full-map 2D Conv ResNet tower, evaluates multi-scale 2D Fourier
+    coordinate features in physical map units (wavelengths 4 to 256 map units) plus a
+    5-point local stencil (center and +-delta cardinal offsets in map units) sampled
+    via bilinear grid_sample from the live visibility, creep, pathability, buildability,
+    and static terrain height layers."""
+
+    def __init__(self, d, n_freqs=MAP_WAVES, grid_size=8, stencil_step=2.0):
+        super().__init__()
+        self.grid_size = grid_size
+        self.n_freqs = n_freqs
+        # Physical map-unit wavelengths from 4 to 256 map units (same as entity_encoder)
+        self.register_buffer(
+            "omega",
+            2.0
+            * math.pi
+            / torch.logspace(math.log10(4.0), math.log10(256.0), n_freqs),
+            persistent=False,
+        )
+        # 5-point local stencil in map units: center, E, W, N, S
+        offsets = torch.tensor(
+            [
+                [0.0, 0.0],
+                [stencil_step, 0.0],
+                [-stencil_step, 0.0],
+                [0.0, stencil_step],
+                [0.0, -stencil_step],
+            ],
+            dtype=torch.float32,
+        )
+        self.register_buffer("offsets", offsets, persistent=False)
+        c_map = C_LIVE + C_STATIC
+        in_dim = (4 * n_freqs) + len(offsets) * c_map
+        self.net = E.mlp(in_dim, d, d)
+        self.field_emb = nn.Parameter(torch.zeros(grid_size * grid_size, d))
+        nn.init.normal_(self.field_emb, std=0.02)
+
+    def anchors(self, b):
+        """[B, S, 2] continuous anchor positions across the map, in map units from
+        b['center']."""
+        G = self.grid_size
+        dev = b["mask"].device
+        c = (torch.arange(G, device=dev, dtype=torch.float32) + 0.5) - G / 2
+        grid_xy = torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(
+            1, G * G, 2
+        )
+        if "side" in b:
+            side = b["side"][:, None, None].float()
+        elif "half" in b:
+            side = b["half"].max(dim=-1).values[:, None, None].float() * 2.0
+        else:
+            side = torch.full((b["mask"].shape[0], 1, 1), 200.0, device=dev)
+        return grid_xy * (side / G)
+
+    def forward(self, b, f_idx, pos):
+        """pos: [B, nf, K, 2] in map units relative to map center -> [B, nf, K, d]."""
+        B, nf, K, _ = pos.shape
+        dev = pos.device
+        dt = _compute_dtype(self.field_emb)
+
+        # Fourier-transformed physical map units (wavelengths 4 to 256 map units)
+        ang = pos.float().unsqueeze(-1) * self.omega  # [B, nf, K, 2, n_freqs]
+        fourier = torch.cat([ang.sin().flatten(-2), ang.cos().flatten(-2)], dim=-1)
+
+        n_pts = self.offsets.shape[0]
+        c_map = C_LIVE + C_STATIC
+        if "grid" in b and "static_grid" in b and "origin" in b and "center" in b:
+            st = b["static_grid"].to(dt)
+            st = torch.cat([st[..., :2] / 255.0, st[..., 2:]], dim=-1).permute(
+                0, 3, 1, 2
+            )
+            gr = b["grid"][:, f_idx]
+            gh, gw = gr.shape[2:4]
+            gr = gr.reshape(B * nf, gh, gw, C_LIVE).permute(0, 3, 1, 2).to(dt)
+            off = (b["center"] - b["origin"])[:, None, None, None, :].to(pos.dtype)
+            wh = torch.tensor([gw, gh], device=dev, dtype=pos.dtype)
+            # [B, nf, K, 5, 2] normalized to [-1, 1] for grid_sample
+            at = (((pos.unsqueeze(-2) + self.offsets + off) / wh) * 2.0 - 1.0).to(dt)
+            samp_live = (
+                F.grid_sample(
+                    gr,
+                    at.reshape(B * nf, K, n_pts, 2),
+                    align_corners=False,
+                )
+                .permute(0, 2, 3, 1)
+                .reshape(B, nf, K, n_pts * C_LIVE)
+            )
+            samp_stat = (
+                F.grid_sample(
+                    st,
+                    at.reshape(B, nf * K, n_pts, 2),
+                    align_corners=False,
+                )
+                .permute(0, 2, 3, 1)
+                .reshape(B, nf, K, n_pts * C_STATIC)
+            )
+            sampled = torch.cat([samp_live, samp_stat], dim=-1)
+        else:
+            sampled = torch.zeros(B, nf, K, n_pts * c_map, device=dev, dtype=dt)
+
+        inp = torch.cat([fourier.to(dt), sampled], dim=-1)
+        return self.net(inp)
+
+
+def _rotary_qkv_core(x, w_n, b_n, w_q, w_k, w_v, cs_q, cs_k, cs_v, H: int, KV: int, dh: int):
+    """Fused pre-norm + QKV projections + 1D/2D RoPE rotation + L2 normalization."""
+    B, T, d = x.shape
+    y = F.layer_norm(x, (d,), w_n, b_n)
+    q = F.linear(y, w_q).view(B, T, H, dh).transpose(1, 2)
+    q = F.normalize(rotate(q, cs_q), dim=-1)
+
+    k = F.linear(y, w_k).view(B, T, KV, dh).transpose(1, 2)
+    k = F.normalize(rotate(k, cs_k), dim=-1).repeat_interleave(H // KV, 1)
+
+    v = F.linear(y, w_v).view(B, T, KV, dh).transpose(1, 2)
+    v = rotate(v, cs_v).repeat_interleave(H // KV, 1)
+    return q, k, v
+
+
+def _rotary_qkv(x, w_n, b_n, w_q, w_k, w_v, cs_q, cs_k, cs_v, scale, H: int, KV: int, dh: int):
+    q, k, v = _compiled_qkv_core(
+        x, w_n, b_n, w_q, w_k, w_v, cs_q, cs_k, cs_v, H, KV, dh
+    )
+    q = q * (scale.exp().to(q.dtype) * (dh**0.5))
+    return q, k, v
+
+
+def _rotary_out_ff(x, a, cs, w_o, w_fn, b_fn, w1, w2, w3):
+    """Fused inverse RoPE rotation + output projection + residual + pre-norm SwiGLU."""
+    d = x.shape[-1]
+    dt = x.dtype
+    a_rot = rotate(a, cs, back=True).transpose(1, 2).flatten(2)
+    x = (x + F.linear(a_rot, w_o)).to(dt)
+    y = F.layer_norm(x, (d,), w_fn, b_fn)
+    return (x + F.linear(F.silu(F.linear(y, w1)) * F.linear(y, w2), w3)).to(dt)
+
+
+def _rotary_out_ff_masked(x_t, a_t, p_t, t_mask, w_o, w_fn, b_fn, w1, w2, w3):
+    """Fused inverse RoPE rotation + masked output residual + masked pre-norm SwiGLU."""
+    d = x_t.shape[-1]
+    dt = x_t.dtype
+    a_rot = rotate(a_t, p_t, back=True).transpose(1, 2).flatten(2)
+    x_t = torch.where(t_mask, (x_t + F.linear(a_rot, w_o)).to(dt), x_t)
+    y = F.layer_norm(x_t, (d,), w_fn, b_fn)
+    ff_out = (x_t + F.linear(F.silu(F.linear(y, w1)) * F.linear(y, w2), w3)).to(dt)
+    return torch.where(t_mask, ff_out, x_t)
+
+
+_compiled_qkv_core = _rotary_qkv_core
+_compiled_out_ff = _rotary_out_ff
+_compiled_out_ff_masked = _rotary_out_ff_masked
+
+
+class SpatioTemporalBlock(nn.Module):
+    """Pre-norm spatiotemporal block over entities and continuous potential field tokens:
+    1. Spatial self-attention with 2D RoPE (rotating Q, K, V and inverse-rotating output)
+       followed by SwiGLU feed-forward.
+    2. Causal temporal self-attention along each persistent token's timeline with 1D RoPE
+       over game loops (and 2D spatial rotation on values across frames) followed by SwiGLU."""
+
+    def __init__(self, d, heads=4, kv_heads=2, ff=None):
+        super().__init__()
+        ff = ff or 3 * d
+        self.ns = nn.LayerNorm(d)
+        self.nt = nn.LayerNorm(d)
+        self.space = Heads(d, heads, kv_heads)
+        self.time = Heads(d, heads, kv_heads)
+        self.ff_space = FeedForward(d, ff)
+        self.ff_time = FeedForward(d, ff)
+
+    def forward(self, x, valid, cs_2d, allow_t, t_mask, cs_1d, p_t):
+        """x: [B * nf, T, d], valid: [B * nf, 1, 1, T], cs_2d: [B * nf, T, dh/2, 2],
+        allow_t: [B * T_t, 1, nf, nf], t_mask: [B * T_t, nf, 1],
+        cs_1d: [B * T_t, nf, dh/2, 2], p_t: [B * T_t, nf, dh/2, 2]."""
+        d = x.shape[2]
+        nf = cs_1d.shape[1]
+        B = x.shape[0] // nf
+        T_t = cs_1d.shape[0] // B
+
+        # 1. 2D-RoPE Spatial self-attention across all tokens (globals, entities, field, effects)
+        sp, ffs = self.space, self.ff_space
+        qs, ks, vs = _rotary_qkv(
+            x,
+            self.ns.weight,
+            self.ns.bias,
+            sp.q.weight,
+            sp.k.weight,
+            sp.v.weight,
+            cs_2d,
+            cs_2d,
+            cs_2d,
+            sp.scale,
+            sp.H,
+            sp.KV,
+            sp.dh,
+        )
+        a_s = F.scaled_dot_product_attention(qs, ks, vs, attn_mask=valid)
+        x = _compiled_out_ff(
+            x,
+            a_s,
+            cs_2d,
+            sp.o.weight,
+            ffs.norm.weight,
+            ffs.norm.bias,
+            ffs.w1.weight,
+            ffs.w2.weight,
+            ffs.w3.weight,
+        )
+
+        # 2. 1D-RoPE Causal Temporal self-attention on persistent tokens [:T_t] only
+        x_p = x[:, :T_t]
+        x_t = x_p.view(B, nf, T_t, d).transpose(1, 2).reshape(B * T_t, nf, d)
+        tm, fft = self.time, self.ff_time
+        qt, kt, vt = _rotary_qkv(
+            x_t,
+            self.nt.weight,
+            self.nt.bias,
+            tm.q.weight,
+            tm.k.weight,
+            tm.v.weight,
+            cs_1d,
+            cs_1d,
+            p_t,
+            tm.scale,
+            tm.H,
+            tm.KV,
+            tm.dh,
+        )
+        a_t = F.scaled_dot_product_attention(qt, kt, vt, attn_mask=allow_t)
+        x_t = _compiled_out_ff_masked(
+            x_t,
+            a_t,
+            p_t,
+            t_mask,
+            tm.o.weight,
+            fft.norm.weight,
+            fft.norm.bias,
+            fft.w1.weight,
+            fft.w2.weight,
+            fft.w3.weight,
+        )
+        x_p = x_t.view(B, T_t, nf, d).transpose(1, 2).reshape(B * nf, T_t, d)
+        return torch.cat([x_p, x[:, T_t:]], dim=1)
 
 
 class Frames(nn.Module):
-    """A batch's frames as State. frames(b, ff) -> (State of M = B · len(ff) frames,
-    q_next, p_next, scored). ff: frame indices in [1, F − 2]."""
+    """Encodes collated physics batches into fixed-dimension Gram phase-space States."""
 
-    def __init__(self, vocab, tables, d, u_dim, rules):
+    def __init__(
+        self,
+        vocab,
+        tables,
+        d,
+        u_dim,
+        rules=None,
+        r=E.R_LATENT,
+        attn_layers=6,
+        field_grid=8,
+        dh=64,
+        ff=None,
+    ):
         super().__init__()
-        self.tables, self.rules = tables, rules
-        if tables.ruleset not in rules.tables.rulesets:
-            raise KeyError(f"ruleset {tables.ruleset} is not in the ruleset tables")
+        self.tables = tables
+        self.r = r
+        self.u_dim = u_dim
         self.register_buffer("k_type", tables.k)
         self.register_buffer("race", tables.race)
-        # the batch's order slots hold vocab ability indices; the ruleset looks
-        # abilities up by raw API id. 0: no order (a zero row), 1: an ability the vocab
-        # does not know (the ruleset's unknown row)
-        raw = torch.zeros(vocab.n_abilities, dtype=torch.long)
-        raw[1] = UNKNOWN_ABILITY
-        for a, i in vocab._abil.items():
-            raw[i] = a
-        self.register_buffer("abil_raw", raw)
-        self.unit_c = nn.Linear(rules.d, d)
-        self.abil_c = nn.Linear(rules.d, d)
-        self.abil_u = nn.Linear(rules.d, u_dim)
-        self.extras = E.mlp(len(EXTRAS), d, d)
-        self.race_emb = nn.Embedding(N_RACES, d)
-        self.reg_u = nn.Linear(5, u_dim)
+        self.register_buffer("unit_feat", tables.unit_feat)
+        self.register_buffer("abil_feat", tables.abil_feat(vocab))
         self.register_buffer("extras_at", torch.tensor([I[n] for n in EXTRAS]))
+        self.register_buffer(
+            "map_omega",
+            2.0
+            * math.pi
+            / torch.logspace(math.log10(4.0), math.log10(256.0), MAP_WAVES),
+            persistent=False,
+        )
+        self.register_buffer(
+            "eff_omega",
+            2.0
+            * math.pi
+            / torch.logspace(math.log10(4.0), math.log10(1024.0), EFF_WAVES),
+            persistent=False,
+        )
 
-    def nodes(self, rtype, abil):
-        """The ruleset encoder's rows for raw unit types and vocab ability indices:
-        the unit node (the unknown row for a type the ruleset lacks) and the ability
-        node (zero where there is no order). The ruleset is encoded once a call."""
-        self.rules.clear()  # a pass's graph is freed by its backward: encode anew
-        key = self.tables.ruleset
-        emb, t = self.rules(key), self.rules._on(key, rtype.device)
-        ulut, alut = t["unit_lut"], t["abil_lut"]
-        unit = emb["unit"][ulut[rtype.clamp(0, len(ulut) - 1)]]
-        raw = self.abil_raw[abil]
-        ability = emb["ability"][alut[raw.clamp(0, len(alut) - 1)]]
-        return unit, ability * (abil > 0)[..., None].to(ability.dtype)
+        # Global (CLS + 2 player) token encoders (matching entity_encoder.GlobalEncoder)
+        self.cls_tok = nn.Parameter(torch.zeros(1, d))
+        nn.init.normal_(self.cls_tok, std=0.02)
+        self.view_in = nn.Linear(2, d)
+        self.map_wh = nn.Linear(2, d)
+        self.race_emb = nn.Embedding(N_RACES, d)
+        self.ply_in = E.mlp(C_PLY, d, d)
+        self.player_emb = nn.Embedding(2, d)
+
+        # Learned unit/ability embeddings + light MLPs over static ruleset features
+        self.unit_emb = nn.Embedding(N_RAW_TYPES, d)
+        nn.init.normal_(self.unit_emb.weight, std=0.02)
+        self.unit_mlp = E.mlp(tables.unit_feat_dim, d, d)
+        self.abil_emb = nn.Embedding(vocab.n_abilities, d, padding_idx=0)
+        nn.init.normal_(self.abil_emb.weight, std=0.02)
+        with torch.no_grad():
+            self.abil_emb.weight[0].zero_()
+        self.abil_mlp = E.mlp(tables.abil_feat_dim, d, d)
+
+        # Entity token encoders (with Fourier-transformed map-unit positions)
+        self.unit_c = nn.Linear(d, d)
+        self.abil_c = nn.Linear(d, d)
+        self.prod_c = nn.Linear(d, d)
+        self.owner_emb = nn.Embedding(E.OWNERS, d)
+        self.kin_c = nn.Linear(E.K_Q + 4 * MAP_WAVES + 2 + 4, d)
+        self.extras = E.mlp(len(EXTRAS) + 7, d, d)
+
+        # Effect token encoders (matching entity_encoder.EffectEncoder)
+        self.eff_type = nn.Embedding(N_EFFECT_IDS, d)
+        self.eff_num = nn.Linear(2 + 2 * EFF_WAVES, d)
+
+        # Continuous localized potential field (evaluated at entities + anchor grid)
+        self.field = ContinuousPotentialField(d, grid_size=field_grid)
+
+        # 2D Spatial RoPE (map units) and 1D Temporal RoPE (game loops)
+        heads = max(1, d // dh)
+        kv_heads = max(1, heads // 2)
+        dh = d // heads
+        assert dh % 4 == 0, f"head dim dh={dh} must be divisible by 4 for 2D RoPE"
+        self.rope_2d = RoPE2D(dh, lo=ROPE_SHORTEST, hi=256.0)
+        self.rope_1d = RoPE1D(dh)
+
+        # 6 Spatiotemporal blocks across globals, entities, effects, and continuous field tokens
+        self.blocks = nn.ModuleList(
+            [
+                SpatioTemporalBlock(d, heads=heads, kv_heads=kv_heads, ff=ff)
+                for _ in range(attn_layers)
+            ]
+        )
+        self.z_norm = nn.LayerNorm(d)
+        self.z_proj = nn.Linear(d, r)
+        E.small_init(self.z_proj, std=1e-2)
+        self.z_ply_norm = nn.LayerNorm(d)
+        self.z_ply_proj = nn.Linear(d, r)
+        E.small_init(self.z_ply_proj, std=1e-2)
+        self.grad_ckpt = True
+
+        # Command port encoder (per-row order changes + raw action tokens)
+        self.abil_u = nn.Linear(d, u_dim, bias=False)
+        self.reg_u = nn.Linear(4, u_dim, bias=False)
+        self.act_kind_u = nn.Embedding(16, u_dim, padding_idx=0)
+        self.act_num_u = nn.Linear(14, u_dim, bias=False)
+
+    def compile_parts(self):
+        """Compiles the shared rotary QKV and SwiGLU kernels once across all 6 blocks."""
+        global _compiled_qkv_core, _compiled_out_ff, _compiled_out_ff_masked
+        torch._dynamo.config.recompile_limit = 256
+        torch._functorch.config.donated_buffer = False
+        _compiled_qkv_core = torch.compile(_rotary_qkv_core, dynamic=True)
+        _compiled_out_ff = torch.compile(_rotary_out_ff, dynamic=True)
+        _compiled_out_ff_masked = torch.compile(_rotary_out_ff_masked, dynamic=True)
+        self.field.net.compile(dynamic=True)
+        self.extras.compile(dynamic=True)
+
+    def emb_norms(self):
+        """RMS norms of the learned unit and ability embeddings."""
+        return {
+            "unit": float(self.unit_emb.weight.detach().float().pow(2).mean().sqrt()),
+            "ability": float(self.abil_emb.weight.detach().float().pow(2).mean().sqrt()),
+        }
+
+    def nodes(self, rtype, abil, prod_abil):
+        """Evaluates learned embeddings + light MLPs on the static ruleset tables once per
+        pass, projects the small vocabulary tables first, and gathers via F.embedding."""
+        dt = _compute_dtype(self.cls_tok)
+        u_tab = self.unit_emb.weight.to(dt) + self.unit_mlp(self.unit_feat.to(dt))
+        a_tab = self.abil_emb.weight.to(dt) + self.abil_mlp(self.abil_feat.to(dt))
+        u_c = self.unit_c(u_tab)
+        z_a = torch.zeros(1, a_tab.shape[1], device=a_tab.device, dtype=dt)
+        a_c = torch.cat([z_a, self.abil_c(a_tab[1:])], dim=0)
+        a_p = torch.cat([z_a, self.prod_c(a_tab[1:])], dim=0)
+        z_u = torch.zeros(1, self.u_dim, device=a_tab.device, dtype=dt)
+        a_u = torch.cat([z_u, self.abil_u(a_tab[1:])], dim=0)
+        r_idx = rtype.clamp(0, len(u_c) - 1)
+        a_idx = abil.clamp(0, len(a_c) - 1)
+        p_idx = prod_abil.clamp(0, len(a_p) - 1)
+        unit_c = F.embedding(r_idx, u_c)
+        ord_c = F.embedding(a_idx, a_c, padding_idx=0)
+        prod_c = F.embedding(p_idx, a_p, padding_idx=0)
+        ord_u = F.embedding(a_idx, a_u, padding_idx=0)
+        return unit_c, ord_c, prod_c, ord_u
 
     def coords(self, b, ff):
-        """[B, nf, R, len(COORDS)] the rows' integrated coordinates at frames ff,
-        velocities from the frame before (0 where either frame lacks the row)."""
+        """[B, nf, R, K_Q] grounded per-unit coordinates:
+        (1, x_norm, y_norm, vx_norm, vy_norm, hp_frac, shield_frac, energy_frac)."""
         x, y, num = b["x"][:, ff], b["y"][:, ff], b["num"][:, ff]
         px, py = b["x"][:, ff - 1], b["y"][:, ff - 1]
         both = (b["mask"][:, ff] & b["mask"][:, ff - 1]).to(x.dtype)
-        hp_max, sh_max = num[..., I["hp_max"]], num[..., I["shield_max"]]
-        cols = [
-            x,
-            y,
-            (x - px) * both,
-            (y - py) * both,
-            num[..., I["hp"]] / hp_max.clamp(min=1),
-            num[..., I["shield"]] / sh_max.clamp(min=1),
-            num[..., I["energy"]] / E.ENERGY_UNIT,
-            num[..., I["contents"]],
-        ]
-        return torch.stack(cols, -1)
 
-    def givens(self, b, ff):
-        """[B, nf, R, len(GIVEN)] height, heading as cosine and sine, weapon cooldown,
-        build progress."""
-        num = b["num"][:, ff]
-        facing = num[..., I["facing"]]
+        # Center and normalize (x, y) to [-1, 1] using map center and half-size
+        if "center" in b and "half" in b:
+            cx = b["center"][:, 0, None, None].to(x.dtype)
+            cy = b["center"][:, 1, None, None].to(x.dtype)
+            hx = b["half"][:, 0, None, None].clamp(min=1.0).to(x.dtype)
+            hy = b["half"][:, 1, None, None].clamp(min=1.0).to(x.dtype)
+        else:
+            cx, cy, hx, hy = 100.0, 100.0, 100.0, 100.0
+
+        x_norm = ((x - cx) / hx).clamp(-2.0, 2.0)
+        y_norm = ((y - cy) / hy).clamp(-2.0, 2.0)
+        vx_norm = (((x - px) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
+        vy_norm = (((y - py) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
+
+        hp_max = num[..., I["hp_max"]]
+        sh_max = num[..., I["shield_max"]]
+        hp_frac = (num[..., I["hp"]] / hp_max.clamp(min=1.0)) * (hp_max > 0)
+        sh_frac = (num[..., I["shield"]] / sh_max.clamp(min=1.0)) * (sh_max > 0)
+        en_frac = (num[..., I["energy"]] / E.ENERGY_UNIT).clamp(0.0, 1.5)
+        ones = torch.ones_like(x_norm)
+
         return torch.stack(
-            [
-                num[..., I["z"]],
-                facing.cos(),
-                facing.sin(),
-                num[..., I["weapon_cooldown"]],
-                num[..., I["build"]],
-            ],
-            -1,
+            [ones, x_norm, y_norm, vx_norm, vy_norm, hp_frac, sh_frac, en_frac], dim=-1
         )
 
     def ledger(self, b, ff):
-        """[B, nf, P, len(PLAYER)] bank and supply (the batch stores log1p / 8) and
-        their one-frame rates (ff ≥ 1)."""
-        pl = b["ply_num"]
+        """[B, nf, 2, 2] per-player (minerals, vespene) / 1000 in fp32."""
+        pl = b["ply_num"].float()
+        v = torch.expm1(pl[:, ff, :, : len(PC_KEYS)] * 8.0)
+        mins = v[..., PC["minerals"]] / E.BANK_SCALE
+        vesp = v[..., PC["vespene"]] / E.BANK_SCALE
+        return torch.stack([mins, vesp], dim=-1)
 
-        def raw(f):
-            v = torch.expm1(pl[:, f, :, : len(PC_KEYS)] * 8)
-            used, cap = v[..., PC["food_used"]], v[..., PC["food_cap"]]
-            return torch.stack(
-                [v[..., PC["minerals"]], v[..., PC["vespene"]], used, cap, cap - used],
-                -1,
+    def _embed_globals(self, b, f_idx):
+        """[B, nf, 3, d] global tokens: [CLS, Player 1, Player 2]."""
+        B = b["mask"].shape[0]
+        nf = len(f_idx)
+        dev = b["mask"].device
+        dt = _compute_dtype(self.cls_tok)
+        pl_num = b["ply_num"][:, f_idx, :, :C_PLY].to(dt)
+        if "players" in b:
+            races = b["players"].clamp(0, N_RACES - 1)
+        else:
+            races = torch.zeros(B, 2, dtype=torch.long, device=dev)
+        p_tok = (
+            self.ply_in(pl_num)
+            + self.race_emb(races)[:, None].to(dt)
+            + self.player_emb.weight[None, None].to(dt)
+        )
+        view = (
+            b["view"].to(dt)
+            if "view" in b
+            else torch.ones(B, 2, device=dev, dtype=dt)
+        )
+        half = (
+            (b["half"] / 100.0).to(dt)
+            if "half" in b
+            else torch.ones(B, 2, device=dev, dtype=dt)
+        )
+        cls = (self.cls_tok.to(dt) + self.view_in(view) + self.map_wh(half))[
+            :, None, None, :
+        ].expand(B, nf, 1, -1)
+        return torch.cat([cls, p_tok], dim=2)
+
+    def _embed_effects(self, b, f_idx):
+        """[B, nf, X, d], [B, nf, X], [B, nf, X, 2] effect tokens, mask, and map-unit xy."""
+        B = b["mask"].shape[0]
+        nf = len(f_idx)
+        dev = b["mask"].device
+        dt = _compute_dtype(self.cls_tok)
+        if "eff_mask" not in b or b["eff_mask"].shape[2] == 0:
+            return (
+                torch.zeros(B, nf, 0, self.cls_tok.shape[-1], device=dev, dtype=dt),
+                torch.zeros(B, nf, 0, dtype=torch.bool, device=dev),
+                torch.zeros(B, nf, 0, 2, device=dev, dtype=torch.float32),
             )
+        eff_mask = b["eff_mask"][:, f_idx]
+        eff_type = b["eff_type"][:, f_idx].clamp(0, N_EFFECT_IDS - 1)
+        eff_own_raw = b["eff_owner"][:, f_idx]
+        eff_own = torch.where(eff_own_raw == NEUTRAL, E.GROUND, eff_own_raw + 1).clamp(
+            0, E.OWNERS - 1
+        )
+        rad = b["eff_radius"][:, f_idx].float()
+        age = (
+            b["eff_age"][:, f_idx].float()
+            if "eff_age" in b
+            else torch.zeros_like(rad)
+        )
+        a = age.unsqueeze(-1) * self.eff_omega
+        eff_feat = torch.cat(
+            [rad.unsqueeze(-1), torch.log1p(age).unsqueeze(-1) / 8.0, a.sin(), a.cos()],
+            dim=-1,
+        ).to(dt)
+        eff_tok = (
+            self.eff_type(eff_type).to(dt)
+            + self.owner_emb(eff_own).to(dt)
+            + self.eff_num(eff_feat)
+        )
+        eff_xy = b["eff_xy"][:, f_idx].float()
+        return eff_tok, eff_mask, eff_xy
 
-        now, before = raw(ff), raw(ff - 1)
-        return torch.cat([now, now - before], -1)
+    def _encode_sequence(self, b, f_idx):
+        """Encodes frame indices f_idx -> (q, z, z_ply, owner, mask, p, u, u_active)."""
+        f_idx = torch.as_tensor(f_idx, device=b["mask"].device)
+        B, F_total, R = b["mask"].shape
+        nf = len(f_idx)
 
-    def frames(self, b, ff):
-        ff = torch.as_tensor(ff, device=b["mask"].device)
-        B, _, R = b["mask"].shape
-        nf = len(ff)
-        q, q_next = self.coords(b, ff), self.coords(b, ff + 1)
-        g = self.givens(b, ff)
-        p, p_next = self.ledger(b, ff), self.ledger(b, ff + 1)
-        rtype = b["rtype"][:, ff].clamp(0, N_RAW_TYPES - 1)
+        q = self.coords(b, f_idx)  # [B, nf, R, K_Q]
+        p = self.ledger(b, f_idx)  # [B, nf, 2, 2]
+
+        rtype = b["rtype"][:, f_idx].clamp(0, N_RAW_TYPES - 1)
         owner = b["owner"][:, None].expand(B, nf, R)
         owner = torch.where(owner == NEUTRAL, E.GROUND, owner + 1)
-        on_map = lambda f: b["mask"][:, f] & (b["inside"][:, f] == 0)
-        mask = on_map(ff) & b["alive"][:, ff]
-        scored = mask & on_map(ff + 1)
-        num = b["num"][:, ff]
-        kt = self.k_type[
-            rtype
-        ]  # value, mass, speed, build_time, energy_max, flying, cliff
-        value = torch.where(owner == E.GROUND, q[..., E.Q["contents"]], kt[..., 0])
-        # a pool the table missed shows as energy in the frame: a full pool then
-        energy_max = torch.where(
-            (kt[..., 4] <= 0) & (num[..., I["energy"]] > 0), E.ENERGY_UNIT, kt[..., 4]
-        )
-        flying = torch.maximum(
-            kt[..., 5], (num[..., I["flags"]].long() & FLYING_BIT).to(kt.dtype)
-        )
-        k = torch.stack(
-            [
-                value,
-                kt[..., 1],
-                kt[..., 2],
-                num[..., I["hp_max"]],
-                num[..., I["shield_max"]],
-                energy_max,
-                kt[..., 3],
-                num[..., I["radius"]],
-                flying,
-                kt[..., 6],
-            ],
-            -1,
-        )
-        abil = b["slot_abil"][:, ff, :, 0]
-        unit_node, abil_node = self.nodes(rtype, abil)
+        on_map = b["mask"][:, f_idx] & (b["inside"][:, f_idx] == 0)
+        mask = on_map & b["alive"][:, f_idx]
+
+        num = b["num"][:, f_idx]
+        kt = self.k_type[rtype]  # [B, nf, R, 7]
+        kt_comp = torch.sign(kt) * torch.log1p(kt.abs()) / 8.0
+
+        abil = b["slot_abil"][:, f_idx, :, 0]
+        prod_abil = b["slot_abil"][:, f_idx, :, QUEUE]
+
         extras = num[..., self.extras_at]
-        extras = torch.sign(extras) * torch.log1p(extras.abs())
-        c = self.unit_c(unit_node) + self.extras(extras) + self.abil_c(abil_node)
-        reg = torch.cat(
+        extras = torch.sign(extras) * torch.log1p(extras.abs()) / 8.0
+        ext_in = torch.cat([extras, kt_comp], dim=-1)
+
+        # Fourier-transformed map-unit coordinates (wavelengths 4 to 256 map units)
+        xy_raw = torch.stack([b["x"][:, f_idx], b["y"][:, f_idx]], dim=-1).float()
+        xy_ang = xy_raw.unsqueeze(-1) * self.map_omega  # [B, nf, R, 2, MAP_WAVES]
+        xy_fourier = torch.cat(
+            [xy_ang.sin().flatten(-2), xy_ang.cos().flatten(-2)], dim=-1
+        ).to(q.dtype)
+
+        facing = num[..., I["facing"]]
+        ord_reg = b["slot_reg"][:, f_idx, :, 0, :]
+        kin_in = torch.cat(
             [
-                b["slot_reg"][:, ff, :, 0, :],
-                b["queue_changed"][:, ff][..., None].float(),
+                q,
+                xy_fourier,
+                facing.sin().unsqueeze(-1),
+                facing.cos().unsqueeze(-1),
+                ord_reg,
             ],
-            -1,
+            dim=-1,
         )
-        u = self.abil_u(abil_node) + self.reg_u(reg)
-        race = self.race[rtype] * mask
-        cp = torch.stack(
-            [
-                torch.where(owner == pl_, race, torch.zeros_like(race)).amax(-1)
-                for pl_ in (E.P1, E.P2)
-            ],
-            -1,
-        ).clamp(max=N_RACES - 1)
-        cp = self.race_emb(cp)
+
+        # Continuous localized potential field at entity coordinates + map anchor grid
+        dev = b["mask"].device
+        if "center" in b:
+            center = b["center"][:, None, None, :].float()
+        else:
+            center = torch.full((B, 1, 1, 2), 100.0, device=dev)
+        pos_ent = xy_raw - center
+        S = self.field.grid_size * self.field.grid_size
+        pos_field = self.field.anchors(b)[:, None, :, :].expand(B, nf, S, 2)
+        pos_ef = torch.cat([pos_ent, pos_field], dim=2)  # [B, nf, R + S, 2]
+        ckpt = self.grad_ckpt and torch.is_grad_enabled()
+
+        def _embed_x():
+            unit_c, ord_c, prod_c, _ = self.nodes(rtype, abil, prod_abil)
+            field_all = self.field(b, f_idx, pos_ef)
+            dt = _compute_dtype(self.cls_tok)
+            field_ent = field_all[:, :, :R]
+            field_tok = field_all[:, :, R:] + self.field.field_emb[None, None].to(dt)
+            c_ent = (
+                unit_c
+                + ord_c
+                + prod_c
+                + self.owner_emb(owner).to(dt)
+                + self.kin_c(kin_in)
+                + self.extras(ext_in)
+                + field_ent
+            ).to(dt)
+            g_tok = self._embed_globals(b, f_idx).to(dt)
+            return torch.cat(
+                [g_tok, c_ent, field_tok.to(dt), eff_tok.to(dt)], dim=2
+            ).reshape(B * nf, T, -1)
+
+        eff_tok, eff_mask, eff_xy = self._embed_effects(b, f_idx)  # [B, nf, X, d]
+        g0, X = 3, eff_tok.shape[2]
+        T_t = g0 + R + S
+        T = T_t + X
+
+        if ckpt:
+            x_tok = checkpoint(_embed_x, use_reentrant=False)
+        else:
+            x_tok = _embed_x()
+        valid_g = torch.ones(B, nf, g0, dtype=torch.bool, device=dev)
+        valid_field = torch.ones(B, nf, S, dtype=torch.bool, device=dev)
+        valid_all = torch.cat([valid_g, mask, valid_field, eff_mask], dim=2)
+        valid_flat = valid_all.reshape(B * nf, 1, 1, T)
+
+        t_valid = torch.cat([valid_g, mask, valid_field], dim=2)
+        t_mask = t_valid.transpose(1, 2).reshape(B * T_t, nf)
+        tri = torch.tril(torch.ones(nf, nf, dtype=torch.bool, device=dev))
+        eye = torch.eye(nf, dtype=torch.bool, device=dev)
+        allow_t = ((tri[None] & t_mask[:, None, :]) | eye[None])[:, None]
+        t_mask_3d = t_mask.unsqueeze(-1)
+
+        # Global tokens sit at origin (0, 0) unrotated; entities, field, and effects at map-unit pos
+        pos_g = torch.zeros(B, nf, g0, 2, device=dev, dtype=torch.float32)
+        pos_all = torch.cat([pos_g, pos_ent, pos_field, eff_xy], dim=2)
+
+        # 2D Spatial RoPE (map units) and 1D Temporal RoPE (game loops), shared across blocks
+        cs_2d = cos_sin(self.rope_2d.angles(pos_all.reshape(B * nf, T, 2)))
+        h2 = cs_2d.shape[-2]
+        p_t = (
+            cs_2d[:, :T_t]
+            .view(B, nf, T_t, h2, 2)
+            .transpose(1, 2)
+            .reshape(B * T_t, nf, h2, 2)
+        )
+        if "loops" in b:
+            loops = b["loops"][:, f_idx] - b["loops"][:, f_idx[:1]]
+        else:
+            loops = torch.arange(nf, device=dev)[None].expand(B, -1)
+        t_cs = cos_sin(self.rope_1d.angles(loops))
+        cs_1d = (
+            t_cs[:, None, :, :, :]
+            .expand(B, T_t, nf, h2, 2)
+            .reshape(B * T_t, nf, h2, 2)
+        )
+
+        ckpt = self.grad_ckpt and torch.is_grad_enabled()
+        for blk in self.blocks:
+            if ckpt:
+                x_tok = checkpoint(
+                    blk,
+                    x_tok,
+                    valid_flat,
+                    cs_2d,
+                    allow_t,
+                    t_mask_3d,
+                    cs_1d,
+                    p_t,
+                    use_reentrant=True,
+                )
+            else:
+                x_tok = blk(
+                    x_tok,
+                    valid_flat,
+                    cs_2d,
+                    allow_t,
+                    t_mask_3d,
+                    cs_1d,
+                    p_t,
+                )
+
+        cls_out = x_tok[:, 0:1]  # [B * nf, 1, d]
+        ply_out = x_tok[:, 1:3]  # [B * nf, 2, d]
+        z_ply_flat = torch.tanh(
+            self.z_ply_proj(self.z_ply_norm(ply_out + cls_out))
+        )  # [B * nf, 2, r]
+
+        c_flat = x_tok[:, g0 : g0 + R] * mask.reshape(B * nf, R, 1).to(x_tok.dtype)
+        z_flat = torch.tanh(self.z_proj(self.z_norm(c_flat)))  # [M, R, r] in (-1, 1)
+
+        # Sum-pool per-player control vector u [B, nf, 2, u_dim]
+        # 1) Order queue changes on frames f < F_total - 1
+        f_clamped = f_idx.clamp(max=b["queue_changed"].shape[1] - 1)
+        q_changed = (
+            b["queue_changed"][:, f_clamped]
+            & (f_idx < b["queue_changed"].shape[1])[None, :, None]
+            & mask
+        )
+        dt_u = _compute_dtype(self.cls_tok)
+        a_tab_u = self.abil_emb.weight.to(dt_u) + self.abil_mlp(self.abil_feat.to(dt_u))
+        z_u = torch.zeros(1, self.u_dim, device=a_tab_u.device, dtype=dt_u)
+        a_u = torch.cat([z_u, self.abil_u(a_tab_u[1:])], dim=0)
+        ord_u = F.embedding(abil.clamp(0, len(a_u) - 1), a_u, padding_idx=0)
+        row_u = ord_u + self.reg_u(ord_reg)  # [B, nf, R, u_dim]
+        u_list, act_list = [], []
+        for pl in (E.P1, E.P2):
+            pl_chg = q_changed & (owner == pl)
+            u_pl = (row_u * pl_chg.unsqueeze(-1).to(row_u.dtype)).sum(dim=2)
+            active_pl = pl_chg.any(dim=2)
+            if "act_mask" in b and "act_kind" in b:
+                # Only physical command events (A_CMD=1, A_REISSUE=2, A_CANCEL=11),
+                # excluding passive camera pans and unit selections
+                kind = b["act_kind"][:, f_idx]
+                is_cmd = (kind == 1) | (kind == 2) | (kind == 11)
+                am = (
+                    b["act_mask"][:, f_idx]
+                    & (b["act_player"][:, f_idx] == (pl - 1))
+                    & is_cmd
+                )
+                ak = self.act_kind_u(kind.clamp(0, 15))
+                if "act_num" in b and "act_xy" in b:
+                    an_in = torch.cat(
+                        [b["act_num"][:, f_idx], b["act_xy"][:, f_idx] / 100.0], dim=-1
+                    )
+                    ak = ak + self.act_num_u(an_in.to(ak.dtype))
+                u_pl = u_pl + (ak * am.unsqueeze(-1).to(ak.dtype)).sum(dim=2) / 10.0
+                active_pl = active_pl | am.any(dim=2)
+            u_list.append(u_pl / 10.0)
+            act_list.append(active_pl)
+
+        u = torch.stack(u_list, dim=2)  # [B, nf, 2, u_dim]
+        u_active = torch.stack(act_list, dim=2)  # [B, nf, 2]
+        return (
+            q,
+            z_flat.view(B, nf, R, self.r),
+            z_ply_flat.view(B, nf, 2, self.r),
+            owner,
+            mask,
+            p,
+            u,
+            u_active,
+        )
+
+    def frames(self, b, ff):
+        """Encodes transitions from frames ff to ff + 1 -> (State_t, State_next)."""
+        ff = list(ff)
+        # If ff is contiguous [1, 2, ..., K], encode [1, ..., K + 1] in one pass
+        if ff and ff == list(range(ff[0], ff[-1] + 1)):
+            all_f = list(range(ff[0], ff[-1] + 2))
+            q, z, z_ply, owner, mask, p, u, u_active = self._encode_sequence(b, all_f)
+            q_t, q_n = q[:, :-1], q[:, 1:]
+            z_t, z_n = z[:, :-1], z[:, 1:]
+            zp_t, zp_n = z_ply[:, :-1], z_ply[:, 1:]
+            own_t, own_n = owner[:, :-1], owner[:, 1:]
+            msk_t, msk_n = mask[:, :-1], mask[:, 1:]
+            p_t, p_n = p[:, :-1], p[:, 1:]
+            u_t, u_n = u[:, :-1], u[:, 1:]
+            act_t, act_n = u_active[:, :-1], u_active[:, 1:]
+        else:
+            f_next = [f + 1 for f in ff]
+            q_t, z_t, zp_t, own_t, msk_t, p_t, u_t, act_t = self._encode_sequence(b, ff)
+            q_n, z_n, zp_n, own_n, msk_n, p_n, u_n, act_n = self._encode_sequence(
+                b, f_next
+            )
+
+        B, nf = q_t.shape[:2]
         flat = lambda t: t.reshape(B * nf, *t.shape[2:])
-        s = E.State(
-            flat(q),
-            flat(g),
-            flat(k),
-            flat(c),
-            flat(owner),
-            flat(mask),
-            flat(p),
-            flat(cp),
-            flat(u),
+
+        s_t = E.State(
+            q=flat(q_t).float(),
+            z=flat(z_t).float(),
+            owner=flat(own_t),
+            mask=flat(msk_t),
+            p=flat(p_t).float(),
+            u=flat(u_t).float(),
+            u_active=flat(act_t),
+            z_ply=flat(zp_t).float(),
         )
-        return s, flat(q_next), flat(p_next), flat(scored)
+        s_t.x_obs, s_t.x_lat = E.build_gram_state(
+            s_t.q, s_t.z, s_t.owner, s_t.mask, s_t.p, s_t.z_ply, r=self.r
+        )
+
+        s_next = E.State(
+            q=flat(q_n).float(),
+            z=flat(z_n).float(),
+            owner=flat(own_n),
+            mask=flat(msk_n),
+            p=flat(p_n).float(),
+            u=flat(u_n).float(),
+            u_active=flat(act_n),
+            z_ply=flat(zp_n).float(),
+        )
+        s_next.x_obs, s_next.x_lat = E.build_gram_state(
+            s_next.q, s_next.z, s_next.owner, s_next.mask, s_next.p, s_next.z_ply, r=self.r
+        )
+        return s_t, s_next
 
 
 BATCH_KEYS = (
@@ -297,13 +970,33 @@ BATCH_KEYS = (
     "num",
     "rtype",
     "owner",
+    "players",
+    "view",
     "ply_num",
     "slot_abil",
     "slot_reg",
     "queue_changed",
+    "center",
+    "half",
+    "side",
+    "origin",
+    "grid",
+    "static_grid",
+    "loops",
+    "eff_mask",
+    "eff_type",
+    "eff_owner",
+    "eff_xy",
+    "eff_radius",
+    "eff_age",
+    "act_mask",
+    "act_player",
+    "act_kind",
+    "act_num",
+    "act_xy",
 )
 
 
 def to_device(b, device):
     """The batch keys the energy model reads, on the device."""
-    return {k: b[k].to(device, non_blocking=True) for k in BATCH_KEYS}
+    return {k: b[k].to(device, non_blocking=True) for k in BATCH_KEYS if k in b}
