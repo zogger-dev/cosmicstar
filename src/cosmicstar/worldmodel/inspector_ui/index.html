@@ -297,7 +297,7 @@
   }
   .esl-player-row {
     display: grid;
-    grid-template-columns: minmax(110px, 1.25fr) minmax(58px, 0.8fr) minmax(36px, 0.45fr) minmax(36px, 0.45fr) minmax(50px, 0.65fr) minmax(50px, 0.65fr) minmax(70px, 1.1fr);
+    grid-template-columns: minmax(110px, 1.25fr) minmax(58px, 0.8fr) minmax(36px, 0.45fr) minmax(36px, 0.45fr) minmax(50px, 0.65fr) minmax(50px, 0.65fr) minmax(55px, 0.7fr);
     align-items: center;
     gap: 5px;
     padding: 4px 8px;
@@ -398,7 +398,7 @@
   }
   .esl-divider-row {
     display: grid;
-    grid-template-columns: minmax(110px, 1.25fr) minmax(58px, 0.8fr) minmax(36px, 0.45fr) minmax(36px, 0.45fr) minmax(50px, 0.65fr) minmax(50px, 0.65fr) minmax(70px, 1.1fr);
+    grid-template-columns: minmax(110px, 1.25fr) minmax(58px, 0.8fr) minmax(36px, 0.45fr) minmax(36px, 0.45fr) minmax(50px, 0.65fr) minmax(50px, 0.65fr) minmax(55px, 0.7fr);
     align-items: center;
     gap: 5px;
     padding: 2px 8px;
@@ -819,9 +819,11 @@
     </div>
     <div class="topbar-group">
       <button id="btnStepBack5s" title="-5 seconds (-112 loops)">-5s</button>
+      <button id="btnStepBack1s" title="-1 second (-22 loops)">-1s</button>
       <button id="btnStepBack1" title="-1 frame">-1f</button>
       <button id="btnPlayPause" title="Play / Pause scrub">▶ Play</button>
       <button id="btnStepFwd1" title="+1 frame">+1f</button>
+      <button id="btnStepFwd1s" title="+1 second (+22 loops)">+1s</button>
       <button id="btnStepFwd5s" title="+5 seconds (+112 loops)">+5s</button>
       <span style="color:var(--text-secondary);font-size:11.5px;">Loop:</span>
       <input type="number" id="loopInput" style="width:70px;" value="2000" step="14" />
@@ -1117,7 +1119,9 @@
             <span class="esl-val-lg" id="hudP1Vespene" style="color:#4ade80;">0</span>
             <span class="esl-val-rate" id="hudP1VespRate" style="color:#86efac;">+0</span>
           </div>
-          <div class="esl-upgrades-list" id="hudP1Upgrades" title="Completed Upgrades"></div>
+          <div class="esl-col-stat" title="Total Resources Lost (Minerals + Gas)">
+            <span class="esl-val-lg" id="hudP1Lost" style="color:#f87171;">0</span>
+          </div>
         </div>
 
         <!-- Center Divider with Category Icons (Image 2 style) -->
@@ -1142,8 +1146,8 @@
             <img class="hud-divider-icon" src="/assets/icons/icon-gas-terran-nobg.png" alt="Vespene Gas" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
             <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
           </div>
-          <div style="display:flex; align-items:center; gap:4px; font-weight:700; color:#cbd5e1; font-size:9.5px; padding-left:2px;">
-            <span>UPGRADES</span>
+          <div class="esl-col-stat" style="color:#f87171;" title="Resources Lost">
+            <span style="font-weight:700; font-size:9.5px; letter-spacing:0.02em;">LOST</span>
           </div>
         </div>
 
@@ -1170,7 +1174,9 @@
             <span class="esl-val-lg" id="hudP2Vespene" style="color:#4ade80;">0</span>
             <span class="esl-val-rate" id="hudP2VespRate" style="color:#86efac;">+0</span>
           </div>
-          <div class="esl-upgrades-list" id="hudP2Upgrades" title="Completed Upgrades"></div>
+          <div class="esl-col-stat" title="Total Resources Lost (Minerals + Gas)">
+            <span class="esl-val-lg" id="hudP2Lost" style="color:#f87171;">0</span>
+          </div>
         </div>
       </div>
 
@@ -1226,7 +1232,61 @@
         </div>
       </div>
 
-      <!-- 5. REVERSE SAE FEATURE ATTRIBUTION PANEL -->
+      <!-- 4. UPGRADES (Row Groups) -->
+      <div class="row-group-panel">
+        <div class="row-group-title">
+          <span>UPGRADES</span>
+          <span style="font-size:10px; font-weight:400; color:var(--text-secondary);">Researched Tech &amp; Weapon/Armor Levels</span>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p1" title="Player 1 Completed Upgrades"></div>
+          <div class="cards-scroll-wrap" id="upgradesP1Cards">
+            <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No upgrades completed</span>
+          </div>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p2" title="Player 2 Completed Upgrades"></div>
+          <div class="cards-scroll-wrap" id="upgradesP2Cards">
+            <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No upgrades completed</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. UNITS LOST (Row Groups with Minerals / Vespene breakdown) -->
+      <div class="row-group-panel">
+        <div class="row-group-title">
+          <span>UNITS LOST</span>
+          <span style="font-size:10px; font-weight:400; color:var(--text-secondary);">Casualties &amp; Resource Loss</span>
+        </div>
+        <div class="unit-row-item" style="align-items:flex-start;">
+          <div class="unit-row-bar p1" title="Player 1 Losses" style="height:48px;"></div>
+          <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:0;">
+            <div style="font-size:10px; font-weight:600; color:#fca5a5; display:flex; align-items:center; gap:8px;" id="p1LostHeader">
+              <span>⛏️ 0</span>
+              <span>🧪 0</span>
+              <span style="color:var(--text-muted); font-weight:400;">(Total: 0)</span>
+            </div>
+            <div class="cards-scroll-wrap" id="lostP1Cards">
+              <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No losses</span>
+            </div>
+          </div>
+        </div>
+        <div class="unit-row-item" style="align-items:flex-start;">
+          <div class="unit-row-bar p2" title="Player 2 Losses" style="height:48px;"></div>
+          <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:0;">
+            <div style="font-size:10px; font-weight:600; color:#93c5fd; display:flex; align-items:center; gap:8px;" id="p2LostHeader">
+              <span>⛏️ 0</span>
+              <span>🧪 0</span>
+              <span style="color:var(--text-muted); font-weight:400;">(Total: 0)</span>
+            </div>
+            <div class="cards-scroll-wrap" id="lostP2Cards">
+              <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No losses</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. REVERSE SAE FEATURE ATTRIBUTION PANEL -->
       <div class="sae-attr-box" id="reverseSaePanel">
         <div class="sae-attr-header">
           <span id="reverseSaeTitle" style="font-weight:700; font-size:11.5px; color:#e0e7ff;">Reverse SAE Feature Attribution</span>
@@ -1236,264 +1296,6 @@
           Click any unit or structure card above (e.g. <b>56 SCVs</b> or <b>6 Marauders</b>) to highlight them across the battlefield and inspect which Sparse Autoencoder features activate the strongest.
         </div>
       </div>
-
-      <!-- 6. COLLAPSIBLE DEEP INSPECTION DRAWER (Panels 3, 4, 5) -->
-      <details class="deep-math-drawer">
-        <summary>
-          <span>▼ Advanced Neural Math &amp; Phase-Space Analyzer (Overlaps, Attention, Port-Hamiltonian)</span>
-          <span class="badge">Click to Expand</span>
-        </summary>
-        <div style="margin-top:6px; display:flex; flex-direction:column; gap:6px;">
-          <!-- Navigation Tabs for Panels 3, 4, 5 -->
-          <div class="tab-bar">
-            <button class="tab-btn active" data-tab="tabGram">3. Field Overlaps &amp; Modes</button>
-            <button class="tab-btn" data-tab="tabAttn">4. Transformer &amp; 7-Layer SAE</button>
-            <button class="tab-btn" data-tab="tabPhd">5. Port-Hamiltonian &amp; What-If</button>
-          </div>
-
-      <!-- TAB 3: CONTINUOUS FIELD OVERLAPS & SPECTRAL EXPLORER -->
-      <div id="tabGram" class="tab-pane active panel">
-        <div class="panel-header">
-          <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
-            <span class="panel-title">Field Overlaps &amp; Kernels</span>
-            <select id="gramOwnerSelect">
-              <option value="p1">Owner: Player 1</option>
-              <option value="p2">Owner: Player 2</option>
-              <option value="diff">Owner: P1 − P2 Diff</option>
-              <option value="neutral">Owner: Neutral</option>
-            </select>
-            <select id="gramMatType">
-              <optgroup label="16×16 Continuous Spatial Field Overlaps (Zero-Gram Phase-Space)">
-                <option value="F_self_8x8" selected>r×r Self-Field Overlap F_self = ∫ F_p(r) F_p(r)ᵀ dr</option>
-                <option value="grad_F_self">r×r Self-Field Sensitivity ∂(-A₁)/∂F_self (×10⁻³)</option>
-                <option value="contrib_F_self">r×r Self-Field Attribution F_self ⊙ ∂(-A₁)/∂F_self</option>
-                <option value="F_cross_8x8">r×r P1–P2 Contest Overlap F_cross = ∫ F_p(r) F_{-p}(r)ᵀ dr</option>
-                <option value="grad_F_cross">r×r Contest Sensitivity ∂(-A₁)/∂F_cross (×10⁻³)</option>
-                <option value="contrib_F_cross">r×r Contest Attribution F_cross ⊙ ∂(-A₁)/∂F_cross</option>
-              </optgroup>
-              <optgroup label="Spatial Wave-Packet &amp; 256×256 Encoder Kernels">
-                <option value="K_spatial">N×N 2D Polar Gauss-Rayleigh Spatial Kernel K(r_u − r_v)</option>
-                <option value="K_uu">N×N Entity-by-Entity Cosine Kernel K_uv = ĉ_u · ĉ_vᵀ</option>
-                <option value="G_cc_active">256×256 Active W_z Rowspace Covariance (rD Subspace)</option>
-                <option value="G_cc_clustered">256×256 Clustered Covariance Cov(C_p)</option>
-                <option value="G_cc_cov">256×256 Centered Covariance Cov(C_p)</option>
-                <option value="G_cc_256">256×256 Raw Entity Feature Covariance C_pᵀ C_p / N₀</option>
-              </optgroup>
-              <optgroup label="(8+r)×(8+r) Combined Totals + Field View &amp; Layer 2">
-                <option value="G_16x16">(8+r)×(8+r) Combined Grounded Diag + F_self</option>
-                <option value="grad_G">(8+r)×(8+r) Sensitivity ∂(-A₁)/∂[Totals ⊕ F_self]</option>
-                <option value="contrib_G">(8+r)×(8+r) Attribution [Totals ⊕ F_self] ⊙ ∂(-A₁)</option>
-                <option value="l2_cc">16×16 Layer 2 Congruence tanh(W_cᵀ G_cc W_c)</option>
-              </optgroup>
-            </select>
-            <button id="btnGramResetZoom" style="padding:2px 7px;font-size:11px;" title="Reset matrix zoom &amp; pan (Scroll wheel to zoom in)">1× Zoom</button>
-            <button id="btnGramExpand" style="padding:2px 7px;font-size:11px;" title="Toggle full-panel matrix view">⛶ Expand</button>
-            <button id="btnGramClearMode" style="padding:2px 6px;font-size:10.5px;display:none;" class="danger" title="Clear active Gram cell / SVD mode">✕ Mode</button>
-          </div>
-          <span id="gramCellBadge" class="badge">Click cell (a,b) or bar σ_k to project (click again to deselect)</span>
-        </div>
-
-        <div id="gramLayout" class="gram-layout">
-          <!-- Left: Large Interactive Matrix Canvas (supports Scroll Zoom + Drag Pan + Loupe) -->
-          <div id="gramCard" class="card-box" style="align-items:center;justify-content:center;min-height:260px;min-width:0;position:relative;overflow:hidden;">
-            <div id="gramCanvasWrap" style="width:100%;flex:1;min-height:0;min-width:0;overflow:hidden;display:flex;align-items:center;justify-content:center;">
-              <canvas id="gramCanvas" style="cursor:crosshair;display:block;"></canvas>
-            </div>
-            <div id="gramHoverText" style="font-family:var(--font-mono);font-size:11.5px;color:var(--text-secondary);text-align:center;width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-              Scroll wheel to zoom (up to 16×) • Drag to pan • Click cell to project onto map
-            </div>
-          </div>
-
-          <!-- Right: 256x256 G_cc SVD Spectrum + Unit Attribution Table -->
-          <div class="gram-side-col" style="display:flex;flex-direction:column;gap:6px;min-height:0;">
-            <div class="card-box">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="font-weight:600;font-size:11.5px;">Full-Rank 256×256 G_cc Spectrum (Click Bar for Mode)</span>
-                <span id="effRankBadge" class="badge">Eff Rank: —</span>
-              </div>
-              <canvas id="svdCanvas" height="95" style="width:100%;display:block;cursor:pointer;"></canvas>
-              <div style="display:flex;gap:4px;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-secondary);">
-                <span>L2 Learned Basis W_c Column (0..15):</span>
-                <select id="l2BasisSelect" style="padding:2px 5px;font-size:11px;">
-                  <option value="-1">None</option>
-                  <option value="0">W_c Mode 0</option><option value="1">W_c Mode 1</option>
-                  <option value="2">W_c Mode 2</option><option value="3">W_c Mode 3</option>
-                  <option value="4">W_c Mode 4</option><option value="5">W_c Mode 5</option>
-                  <option value="6">W_c Mode 6</option><option value="7">W_c Mode 7</option>
-                  <option value="8">W_c Mode 8</option><option value="9">W_c Mode 9</option>
-                  <option value="10">W_c Mode 10</option><option value="11">W_c Mode 11</option>
-                  <option value="12">W_c Mode 12</option><option value="13">W_c Mode 13</option>
-                  <option value="14">W_c Mode 14</option><option value="15">W_c Mode 15</option>
-                </select>
-              </div>
-            </div>
-
-            <div id="gramCorrCard" class="card-box" style="font-size:11px;font-family:var(--font-mono);line-height:1.45;">
-              <div style="font-weight:700;color:#e2e8f0;font-family:var(--font-sans);font-size:11.5px;">
-                Active Cell Feature Correlations (What This Mode Encodes)
-              </div>
-              <div id="gramCorrBody" style="color:var(--text-secondary);">
-                Click any cell in a 256×256, N×N, or 8×256 Gram matrix to decode its top physical &amp; unit-type correlations.
-              </div>
-            </div>
-
-            <div class="card-box" style="flex:1;min-height:0;">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span id="gramAttrTitle" style="font-weight:600;font-size:11.5px;">Top Contributing Units on Map</span>
-                <span id="gramTypeSummary" style="font-size:11px;color:var(--text-secondary);"></span>
-              </div>
-              <div class="scroll-box" style="flex:1;">
-                <table class="data-table">
-                  <thead>
-                    <tr><th>Unit</th><th>Own</th><th>Score</th><th>d(-A₁)</th><th>HP/Shd</th><th>Order</th></tr>
-                  </thead>
-                  <tbody id="gramUnitTableBody"></tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- TAB 4: TRANSFORMER LAYER & ATTENTION INSPECTOR -->
-      <div id="tabAttn" class="tab-pane panel">
-        <div class="panel-header">
-          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-            <span class="panel-title">Spatiotemporal Block Inspector</span>
-            <select id="tokenSelect" style="max-width:170px;" title="Selected Token"></select>
-            <button id="btnTokDeselect" style="padding:2px 6px;font-size:11px;" title="Deselect active token / unit">✕ None</button>
-            <button id="btnTokCLS" style="padding:2px 6px;font-size:11px;">[CLS]</button>
-            <button id="btnTokP1" style="padding:2px 6px;font-size:11px;color:var(--p1);">[P1]</button>
-            <button id="btnTokP2" style="padding:2px 6px;font-size:11px;color:var(--p2);">[P2]</button>
-          </div>
-          <div style="display:flex;gap:5px;align-items:center;">
-            <span style="font-size:11px;color:var(--text-secondary);">Layer:</span>
-            <select id="layerSelect">
-              <option value="0">Block 0 (L1)</option>
-              <option value="1">Block 1 (L2)</option>
-              <option value="2">Block 2 (L3)</option>
-              <option value="3">Block 3 (L4)</option>
-              <option value="4">Block 4 (L5)</option>
-              <option value="5" selected>Block 5 (Final L6)</option>
-            </select>
-            <span style="font-size:11px;color:var(--text-secondary);">Head:</span>
-            <select id="headSelect">
-              <option value="0" selected>Mean (H0..3)</option>
-              <option value="1">Head 0</option>
-              <option value="2">Head 1</option>
-              <option value="3">Head 2</option>
-              <option value="4">Head 3</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="sub-grid-2" style="flex:1;">
-          <!-- Left: Outgoing & Incoming Spatial 2D-RoPE Attention -->
-          <div style="display:flex;flex-direction:column;gap:6px;min-height:0;">
-            <div class="card-box" style="flex:1;min-height:0;">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="font-weight:600;font-size:11.5px;">Spatial 2D-RoPE Outgoing Attention (Query = Selected)</span>
-                <span style="font-size:10.5px;color:var(--text-secondary);">Click row to inspect target</span>
-              </div>
-              <div class="scroll-box" style="flex:1;">
-                <table class="data-table">
-                  <thead>
-                    <tr><th>Target Token</th><th>Weight</th><th>H0</th><th>H1</th><th>H2</th><th>H3</th></tr>
-                  </thead>
-                  <tbody id="attnOutTableBody"></tbody>
-                </table>
-              </div>
-            </div>
-
-            <div class="card-box" style="height:155px;">
-              <span style="font-weight:600;font-size:11.5px;">Causal 1D-RoPE Temporal Attention (Blocks 0..5 × Window Frames)</span>
-              <canvas id="tempAttnCanvas" height="115" style="width:100%;display:block;"></canvas>
-            </div>
-          </div>
-
-          <!-- Right: Layer Trajectory + Additive Input Embedding Breakdown -->
-          <div style="display:flex;flex-direction:column;gap:6px;min-height:0;">
-            <div class="card-box">
-              <span style="font-weight:600;font-size:11.5px;">Representation Evolution Across Depth (Embed → Block 0..5)</span>
-              <canvas id="layerEvolCanvas" height="125" style="width:100%;display:block;"></canvas>
-              <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-secondary);">
-                <span><b style="color:#38bdf8;">━</b> ||c^(l)||₂ Norm</span>
-                <span><b style="color:#818cf8;">■</b> ΔSpace Norm</span>
-                <span><b style="color:#f59e0b;">■</b> ΔTime Norm</span>
-                <span><b style="color:#10b981;">┄</b> Cos(c^(l), c^(6))</span>
-              </div>
-            </div>
-
-            <div class="card-box">
-              <span style="font-weight:600;font-size:11.5px;">Additive Input Embedding Norms at l=0 (Ruleset vs Kinematics vs Field)</span>
-              <canvas id="embPartsCanvas" height="105" style="width:100%;display:block;"></canvas>
-            </div>
-
-            <div class="card-box" style="flex:1; min-height:0; overflow-y:auto;">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="font-weight:600;font-size:11.5px;">Selected Unit Grounded Q, Latent Z (r≥0) &amp; 7-Layer Top-K SAE</span>
-                <span id="saeR2Badge" class="badge" style="font-size:10px;">SAE L0..L6</span>
-              </div>
-              <div id="selectedUnitStats" style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);line-height:1.45;">
-                Select a unit on the map to inspect its Q, Z, and 7-Layer Top-K Sparse Autoencoder features.
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- TAB 5: PORT-HAMILTONIAN FLOW & COUNTERFACTUAL SANDBOX -->
-      <div id="tabPhd" class="tab-pane panel">
-        <div class="panel-header">
-          <div style="display:flex;gap:8px;align-items:center;">
-            <span class="panel-title">Port-Hamiltonian Flow: dx = (J(x) − R(x))∇H + B(x)u</span>
-            <select id="phdPlayerSelect">
-              <option value="p1">Player 1 Flow</option>
-              <option value="p2">Player 2 Flow</option>
-            </select>
-          </div>
-          <div style="display:flex;gap:10px;font-size:11px;">
-            <span><b style="color:var(--cons);">■</b> Conservative J∇H</span>
-            <span><b style="color:var(--diss);">■</b> Dissipative -R∇H</span>
-            <span><b style="color:var(--ctrl);">■</b> Control Port Bu</span>
-            <span><b style="color:#fff;">◆</b> True dx</span>
-          </div>
-        </div>
-
-        <canvas id="phdFlowCanvas" height="145" style="width:100%;display:block;"></canvas>
-
-        <div class="sub-grid-2" style="flex:1;min-height:0;">
-          <div class="card-box" style="min-height:0;">
-            <span style="font-weight:600;font-size:11.5px;">Per-Coordinate Phase-Space Velocity Table (Weighted)</span>
-            <div class="scroll-box" style="flex:1;">
-              <table class="data-table">
-                <thead>
-                  <tr><th>Observable</th><th>x_t</th><th>J∇H</th><th>-R∇H</th><th>Bu</th><th>Pred dx</th><th>True dx</th><th>∇(-A₁)</th></tr>
-                </thead>
-                <tbody id="phdTableBody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="card-box" style="min-height:0;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-              <span style="font-weight:600;font-size:11.5px;">Counterfactual Sandbox ("What-If" Probe)</span>
-              <button id="btnClearCF" class="danger" style="padding:2px 7px;font-size:11px;">Reset Edits</button>
-            </div>
-            <div style="display:flex;gap:5px;flex-wrap:wrap;">
-              <button id="btnCFDeleteSel" style="font-size:11px;">Delete Selected Unit</button>
-              <button id="btnCFHalfHP" style="font-size:11px;">50% HP on Selected</button>
-              <button id="btnCFDelP1Army" style="font-size:11px;">Delete Top 5 P1 Army</button>
-              <button id="btnCFDelP2Army" style="font-size:11px;">Delete Top 5 P2 Army</button>
-            </div>
-            <div id="cfDeltaBox" style="background:rgba(15,23,42,0.65);border:1px solid var(--border-solid);border-radius:5px;padding:7px;font-family:var(--font-mono);font-size:11.5px;line-height:1.5;">
-              No active counterfactual edits. Click "Delete Selected Unit" or enable "Drag Unit (What-If)" above the map to move units and see live Hamiltonian deltas!
-            </div>
-          </div>
-        </div>
-      </div>
-        </div>
-      </details>
     </div>
   </div>
 </div>
@@ -1556,7 +1358,14 @@ function unescapeHtml(str) {
   if (!str) return "";
   const txt = document.createElement("textarea");
   txt.innerHTML = str;
-  return txt.value;
+  let val = txt.value;
+  // Strip SC2 <sp/> tags and replace with a space
+  val = val.replace(/<\s*\/?\s*sp\s*\/?>/gi, " ");
+  // Strip SC2 color tags <c val="..."> and </c>
+  val = val.replace(/<\/?c(\s+[^>]*)?>/gi, "");
+  // Collapse consecutive whitespace
+  val = val.replace(/\s+/g, " ").trim();
+  return val;
 }
 
 function escapeHtml(str) {
@@ -1874,9 +1683,6 @@ function renderAll() {
       renderReverseSaeAttribution(null, null, []);
     }
   }
-  renderGramPanel();
-  renderAttnPanel();
-  renderPhdPanel();
 }
 
 function summarizeSaeFeatureOnFrame(f) {
@@ -2685,21 +2491,8 @@ function renderHUDAndForces() {
     const elVespRate = document.getElementById(`hud${pUpper}VespRate`);
     if (elVespRate) elVespRate.textContent = `+${d.vespene_rate}`;
 
-    const elUps = document.getElementById(`hud${pUpper}Upgrades`);
-    if (elUps) {
-      if (!d.upgrades || d.upgrades.length === 0) {
-        elUps.innerHTML = `<span style="font-size:10px;color:var(--text-muted);font-style:italic;">No upgrades</span>`;
-      } else {
-        elUps.innerHTML = d.upgrades.map(u => {
-          const dots = Array.from({ length: u.level || 1 }, () => `<span class="esl-dot"></span>`).join("");
-          const icon = getUnitOrUpgradeIcon(u.name, "upgrade", d.race);
-          return `<div class="esl-up-badge" title="${u.name} (Level ${u.level || 1})">
-            ${icon}
-            <div class="esl-up-dots">${dots}</div>
-          </div>`;
-        }).join("");
-      }
-    }
+    const elLost = document.getElementById(`hud${pUpper}Lost`);
+    if (elLost) elLost.textContent = (d.resources_lost || 0).toLocaleString();
   }
 
   // 2. Production Queue (Image 1 style)
@@ -2771,6 +2564,61 @@ function renderHUDAndForces() {
                title="${pKey.toUpperCase()} ${item.name}: ${item.count} structures (Click to isolate on map & inspect top SAE features)">
             <div class="hud-card-icon">${icon}</div>
             <div class="hud-card-badge">${item.count}</div>
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  // 4. Completed Upgrades (Row Groups)
+  for (const pKey of ["p1", "p2"]) {
+    const elUps = document.getElementById(`upgrades${pKey.toUpperCase()}Cards`);
+    if (!elUps) continue;
+    const d = h[pKey] || {};
+    const ups = d.upgrades || [];
+    if (ups.length === 0) {
+      elUps.innerHTML = `<span style="font-size:11px; color:var(--text-muted); font-style:italic;">No upgrades completed</span>`;
+    } else {
+      elUps.innerHTML = ups.map(u => {
+        const icon = getUnitOrUpgradeIcon(u.name, "upgrade", d.race);
+        const lvlBadge = (u.level && u.level > 1) ? `<div class="hud-card-badge" style="background:#4338ca;">+${u.level}</div>` : "";
+        return `
+          <div class="hud-card ${pKey}" title="${u.name} (Level ${u.level || 1})">
+            <div class="hud-card-icon">${icon}</div>
+            ${lvlBadge}
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  // 5. Units Lost & Resources Lost Breakdown (Row Groups)
+  for (const pKey of ["p1", "p2"]) {
+    const d = h[pKey] || {};
+    const hdr = document.getElementById(`${pKey}LostHeader`);
+    if (hdr) {
+      const minLost = (d.minerals_lost || 0).toLocaleString();
+      const vespLost = (d.vespene_lost || 0).toLocaleString();
+      const totLost = (d.resources_lost || 0).toLocaleString();
+      hdr.innerHTML = `
+        <span title="Minerals Lost">⛏️ ${minLost}</span>
+        <span title="Vespene Gas Lost">🧪 ${vespLost}</span>
+        <span style="color:var(--text-muted); font-weight:400;" title="Total Resources Lost">(Total: ${totLost})</span>
+      `;
+    }
+
+    const elLost = document.getElementById(`lost${pKey.toUpperCase()}Cards`);
+    if (!elLost) continue;
+    const deadList = (FRAME && FRAME.units_lost && FRAME.units_lost[pKey]) || [];
+    if (deadList.length === 0) {
+      elLost.innerHTML = `<span style="font-size:11px; color:var(--text-muted); font-style:italic;">No losses</span>`;
+    } else {
+      elLost.innerHTML = deadList.map(item => {
+        const icon = getUnitOrUpgradeIcon(item.name, "unit");
+        return `
+          <div class="hud-card ${pKey}" style="opacity:0.9;" title="${pKey.toUpperCase()}: ${item.count} ${item.name} lost">
+            <div class="hud-card-icon">${icon}</div>
+            <div class="hud-card-badge" style="background:#dc2626;">${item.count}</div>
           </div>
         `;
       }).join("");
@@ -2876,7 +2724,7 @@ function renderReverseSaeAttribution(playerKey, unitName, rows) {
     ...f,
     meanAct: f.sumAct / matchingUnits.length,
   }));
-  featList.sort((a, b) => b.sumAct - a.sumAct);
+  featList.sort((a, b) => b.meanAct - a.meanAct);
 
   const topFeats = featList.slice(0, 7);
   if (topFeats.length === 0) {
@@ -2884,7 +2732,8 @@ function renderReverseSaeAttribution(playerKey, unitName, rows) {
     return;
   }
 
-  const maxTotal = Math.max(...topFeats.map(f => f.sumAct), 1.0);
+  // Normalize relative to strongest activation in the selected group
+  const maxMean = Math.max(...topFeats.map(f => f.meanAct), 0.001);
 
   const html = `
     <div style="font-size:10.5px;color:var(--text-secondary);margin-bottom:3px;display:flex;justify-content:space-between;">
@@ -2893,7 +2742,8 @@ function renderReverseSaeAttribution(playerKey, unitName, rows) {
     </div>
     <div class="sae-attr-grid">
       ${topFeats.map(f => {
-        const barPct = Math.min(100, Math.round((f.sumAct / maxTotal) * 100));
+        const barPct = Math.min(100, Math.max(3, Math.round((f.meanAct / maxMean) * 100)));
+        const isSoloActive = ACTIVE_SAE_SELECTION && ACTIVE_SAE_SELECTION.layer === f.layer && ACTIVE_SAE_SELECTION.fid === f.fid;
         return `
           <div class="sae-feat-card" title="Layer ${f.layer}, Feature ${f.fid}: Mean ${f.meanAct.toFixed(2)}, Max ${f.maxAct.toFixed(2)} (${f.activeCount}/${matchingUnits.length} active)">
             <div style="display:flex;flex-direction:column;gap:1px;min-width:0;flex:1;">
@@ -2903,7 +2753,7 @@ function renderReverseSaeAttribution(playerKey, unitName, rows) {
               </div>
               <div style="display:flex;align-items:center;gap:6px;font-size:9.5px;color:var(--text-secondary);margin-top:1px;">
                 <span>Σ: <b>${f.sumAct.toFixed(1)}</b></span>
-                <span>μ: <b>${f.meanAct.toFixed(2)}</b></span>
+                <span>μ: <b>${f.meanAct.toFixed(2)}</b> <span style="color:#a5b4fc;font-size:9px;">(${barPct}%)</span></span>
                 <span>max: <b>${f.maxAct.toFixed(2)}</b></span>
                 <span>(${f.activeCount}/${matchingUnits.length})</span>
                 <div style="flex:1;height:4px;background:rgba(51,65,85,0.5);border-radius:2px;overflow:hidden;margin-left:4px;">
@@ -2911,10 +2761,10 @@ function renderReverseSaeAttribution(playerKey, unitName, rows) {
                 </div>
               </div>
             </div>
-            <button style="padding:1px 5px;font-size:9.5px;flex-shrink:0;" 
-                    onclick="isolateSaeFeatureOnMap(${f.fid})" 
-                    title="Paint this SAE feature onto the 2D battlefield map">
-              Solo Map
+            <button style="padding:1px 6px;font-size:9.5px;flex-shrink:0;${isSoloActive ? 'background:#818cf8;color:#0b1120;font-weight:700;' : ''}" 
+                    onclick="isolateSaeFeatureOnMap(${f.layer}, ${f.fid}, '${escapeHtml(f.label)}', event)" 
+                    title="Paint and highlight this SAE feature across the battlefield">
+              ${isSoloActive ? '✓ Active' : 'Solo Map'}
             </button>
           </div>
         `;
@@ -2924,16 +2774,49 @@ function renderReverseSaeAttribution(playerKey, unitName, rows) {
   pnlBody.innerHTML = html;
 }
 
-function isolateSaeFeatureOnMap(fid) {
+let ACTIVE_SAE_SELECTION = null;
+
+function isolateSaeFeatureOnMap(layer, fid, label, event) {
+  if (event) event.stopPropagation();
+  if (ACTIVE_SAE_SELECTION && ACTIVE_SAE_SELECTION.layer === layer && ACTIVE_SAE_SELECTION.fid === fid) {
+    ACTIVE_SAE_SELECTION = null;
+    ACTIVE_SAE_FID = -1;
+    const saeSelect = document.getElementById("saeMapSelect");
+    if (saeSelect) saeSelect.value = "-1";
+    renderMap();
+    renderSelectionBar();
+    if (SELECTED_GROUP_KEY && SELECTED_GROUP_ROWS.size > 0) {
+      const parts = SELECTED_GROUP_KEY.split("_");
+      renderReverseSaeAttribution(parts[0], parts.slice(1).join("_"), Array.from(SELECTED_GROUP_ROWS));
+    }
+    return;
+  }
+
+  ACTIVE_SAE_SELECTION = { layer, fid, label };
+  ACTIVE_SAE_FID = fid;
+
   const saeSelect = document.getElementById("saeMapSelect");
   if (saeSelect) {
-    saeSelect.value = fid;
-    ACTIVE_SAE_FID = fid;
-    const bgSel = document.getElementById("mapBgMode");
-    if (bgSel && bgSel.value === "terrain") {
-      bgSel.value = "diff";
+    const valKey = String(fid);
+    let opt = saeSelect.querySelector(`option[value="${valKey}"]`);
+    if (!opt) {
+      opt = document.createElement("option");
+      opt.value = valKey;
+      opt.textContent = `[L${layer} F${String(fid).padStart(3, '0')}] ${cleanSaeLabel(label)}`;
+      saeSelect.appendChild(opt);
     }
-    renderMap();
+    saeSelect.value = valKey;
+  }
+
+  const bgSel = document.getElementById("mapBgMode");
+  if (bgSel && bgSel.value === "terrain") {
+    bgSel.value = "diff";
+  }
+  renderMap();
+  renderSelectionBar();
+  if (SELECTED_GROUP_KEY && SELECTED_GROUP_ROWS.size > 0) {
+    const parts = SELECTED_GROUP_KEY.split("_");
+    renderReverseSaeAttribution(parts[0], parts.slice(1).join("_"), Array.from(SELECTED_GROUP_ROWS));
   }
 }
 
@@ -3015,8 +2898,15 @@ function getSortedActiveDims() {
 }
 
 function getActiveSAEFeature() {
-  if (!FRAME || !FRAME.map || !FRAME.map.sae_features || ACTIVE_SAE_FID < 0) return null;
-  return FRAME.map.sae_features.find(f => f.fid === ACTIVE_SAE_FID) || null;
+  if (!FRAME || !FRAME.map || ACTIVE_SAE_FID < 0) return null;
+  if (FRAME.map.sae_features) {
+    const f = FRAME.map.sae_features.find(x => x.fid === ACTIVE_SAE_FID);
+    if (f) return f;
+  }
+  if (ACTIVE_SAE_SELECTION && ACTIVE_SAE_SELECTION.fid === ACTIVE_SAE_FID) {
+    return ACTIVE_SAE_SELECTION;
+  }
+  return null;
 }
 
 function cleanSaeLabel(lbl) {
@@ -3036,7 +2926,14 @@ function populateSaeMapSelect() {
     if (f.fid === prevVal) opt.selected = true;
     sel.appendChild(opt);
   });
-  if (prevVal >= 0 && !feats.some(f => f.fid === prevVal)) {
+  if (ACTIVE_SAE_SELECTION && !feats.some(f => f.fid === ACTIVE_SAE_SELECTION.fid)) {
+    const opt = document.createElement("option");
+    opt.value = ACTIVE_SAE_SELECTION.fid;
+    opt.textContent = `[L${ACTIVE_SAE_SELECTION.layer} F${String(ACTIVE_SAE_SELECTION.fid).padStart(3, "0")}] ${cleanSaeLabel(ACTIVE_SAE_SELECTION.label)}`;
+    opt.selected = true;
+    sel.appendChild(opt);
+  }
+  if (prevVal >= 0 && !feats.some(f => f.fid === prevVal) && (!ACTIVE_SAE_SELECTION || ACTIVE_SAE_SELECTION.fid !== prevVal)) {
     ACTIVE_SAE_FID = -1;
     sel.value = "-1";
   }
@@ -3063,33 +2960,75 @@ function computeFieldOverlayGrid() {
     const g2 = saeFeat.grid_p2 || [];
     const ge = saeFeat.grid_env || [];
     const fTag = `SAE F${String(saeFeat.fid).padStart(3, "0")} (${cleanSaeLabel(saeFeat.label)})`;
-    for (let iy = 0; iy < G; iy++) {
-      for (let ix = 0; ix < G; ix++) {
-        const v1 = (g1[iy] && g1[iy][ix]) || 0;
-        const v2 = (g2[iy] && g2[iy][ix]) || 0;
-        const ve = (ge[iy] && ge[iy][ix]) || 0;
-        if (bgMode === "diff") {
-          grid[iy][ix] = v1 - v2;
-          isDiverging = true;
-          label = `F₁ − F₂ [${fTag}]`;
-        } else if (bgMode === "p1") {
-          grid[iy][ix] = v1;
-          isDiverging = false;
-          label = `F₁ [${fTag}]`;
-        } else if (bgMode === "p2") {
-          grid[iy][ix] = v2;
-          isDiverging = false;
-          label = `F₂ [${fTag}]`;
-        } else if (bgMode === "contest") {
-          grid[iy][ix] = v1 * v2;
-          isDiverging = false;
-          label = `F₁ · F₂ [${fTag}]`;
-        } else {
-          grid[iy][ix] = ve + v1 + v2;
-          isDiverging = false;
-          label = `Total [${fTag}]`;
+    if (g1.length > 0 && g2.length > 0) {
+      for (let iy = 0; iy < G; iy++) {
+        for (let ix = 0; ix < G; ix++) {
+          const v1 = (g1[iy] && g1[iy][ix]) || 0;
+          const v2 = (g2[iy] && g2[iy][ix]) || 0;
+          const ve = (ge[iy] && ge[iy][ix]) || 0;
+          if (bgMode === "diff") {
+            grid[iy][ix] = v1 - v2;
+            isDiverging = true;
+            label = `F₁ − F₂ [${fTag}]`;
+          } else if (bgMode === "p1") {
+            grid[iy][ix] = v1;
+            isDiverging = false;
+            label = `F₁ [${fTag}]`;
+          } else if (bgMode === "p2") {
+            grid[iy][ix] = v2;
+            isDiverging = false;
+            label = `F₂ [${fTag}]`;
+          } else if (bgMode === "contest") {
+            grid[iy][ix] = v1 * v2;
+            isDiverging = false;
+            label = `F₁ · F₂ [${fTag}]`;
+          } else {
+            grid[iy][ix] = ve + v1 + v2;
+            isDiverging = false;
+            label = `Total [${fTag}]`;
+          }
         }
       }
+    } else if (FRAME.units) {
+      const [x0, y0, x1, y1] = mp.playable || [0, 0, 128, 128];
+      const dx = (x1 - x0) / Math.max(1, G - 1);
+      const dy = (y1 - y0) / Math.max(1, G - 1);
+      const synthTag = `L${saeFeat.layer !== undefined ? saeFeat.layer : 6}·F${String(saeFeat.fid).padStart(3, "0")} (${cleanSaeLabel(saeFeat.label)})`;
+      const sigma = 6.0;
+      const sigmaSq2 = 2 * sigma * sigma;
+
+      FRAME.units.forEach(u => {
+        let act = 0;
+        if (u.sae_layers && saeFeat.layer !== undefined && u.sae_layers[saeFeat.layer]) {
+          const m = u.sae_layers[saeFeat.layer].find(f => f.fid === saeFeat.fid);
+          if (m) act = m.act;
+        }
+        if (act <= 0.05) return;
+        const sign = u.owner === 1 ? 1.0 : (u.owner === 2 ? -1.0 : 0.0);
+        const centerIx = Math.round((u.x - x0) / dx);
+        const centerIy = Math.round((u.y - y0) / dy);
+        const radCells = Math.ceil((sigma * 2.5) / dx);
+
+        for (let iy = Math.max(0, centerIy - radCells); iy <= Math.min(G - 1, centerIy + radCells); iy++) {
+          const dY = (iy - centerIy) * dy;
+          for (let ix = Math.max(0, centerIx - radCells); ix <= Math.min(G - 1, centerIx + radCells); ix++) {
+            const dX = (ix - centerIx) * dx;
+            const distSq = dX * dX + dY * dY;
+            const w = Math.exp(-distSq / sigmaSq2) * act;
+            if (bgMode === "diff") {
+              grid[iy][ix] += sign * w;
+            } else if (bgMode === "p1") {
+              if (u.owner === 1) grid[iy][ix] += w;
+            } else if (bgMode === "p2") {
+              if (u.owner === 2) grid[iy][ix] += w;
+            } else {
+              grid[iy][ix] += Math.abs(sign) * w;
+            }
+          }
+        }
+      });
+      isDiverging = (bgMode === "diff");
+      label = `[${synthTag}]`;
     }
     let lo = 1e9, hi = -1e9, maxAbs = 1e-6;
     for (let iy = 0; iy < G; iy++) {
@@ -3400,8 +3339,8 @@ function renderMap() {
         let g = path ? 27 + (hVal - 100) * 0.50 : 13;
         let b = path ? 44 + (hVal - 100) * 0.60 : 20;
         if (creep) { r += 34; g -= 5; b += 38; }
-        if (v1 > 0) { b += 14; g += 6; }
-        if (v2 > 0) { r += 14; }
+        if (v1 > 0) { r += 14; }
+        if (v2 > 0) { b += 14; g += 6; }
         ctx.fillStyle = `rgb(${Math.max(6, Math.min(255, r|0))},${Math.max(8, Math.min(255, g|0))},${Math.max(12, Math.min(255, b|0))})`;
         ctx.fillRect(sx, sy, cw, ch);
       }
@@ -3439,15 +3378,15 @@ function renderMap() {
           } else {
             const norm = Math.pow(mag, 0.72);
             if (v >= 0) {
-              // Cyan / Sky Blue (+ve potential / P1 dominance)
-              r = Math.round(18 + 38 * norm);
-              g = Math.round(95 + 135 * norm);
-              b = Math.round(165 + 88 * norm);
-            } else {
-              // Rose / Crimson (-ve potential / P2 dominance)
+              // Red / Crimson (+ve potential / P1 Red dominance)
               r = Math.round(170 + 82 * norm);
               g = Math.round(28 + 65 * norm);
               b = Math.round(68 + 65 * norm);
+            } else {
+              // Sky Blue / Cyan (-ve potential / P2 Blue dominance)
+              r = Math.round(18 + 38 * norm);
+              g = Math.round(95 + 135 * norm);
+              b = Math.round(165 + 88 * norm);
             }
             a = Math.round(255 * overlayAlpha * Math.min(1.0, 0.18 + 0.88 * norm));
           }
@@ -3486,10 +3425,10 @@ function renderMap() {
       const dy = (y1 - y0) / (G - 1);
       const levels = isDiverging
         ? [
-            { thr: 0.35 * maxAbs, col: "rgba(125, 211, 252, 0.55)", lw: 1.0 },
-            { thr: 0.68 * maxAbs, col: "rgba(224, 242, 254, 0.85)", lw: 1.4 },
-            { thr: -0.35 * maxAbs, col: "rgba(253, 164, 175, 0.55)", lw: 1.0 },
-            { thr: -0.68 * maxAbs, col: "rgba(255, 228, 230, 0.85)", lw: 1.4 }
+            { thr: 0.35 * maxAbs, col: "rgba(253, 164, 175, 0.55)", lw: 1.0 },
+            { thr: 0.68 * maxAbs, col: "rgba(255, 228, 230, 0.85)", lw: 1.4 },
+            { thr: -0.35 * maxAbs, col: "rgba(125, 211, 252, 0.55)", lw: 1.0 },
+            { thr: -0.68 * maxAbs, col: "rgba(224, 242, 254, 0.85)", lw: 1.4 }
           ]
         : [
             { thr: lo + 0.40 * (hi - lo), col: "rgba(253, 224, 71, 0.55)", lw: 1.0 },
@@ -3546,12 +3485,12 @@ function renderMap() {
     const legEl = document.getElementById("mapModeLegend");
     if (legEl) {
       legEl.textContent = isDiverging
-        ? `${label} • Max |F|=${maxAbs.toFixed(3)} (Cyan: + | Rose: −)`
+        ? `${label} • Max |F|=${maxAbs.toFixed(3)} (Red: P1 + | Blue: P2 −)`
         : `${label} • Range [${lo.toFixed(3)}, ${hi.toFixed(3)}]`;
     }
   } else {
     const legEl = document.getElementById("mapModeLegend");
-    if (legEl) legEl.textContent = "P1: Blue | P2: Rose | NFZ: Magenta";
+    if (legEl) legEl.textContent = "P1: Red | P2: Blue | NFZ: Magenta";
   }
 
   // 2. .s2ma NoFlyZone Air Blockers & Healing Shrines
@@ -3645,8 +3584,16 @@ function renderMap() {
     const isSel = u.row === SELECTED_UNIT_ROW || (SELECTED_TOK_IDX !== null && u.tok_idx === SELECTED_TOK_IDX);
     const isGroupSel = SELECTED_GROUP_ROWS && SELECTED_GROUP_ROWS.has(u.row);
 
-    // SAE contributing unit activation
-    const saeAct = (saeFeat && saeFeat.unit_acts) ? (saeFeat.unit_acts[u.row] || 0) : 0;
+    // SAE contributing unit activation across any layer
+    let saeAct = 0.0;
+    if (saeFeat) {
+      if (saeFeat.unit_acts && saeFeat.unit_acts[u.row] !== undefined) {
+        saeAct = saeFeat.unit_acts[u.row];
+      } else if (u.sae_layers && saeFeat.layer !== undefined && u.sae_layers[saeFeat.layer]) {
+        const lf = u.sae_layers[saeFeat.layer].find(f => f.fid === saeFeat.fid);
+        if (lf) saeAct = lf.act;
+      }
+    }
     const isSaeContributor = saeFeat && saeAct > 0.05;
 
     // Filter out neutral minerals if user unchecked "Minerals"
@@ -4779,8 +4726,12 @@ document.getElementById("winLenSelect").addEventListener("change", () => {
 });
 
 document.getElementById("btnStepBack5s").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP - 112));
+const bBack1s = document.getElementById("btnStepBack1s");
+if (bBack1s) bBack1s.addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP - 22));
 document.getElementById("btnStepBack1").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP - 1));
 document.getElementById("btnStepFwd1").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP + 1));
+const bFwd1s = document.getElementById("btnStepFwd1s");
+if (bFwd1s) bFwd1s.addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP + 22));
 document.getElementById("btnStepFwd5s").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP + 112));
 
 document.getElementById("btnPlayPause").addEventListener("click", e => {
@@ -5089,223 +5040,6 @@ window.addEventListener("keydown", e => {
   });
 });
 
-// Gram Matrix Click, Hover, Wheel Zoom & Drag Pan
-const gramCanvas = document.getElementById("gramCanvas");
-
-function gramScreenToUV(e) {
-  const rect = gramCanvas.getBoundingClientRect();
-  const pad = 36;
-  const plotW = rect.width - pad - 8;
-  const plotH = rect.height - pad - 8;
-  const rx = (e.clientX - rect.left - pad) / plotW;
-  const ry = (e.clientY - rect.top - pad) / plotH;
-  const u = isFullGramMode() ? gramPanU + rx / gramZoom : rx;
-  const v = isFullGramMode() ? gramPanV + ry / gramZoom : ry;
-  return { u, v, rx, ry, plotW, plotH };
-}
-
-gramCanvas.addEventListener("wheel", e => {
-  if (!isFullGramMode()) return;
-  e.preventDefault();
-  const { u, v, rx, ry } = gramScreenToUV(e);
-  if (rx < 0 || rx > 1 || ry < 0 || ry > 1) return;
-  const factor = e.deltaY < 0 ? 1.25 : 0.8;
-  const newZoom = Math.max(1.0, Math.min(16.0, gramZoom * factor));
-  // Keep cursor point (u, v) stationary on screen (rx, ry)
-  gramPanU = u - rx / newZoom;
-  gramPanV = v - ry / newZoom;
-  gramZoom = newZoom;
-  clampGramPan();
-  document.getElementById("btnGramResetZoom").textContent = `${gramZoom.toFixed(1)}× Zoom`;
-  renderGramPanel();
-}, { passive: false });
-
-gramCanvas.addEventListener("mousedown", e => {
-  if (!isFullGramMode() || gramZoom <= 1.01) return;
-  isDraggingGram = true;
-  gramDragMoved = false;
-  gramDragStart = [e.clientX, e.clientY];
-});
-
-window.addEventListener("mouseup", () => {
-  isDraggingGram = false;
-});
-
-gramCanvas.addEventListener("mouseleave", () => {
-  gramHoverCell = null;
-  if (isFullGramMode()) renderGramPanel();
-});
-
-document.getElementById("btnGramResetZoom").addEventListener("click", () => {
-  gramZoom = 1.0;
-  gramPanU = 0.0;
-  gramPanV = 0.0;
-  document.getElementById("btnGramResetZoom").textContent = "1× Zoom";
-  renderGramPanel();
-});
-
-document.getElementById("btnGramExpand").addEventListener("click", e => {
-  const layout = document.getElementById("gramLayout");
-  const expanded = layout.classList.toggle("expanded");
-  e.currentTarget.textContent = expanded ? "❐ Split View" : "⛶ Expand";
-  renderGramPanel();
-});
-
-gramCanvas.addEventListener("click", async e => {
-  if (!FRAME || gramDragMoved) return;
-  const { u, v, rx, ry } = gramScreenToUV(e);
-  if (rx < 0 || rx > 1 || ry < 0 || ry > 1) return;
-
-  if (isFullGramMode() && GRAM_256_DATA && GRAM_256_DATA.shape) {
-    const [rows, cols] = GRAM_256_DATA.shape;
-    const j = Math.floor(u * cols);
-    const i = Math.floor(v * rows);
-    if (i >= 0 && i < rows && j >= 0 && j < cols) {
-      if (ACTIVE_GRAM256_CELL && ACTIVE_GRAM256_CELL[0] === i && ACTIVE_GRAM256_CELL[1] === j) {
-        ACTIVE_GRAM256_CELL = null;
-        clearGramModeSelection();
-        return;
-      }
-      ACTIVE_GRAM256_CELL = [i, j];
-      ACTIVE_SVD_MODE = null;
-      ACTIVE_L2_BASIS = -1;
-      document.getElementById("l2BasisSelect").value = "-1";
-      document.getElementById("unitColorMode").value = "gram_mode";
-      await fetchGram256();
-      const mt = GRAM_256_DATA.mat_type;
-      if (mt === "K_uu" && GRAM_256_DATA.unit_labels) {
-        const uRow = GRAM_256_DATA.unit_rows[i];
-        if (uRow !== undefined) {
-          SELECTED_UNIT_ROW = uRow;
-          const uObj = FRAME.units.find(x => x.row === uRow);
-          if (uObj) {
-            SELECTED_TOK_IDX = uObj.tok_idx;
-            document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
-            await fetchTokenDetails(SELECTED_TOK_IDX);
-          }
-        }
-        document.getElementById("gramCellBadge").textContent =
-          `K_uu: ${GRAM_256_DATA.unit_labels[i]} × ${GRAM_256_DATA.unit_labels[j]} = ${GRAM_256_DATA.matrix[i][j].toFixed(3)}`;
-      } else if (mt === "G_qc_8x256") {
-        const qLbl = FRAME.gram.labels_16[i];
-        document.getElementById("gramCellBadge").textContent =
-          `G_qc: (${qLbl}, c_${j}) = ${GRAM_256_DATA.matrix[i][j].toFixed(4)}`;
-      } else {
-        const [ri, rj] = GRAM_256_DATA.real_cell || [i, j];
-        document.getElementById("gramCellBadge").textContent =
-          `${mt}: (c_${ri}, c_${rj}) = ${GRAM_256_DATA.matrix[i][j].toFixed(4)}`;
-      }
-      renderAll();
-    }
-    return;
-  }
-
-  const mat = getActiveGramMatrix();
-  const dim = mat.length;
-  const j = Math.floor(u * dim);
-  const i = Math.floor(v * dim);
-  if (i >= 0 && i < dim && j >= 0 && j < dim) {
-    if (ACTIVE_GRAM_CELL && ACTIVE_GRAM_CELL[0] === i && ACTIVE_GRAM_CELL[1] === j) {
-      clearGramModeSelection();
-      return;
-    }
-    ACTIVE_GRAM_CELL = [i, j];
-    ACTIVE_SVD_MODE = null;
-    ACTIVE_L2_BASIS = -1;
-    document.getElementById("l2BasisSelect").value = "-1";
-    document.getElementById("unitColorMode").value = "gram_mode";
-    const lbls = is8x8FieldMode() ? (FRAME.gram.labels_8 || []) : FRAME.gram.labels_16;
-    document.getElementById("gramCellBadge").textContent = `Active Field Cell: (${lbls[i] || i}, ${lbls[j] || j})`;
-    renderAll();
-  }
-});
-
-gramCanvas.addEventListener("mousemove", e => {
-  if (!FRAME) return;
-  if (isDraggingGram) {
-    const dx = e.clientX - gramDragStart[0];
-    const dy = e.clientY - gramDragStart[1];
-    if (Math.hypot(dx, dy) > 3) gramDragMoved = true;
-    const rect = gramCanvas.getBoundingClientRect();
-    const plotW = rect.width - 44;
-    const plotH = rect.height - 44;
-    gramPanU -= dx / (plotW * gramZoom);
-    gramPanV -= dy / (plotH * gramZoom);
-    gramDragStart = [e.clientX, e.clientY];
-    clampGramPan();
-    renderGramPanel();
-    return;
-  }
-
-  const { u, v, rx, ry } = gramScreenToUV(e);
-  const hoverEl = document.getElementById("gramHoverText");
-  if (rx < 0 || rx > 1 || ry < 0 || ry > 1) {
-    gramHoverCell = null;
-    return;
-  }
-
-  if (isFullGramMode() && GRAM_256_DATA && GRAM_256_DATA.shape) {
-    const [rows, cols] = GRAM_256_DATA.shape;
-    const j = Math.floor(u * cols);
-    const i = Math.floor(v * rows);
-    if (i >= 0 && i < rows && j >= 0 && j < cols) {
-      gramHoverCell = [i, j];
-      const val = GRAM_256_DATA.matrix[i][j];
-      const mt = GRAM_256_DATA.mat_type;
-      if (mt === "K_uu" && GRAM_256_DATA.unit_labels) {
-        hoverEl.textContent = `[${i},${j}] ${GRAM_256_DATA.unit_labels[i]} · ${GRAM_256_DATA.unit_labels[j]} = ${val.toFixed(3)} (Scroll to zoom)`;
-      } else if (mt === "G_qc_8x256") {
-        hoverEl.textContent = `G_qc[${FRAME.gram.labels_16[i]}, c_${j}] = ${val.toFixed(4)} (Scroll to zoom)`;
-      } else {
-        const chOrd = GRAM_256_DATA.channel_order || [];
-        const ri = chOrd[i] !== undefined ? chOrd[i] : i;
-        const rj = chOrd[j] !== undefined ? chOrd[j] : j;
-        hoverEl.textContent = `${mt}[c_${ri}, c_${rj}] = ${val.toFixed(4)} • Scroll wheel to zoom (${gramZoom.toFixed(1)}×) • Click to decode`;
-      }
-      renderGramPanel();
-    }
-    return;
-  }
-
-  const mat = getActiveGramMatrix();
-  const dim = mat.length;
-  const j = Math.floor(u * dim);
-  const i = Math.floor(v * dim);
-  if (i >= 0 && i < dim && j >= 0 && j < dim) {
-    const lbls = is8x8FieldMode() ? (FRAME.gram.labels_8 || []) : FRAME.gram.labels_16;
-    hoverEl.textContent = `[${lbls[i] || i}, ${lbls[j] || j}] = ${mat[i][j].toFixed(4)}`;
-  }
-});
-
-// SVD Spectrum Click
-document.getElementById("svdCanvas").addEventListener("click", e => {
-  if (!FRAME) return;
-  const rect = e.currentTarget.getBoundingClientRect();
-  const k = Math.floor(((e.clientX - rect.left - 10) / (rect.width - 20)) * 16);
-  if (k >= 0 && k < 8) {
-    if (ACTIVE_SVD_MODE === k) {
-      clearGramModeSelection();
-      return;
-    }
-    ACTIVE_SVD_MODE = k;
-    ACTIVE_L2_BASIS = -1;
-    document.getElementById("l2BasisSelect").value = "-1";
-    document.getElementById("unitColorMode").value = "gram_mode";
-    document.getElementById("gramCellBadge").textContent = `Active 256×256 G_cc Eigenmode: σ_${k}²`;
-    renderAll();
-  }
-});
-
-document.getElementById("l2BasisSelect").addEventListener("change", e => {
-  ACTIVE_L2_BASIS = parseInt(e.target.value, 10);
-  if (ACTIVE_L2_BASIS >= 0) {
-    ACTIVE_SVD_MODE = null;
-    document.getElementById("unitColorMode").value = "gram_mode";
-    document.getElementById("gramCellBadge").textContent = `Active Layer 2 Learned Basis: W_c[:, ${ACTIVE_L2_BASIS}]`;
-  }
-  renderAll();
-});
-
 ["saeFeatFilter"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("change", () => renderSaeExplorerPanel());
@@ -5319,79 +5053,6 @@ document.getElementById("l2BasisSelect").addEventListener("change", e => {
 ["chkShowNeutrals", "chkDimNeutrals"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("change", () => renderMap());
-});
-
-["gramOwnerSelect", "gramMatType"].forEach(id => {
-  document.getElementById(id).addEventListener("change", async () => {
-    if (isFullGramMode()) {
-      await fetchGram256();
-    }
-    renderAll();
-  });
-});
-
-// Transformer Layer & Token Selectors
-["tokenSelect", "layerSelect", "headSelect"].forEach(id => {
-  document.getElementById(id).addEventListener("change", async e => {
-    if (id === "tokenSelect") {
-      SELECTED_TOK_IDX = parseInt(e.target.value, 10);
-      const t = FRAME.tokens.find(x => x.tok_idx === SELECTED_TOK_IDX);
-      if (t && t.kind === "unit") SELECTED_UNIT_ROW = t.row;
-    }
-    await fetchTokenDetails(SELECTED_TOK_IDX);
-    renderAll();
-  });
-});
-
-document.getElementById("btnTokCLS").addEventListener("click", async () => {
-  SELECTED_TOK_IDX = 0; document.getElementById("tokenSelect").value = 0;
-  await fetchTokenDetails(0); renderAll();
-});
-document.getElementById("btnTokP1").addEventListener("click", async () => {
-  SELECTED_TOK_IDX = 1; document.getElementById("tokenSelect").value = 1;
-  await fetchTokenDetails(1); renderAll();
-});
-document.getElementById("btnTokP2").addEventListener("click", async () => {
-  SELECTED_TOK_IDX = 2; document.getElementById("tokenSelect").value = 2;
-  await fetchTokenDetails(2); renderAll();
-});
-
-document.getElementById("phdPlayerSelect").addEventListener("change", () => renderPhdPanel());
-
-// Counterfactual Buttons
-document.getElementById("btnClearCF").addEventListener("click", () => {
-  COUNTERFACTUAL = { deleted_rows: [], moved_rows: {}, hp_scale: {} };
-  loadFrame(CURRENT_GID, CURRENT_LOOP);
-});
-document.getElementById("btnCFDeleteSel").addEventListener("click", () => {
-  if (SELECTED_UNIT_ROW !== null) {
-    COUNTERFACTUAL.deleted_rows.push(SELECTED_UNIT_ROW);
-    loadFrame(CURRENT_GID, CURRENT_LOOP);
-  }
-});
-document.getElementById("btnCFHalfHP").addEventListener("click", () => {
-  if (SELECTED_UNIT_ROW !== null) {
-    COUNTERFACTUAL.hp_scale[SELECTED_UNIT_ROW] = 0.5;
-    loadFrame(CURRENT_GID, CURRENT_LOOP);
-  }
-});
-document.getElementById("btnCFDelP1Army").addEventListener("click", () => {
-  if (!FRAME) return;
-  FRAME.units
-    .filter(u => u.owner === 1 && !u.structure && !u.worker)
-    .sort((a, b) => Math.abs(b.marginal_adv) - Math.abs(a.marginal_adv))
-    .slice(0, 5)
-    .forEach(u => COUNTERFACTUAL.deleted_rows.push(u.row));
-  loadFrame(CURRENT_GID, CURRENT_LOOP);
-});
-document.getElementById("btnCFDelP2Army").addEventListener("click", () => {
-  if (!FRAME) return;
-  FRAME.units
-    .filter(u => u.owner === 2 && !u.structure && !u.worker)
-    .sort((a, b) => Math.abs(b.marginal_adv) - Math.abs(a.marginal_adv))
-    .slice(0, 5)
-    .forEach(u => COUNTERFACTUAL.deleted_rows.push(u.row));
-  loadFrame(CURRENT_GID, CURRENT_LOOP);
 });
 
 window.addEventListener("resize", () => renderAll());

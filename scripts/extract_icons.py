@@ -212,6 +212,9 @@ KNOWN_UNIT_ALIASES = {
     "templararchive": "btn-building-protoss-templararchives.png",
     "templararchives": "btn-building-protoss-templararchives.png",
     "darkshrine": "btn-building-protoss-darkshrine.png",
+    "oraclestasistrap": "btn-unit-protoss-stasisward.png",
+    "stasistrap": "btn-unit-protoss-stasisward.png",
+    "stasisward": "btn-unit-protoss-stasisward.png",
 }
 
 KNOWN_UPGRADE_ALIASES = {

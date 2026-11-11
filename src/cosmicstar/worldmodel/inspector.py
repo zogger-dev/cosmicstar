@@ -63,6 +63,21 @@ def _trim_batch(b: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return out
 
 
+def clean_player_name(raw: Any) -> str:
+    """Cleans StarCraft II player name by decoding HTML entities, removing
+    Blizzard <sp/> tags, and stripping formatting tags like <c val="...">."""
+    if not raw:
+        return ""
+    s = html.unescape(str(raw))
+    # Replace SC2 XML space tags like <sp/> or <sp> with a single space
+    s = re.sub(r"<\s*/?\s*sp\s*/?>", " ", s, flags=re.I)
+    # Strip SC2 color/style tags like <c val="..."> and </c>
+    s = re.sub(r"<\/?c(\s+[^>]*)?>", "", s, flags=re.I)
+    # Collapse multiple consecutive whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _pca_rgb(vecs: np.ndarray) -> np.ndarray:
     """Projects [N, D] vectors onto their top 3 principal components and normalizes to [0, 255] RGB."""
     N, D = vecs.shape
@@ -343,9 +358,9 @@ class WorldModelInspector:
                     "subset": subset,
                     "map": meta.get("map", "Unknown Map"),
                     "map_hash": meta.get("map_hash", ""),
-                    "p1_name": html.unescape(p1.get("name", "Player 1")),
+                    "p1_name": clean_player_name(p1.get("name", "Player 1")),
                     "p1_race": p1.get("race", "Unknown"),
-                    "p2_name": html.unescape(p2.get("name", "Player 2")),
+                    "p2_name": clean_player_name(p2.get("name", "Player 2")),
                     "p2_race": p2.get("race", "Unknown"),
                     "winner": winner,
                     "duration_loops": loops,
@@ -605,6 +620,7 @@ class WorldModelInspector:
                 "hud": hud_payload["hud"],
                 "production": hud_payload["production"],
                 "forces": hud_payload["forces"],
+                "units_lost": hud_payload.get("units_lost", {"p1": [], "p2": []}),
                 "base_scalars": base_scalars,
                 **analysis,
             }
@@ -2117,10 +2133,29 @@ class WorldModelInspector:
                     "p_player": d["p_player"].copy() if "p_player" in d.files else None,
                     "p_mineral_rate": d["p_mineral_rate"].copy() if "p_mineral_rate" in d.files else None,
                     "p_vespene_rate": d["p_vespene_rate"].copy() if "p_vespene_rate" in d.files else None,
+                    "p_minerals_lost_army": d["p_minerals_lost_army"].copy() if "p_minerals_lost_army" in d.files else None,
+                    "p_minerals_lost_economy": d["p_minerals_lost_economy"].copy() if "p_minerals_lost_economy" in d.files else None,
+                    "p_minerals_lost_technology": d["p_minerals_lost_technology"].copy() if "p_minerals_lost_technology" in d.files else None,
+                    "p_vespene_lost_army": d["p_vespene_lost_army"].copy() if "p_vespene_lost_army" in d.files else None,
+                    "p_vespene_lost_economy": d["p_vespene_lost_economy"].copy() if "p_vespene_lost_economy" in d.files else None,
+                    "p_vespene_lost_technology": d["p_vespene_lost_technology"].copy() if "p_vespene_lost_technology" in d.files else None,
+                    "dead_frame_start": d["dead_frame_start"].copy() if "dead_frame_start" in d.files else None,
+                    "dead_id": d["dead_id"].copy() if "dead_id" in d.files else None,
                     "up_loop": d["up_loop"].copy() if "up_loop" in d.files else None,
                     "up_player": d["up_player"].copy() if "up_player" in d.files else None,
                     "up_name": d["up_name"].copy() if "up_name" in d.files else None,
                 }
+            unit_map = {}
+            arrow_path = g.base + ".p1.units.arrow"
+            if os.path.exists(arrow_path):
+                import pyarrow.feather as feather
+                table = feather.read_table(arrow_path, columns=["u_id", "u_type", "u_owner"])
+                u_ids = table.column("u_id").to_numpy(zero_copy_only=False)
+                u_types = table.column("u_type").to_numpy(zero_copy_only=False)
+                u_owners = table.column("u_owner").to_numpy(zero_copy_only=False)
+                _, idx = np.unique(u_ids, return_index=True)
+                unit_map = {int(u_ids[i]): (int(u_types[i]), int(u_owners[i])) for i in idx}
+            stats["unit_map"] = unit_map
             self._cst_cache[gid] = stats
             return stats
         except Exception:
@@ -2214,33 +2249,53 @@ class WorldModelInspector:
         v = torch.expm1(pl * 8.0)
 
         meta = meta_info or (g.meta if hasattr(g, "meta") else {})
-        p1_name = html.unescape(meta.get("p1_name", "Player 1"))
-        p2_name = html.unescape(meta.get("p2_name", "Player 2"))
+        p1_name = clean_player_name(meta.get("p1_name", "Player 1"))
+        p2_name = clean_player_name(meta.get("p2_name", "Player 2"))
         p1_race = meta.get("p1_race", "Terran")
         p2_race = meta.get("p2_race", "Zerg")
 
-        # 1. Load CST stats for income rates & upgrades (cached per game)
+        # 1. Load CST stats for income rates & upgrades & losses (cached per game)
         gid_str = meta.get("gid", os.path.basename(g.base))
         cst_stats = self._get_game_cst_stats(gid_str)
         min_rate = [0, 0]
         vesp_rate = [0, 0]
+        min_lost = [0, 0]
+        vesp_lost = [0, 0]
         p1_ups, p2_ups = [], []
         if cst_stats is not None:
             p_l = cst_stats.get("p_loop")
             p_p = cst_stats.get("p_player")
             mr = cst_stats.get("p_mineral_rate")
             vr = cst_stats.get("p_vespene_rate")
-            if p_l is not None and p_p is not None and mr is not None and vr is not None:
+            mla = cst_stats.get("p_minerals_lost_army")
+            mle = cst_stats.get("p_minerals_lost_economy")
+            mlt = cst_stats.get("p_minerals_lost_technology")
+            vla = cst_stats.get("p_vespene_lost_army")
+            vle = cst_stats.get("p_vespene_lost_economy")
+            vlt = cst_stats.get("p_vespene_lost_technology")
+            if p_l is not None and p_p is not None:
                 m1 = (p_l <= loop_t) & (p_p == 1)
                 m2 = (p_l <= loop_t) & (p_p == 2)
                 if m1.any():
                     idx1 = np.where(m1)[0][-1]
-                    min_rate[0] = int(mr[idx1])
-                    vesp_rate[0] = int(vr[idx1])
+                    if mr is not None:
+                        min_rate[0] = int(mr[idx1])
+                    if vr is not None:
+                        vesp_rate[0] = int(vr[idx1])
+                    if mla is not None and mle is not None and mlt is not None:
+                        min_lost[0] = int(mla[idx1] + mle[idx1] + mlt[idx1])
+                    if vla is not None and vle is not None and vlt is not None:
+                        vesp_lost[0] = int(vla[idx1] + vle[idx1] + vlt[idx1])
                 if m2.any():
                     idx2 = np.where(m2)[0][-1]
-                    min_rate[1] = int(mr[idx2])
-                    vesp_rate[1] = int(vr[idx2])
+                    if mr is not None:
+                        min_rate[1] = int(mr[idx2])
+                    if vr is not None:
+                        vesp_rate[1] = int(vr[idx2])
+                    if mla is not None and mle is not None and mlt is not None:
+                        min_lost[1] = int(mla[idx2] + mle[idx2] + mlt[idx2])
+                    if vla is not None and vle is not None and vlt is not None:
+                        vesp_lost[1] = int(vla[idx2] + vle[idx2] + vlt[idx2])
 
             u_l = cst_stats.get("up_loop")
             u_p = cst_stats.get("up_player")
@@ -2278,6 +2333,9 @@ class WorldModelInspector:
                 "idle_workers": int(v[0, f_curr, 0, ED.PC["idle_worker_count"]].item()),
                 "army_supply": int(v[0, f_curr, 0, ED.PC["food_army"]].item()),
                 "upgrades": _format_upgrades(p1_ups),
+                "minerals_lost": min_lost[0],
+                "vespene_lost": vesp_lost[0],
+                "resources_lost": min_lost[0] + vesp_lost[0],
             },
             "p2": {
                 "name": p2_name,
@@ -2292,6 +2350,9 @@ class WorldModelInspector:
                 "idle_workers": int(v[0, f_curr, 1, ED.PC["idle_worker_count"]].item()),
                 "army_supply": int(v[0, f_curr, 1, ED.PC["food_army"]].item()),
                 "upgrades": _format_upgrades(p2_ups),
+                "minerals_lost": min_lost[1],
+                "vespene_lost": vesp_lost[1],
+                "resources_lost": min_lost[1] + vesp_lost[1],
             },
         }
 
@@ -2412,8 +2473,43 @@ class WorldModelInspector:
                     })
                 forces[pk][cat] = sorted(items, key=lambda x: -x["count"])
 
+        # 4. Casualties & Lost Units
+        EXCLUDE_FROM_DEAD = {
+            "larva", "kd8charge", "interceptorsucceed", "pointdefensedrone",
+        }
+        dead_groups = {1: defaultdict(int), 2: defaultdict(int)}
+        dfs = cst_stats.get("dead_frame_start") if cst_stats else None
+        did = cst_stats.get("dead_id") if cst_stats else None
+        unit_map = cst_stats.get("unit_map") if cst_stats else {}
+
+        if dfs is not None and did is not None and len(dfs) > 0 and len(did) > 0:
+            l_idx = min(max(0, loop_t), len(dfs) - 1)
+            dead_cnt = int(dfs[l_idx])
+            dead_slice = did[:dead_cnt]
+            for uid in dead_slice:
+                info = unit_map.get(int(uid))
+                if info:
+                    utype, uown = info
+                    if uown in (1, 2):
+                        um = self.unit_meta.get(utype, {})
+                        nm = um.get("name", f"Unit_{utype}")
+                        if nm.lower() not in EXCLUDE_FROM_DEAD:
+                            dead_groups[uown][nm] += 1
+
+        units_lost = {"p1": [], "p2": []}
+        for own in (1, 2):
+            pk = f"p{own}"
+            items = []
+            for nm, cnt in dead_groups[own].items():
+                items.append({
+                    "name": nm,
+                    "count": cnt,
+                })
+            units_lost[pk] = sorted(items, key=lambda x: -x["count"])
+
         return {
             "hud": hud,
             "production": prod,
             "forces": forces,
+            "units_lost": units_lost,
         }
