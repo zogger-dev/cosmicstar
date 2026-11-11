@@ -970,9 +970,25 @@ class WorldModelInspector:
             (unit_w, b_x, b_y),
             retain_graph=False,
         )
-        marginal_adv_unit = (0.5 * grad_w[0, :, 0] * 1000.0).detach().cpu().numpy()
-        force_adv_x = (grad_bx[0, all_f[target_idx]] * 1000.0).detach().cpu().numpy()
-        force_adv_y = (grad_by[0, all_f[target_idx]] * 1000.0).detach().cpu().numpy()
+        # Note: neg_A1 = -(H1 - H2) = (H2 - H1), which is Player 2's advantage.
+        # Therefore:
+        #   d(A2)/dw_i = +d(neg_A1)/dw_i (impact on Player 2's advantage)
+        #   d(A1)/dw_i = -d(neg_A1)/dw_i (impact on Player 1's advantage)
+        raw_gw = (0.5 * grad_w[0, :, 0] * 1000.0).detach().cpu().numpy()
+        raw_fx = (grad_bx[0, all_f[target_idx]] * 1000.0).detach().cpu().numpy()
+        raw_fy = (grad_by[0, all_f[target_idx]] * 1000.0).detach().cpu().numpy()
+
+        own_arr = own_t[0].detach().cpu().numpy()
+        # Owner-relative marginal advantage: positive always indicates benefit to the unit's owner!
+        # For P1 (owner=1): d(A1)/dw_i = -raw_gw
+        # For P2 (owner=2): d(A2)/dw_i = +raw_gw
+        # For Neutral: 0.0
+        marginal_adv_own = np.where(own_arr == 1, -raw_gw, np.where(own_arr == 2, raw_gw, 0.0))
+        marginal_adv_p1 = -raw_gw
+
+        # Spatial force fields: point in direction of increasing unit owner's advantage!
+        force_adv_x = np.where(own_arr == 1, -raw_fx, raw_fx)
+        force_adv_y = np.where(own_arr == 1, -raw_fy, raw_fy)
 
         # Build detailed unit, token, Field/Mode, and Port-Hamiltonian flow payloads
         with torch.no_grad():
@@ -1010,7 +1026,7 @@ class WorldModelInspector:
                 eff_mask[0, target_idx],
                 pos_all[0, target_idx],
                 center[0, 0, 0],
-                marginal_adv_unit,
+                marginal_adv_own,
                 force_adv_x,
                 force_adv_y,
                 force_kin_x,
@@ -1030,6 +1046,7 @@ class WorldModelInspector:
                 spatial_deltas,
                 temporal_deltas,
                 loops[0].cpu().numpy().tolist(),
+                marginal_adv_p1=marginal_adv_p1,
             )
 
         return {
@@ -1360,6 +1377,7 @@ class WorldModelInspector:
         spatial_deltas: list[torch.Tensor], # 6 tensors [T]
         temporal_deltas: list[torch.Tensor],# 6 tensors [T]
         window_loops: list[int],
+        marginal_adv_p1: np.ndarray | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         """Builds the active unit list, active transformer token catalog, per-layer
         representation trajectories, and compact spatial/temporal attention structures."""
@@ -1471,6 +1489,8 @@ class WorldModelInspector:
                     "z": z_np[r].round(4).tolist(),
                     "l2_w_proj": l2_proj_all[r].round(4).tolist(),
                     "marginal_adv": round(float(marginal_adv[r]), 4),
+                    "marginal_adv_own": round(float(marginal_adv[r]), 4),
+                    "marginal_adv_p1": round(float(marginal_adv_p1[r]), 4) if marginal_adv_p1 is not None else round(float(marginal_adv[r]), 4),
                     "force_adv": [round(float(force_adv_x[r]), 4), round(float(force_adv_y[r]), 4)],
                     "force_kin": [round(float(force_kin_x[r]), 4), round(float(force_kin_y[r]), 4)],
                     "emb_parts": {

@@ -290,14 +290,20 @@ def auto_label_sae_features(
             mean_act = float(col[active_idx].mean())
             # Weight top activating instances by activation strength
             order_sort = active_idx[np.argsort(-col[active_idx])[:60]]
-            u_counts = Counter(unit_names.get(int(rtypes_cat[idx]), f"U{rtypes_cat[idx]}") for idx in order_sort)
-            top1_cnt = u_counts.most_common(1)[0][1] if u_counts else 0
+            u_weights = Counter()
+            u_counts = Counter()
+            for idx in order_sort:
+                uname = unit_names.get(int(rtypes_cat[idx]), f"U{rtypes_cat[idx]}")
+                u_weights[uname] += float(col[idx])
+                u_counts[uname] += 1
+            tot_w = max(1e-6, sum(u_weights.values()))
+            top1_w = u_weights.most_common(1)[0][1] if u_weights else 0.0
             top_u_list = [
-                k for k, cnt in u_counts.most_common(2)
-                if cnt >= max(3, int(0.20 * len(order_sort))) and cnt >= int(0.35 * top1_cnt)
+                k for k, val in u_weights.most_common(3)
+                if val >= 0.16 * tot_w and val >= 0.35 * top1_w
             ]
-            if not top_u_list and u_counts:
-                top_u_list = [u_counts.most_common(1)[0][0]]
+            if not top_u_list and u_weights:
+                top_u_list = [u_weights.most_common(1)[0][0]]
 
             # Only count orders belonging to the top unit types, and require >=25% share to avoid minority noise
             top_u_set = set(top_u_list)

@@ -562,7 +562,8 @@
             <select id="contribSortMode" style="font-size:10.5px; padding:1px 4px;" title="Sort contributing units">
               <option value="weight" selected>Sort: Field Wt m·f</option>
               <option value="act">Sort: Activation f_u</option>
-              <option value="marginal">Sort: |d(-A₁)|</option>
+              <option value="marginal">Sort: |dA_own| (Owner Adv)</option>
+              <option value="marginal_p1">Sort: |dA₁| (P1 Adv)</option>
               <option value="mass">Sort: Mass m_u</option>
             </select>
             <button id="btnDeselectUnitLeft" style="padding:1px 6px; font-size:10.5px; display:none;" title="Deselect currently selected unit">✕ Unit</button>
@@ -579,7 +580,7 @@
                 <th>Own</th>
                 <th id="contribColAct">Act f_u</th>
                 <th id="contribColWt">Field m·f</th>
-                <th>d(-A₁)</th>
+                <th id="contribColAdv" title="Marginal Advantage: how much unit existence increases its owner's advantage (dA_own/dw_i). Positive = helps owner; Negative = deficit/liability.">d(Adv)</th>
                 <th>Order</th>
               </tr>
             </thead>
@@ -1351,8 +1352,10 @@ function summarizeSaeFeatureOnFrame(f) {
   if (!FRAME || !FRAME.units || !f || !f.unit_acts) {
     return { liveShort: cleanSaeLabel(f ? f.label : ""), p1Str: "—", p2Str: "—", neuStr: "—", list: [] };
   }
-  const byTypeAll = {};
-  const p1C = {}, p2C = {}, neuC = {};
+  const byTypeAct = {}, byTypeCnt = {};
+  const p1Act = {}, p1Cnt = {};
+  const p2Act = {}, p2Cnt = {};
+  const neuAct = {}, neuCnt = {};
   const list = [];
   let totalWt = 0.0;
   FRAME.units.forEach(u => {
@@ -1362,21 +1365,37 @@ function summarizeSaeFeatureOnFrame(f) {
         ? f.unit_weights[u.row]
         : (u.mass || 1.0) * act;
       totalWt += wt;
-      byTypeAll[u.name] = (byTypeAll[u.name] || 0) + 1;
-      if (u.owner === 1) p1C[u.name] = (p1C[u.name] || 0) + 1;
-      else if (u.owner === 2) p2C[u.name] = (p2C[u.name] || 0) + 1;
-      else neuC[u.name] = (neuC[u.name] || 0) + 1;
+      byTypeAct[u.name] = (byTypeAct[u.name] || 0) + act;
+      byTypeCnt[u.name] = (byTypeCnt[u.name] || 0) + 1;
+      if (u.owner === 1) {
+        p1Act[u.name] = (p1Act[u.name] || 0) + act;
+        p1Cnt[u.name] = (p1Cnt[u.name] || 0) + 1;
+      } else if (u.owner === 2) {
+        p2Act[u.name] = (p2Act[u.name] || 0) + act;
+        p2Cnt[u.name] = (p2Cnt[u.name] || 0) + 1;
+      } else {
+        neuAct[u.name] = (neuAct[u.name] || 0) + act;
+        neuCnt[u.name] = (neuCnt[u.name] || 0) + 1;
+      }
       list.push({ u, act, wt });
     }
   });
-  const fmtMap = (obj, lim = 3) =>
-    Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, lim).map(([k, v]) => `${k}(${v})`).join(", ");
-  const liveShort = fmtMap(byTypeAll, 2) || cleanSaeLabel(f.label);
+  // Sort unit types by sum of activation so high-activation structures dominate
+  const fmtMap = (actObj, cntObj, lim = 3) =>
+    Object.entries(actObj)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, lim)
+      .map(([k, sumAct]) => {
+        const cnt = cntObj[k] || 1;
+        return cnt > 1 ? `${k}×${cnt}(${sumAct.toFixed(1)})` : `${k}(${sumAct.toFixed(1)})`;
+      })
+      .join(", ");
+  const liveShort = fmtMap(byTypeAct, byTypeCnt, 2) || cleanSaeLabel(f.label);
   return {
     liveShort,
-    p1Str: fmtMap(p1C, 3) || "—",
-    p2Str: fmtMap(p2C, 3) || "—",
-    neuStr: fmtMap(neuC, 2) || "—",
+    p1Str: fmtMap(p1Act, p1Cnt, 3) || "—",
+    p2Str: fmtMap(p2Act, p2Cnt, 3) || "—",
+    neuStr: fmtMap(neuAct, neuCnt, 2) || "—",
     totalWt: Math.max(1e-6, totalWt),
     list
   };
@@ -1657,6 +1676,7 @@ function renderContributingUnitsPanel() {
   rows.sort((a, b) => {
     if (sortMode === "act") return b.act - a.act;
     if (sortMode === "marginal") return Math.abs(b.u.marginal_adv) - Math.abs(a.u.marginal_adv);
+    if (sortMode === "marginal_p1") return Math.abs(b.u.marginal_adv_p1 ?? b.u.marginal_adv) - Math.abs(a.u.marginal_adv_p1 ?? a.u.marginal_adv);
     if (sortMode === "mass") return (b.u.mass || 0) - (a.u.mass || 0);
     return b.wt - a.wt;
   });
@@ -1688,6 +1708,28 @@ function renderContributingUnitsPanel() {
       ? `${wt.toFixed(2)}`
       : `${wt.toFixed(2)} <span style="color:var(--text-muted);font-size:10px;">(${pct.toFixed(0)}%)</span>`;
 
+    const mAdv = (sortMode === "marginal_p1") ? (u.marginal_adv_p1 ?? u.marginal_adv) : u.marginal_adv;
+    let mCol = "#94a3b8";
+    if (sortMode === "marginal_p1") {
+      mCol = mAdv >= 0 ? "#38bdf8" : "#fb7185";
+    } else {
+      if (u.owner === 1) {
+        mCol = mAdv >= 0 ? "#38bdf8" : "#f87171";
+      } else if (u.owner === 2) {
+        mCol = mAdv >= 0 ? "#fb7185" : "#38bdf8";
+      } else {
+        mCol = "#fbbf24";
+      }
+    }
+    const mSign = mAdv >= 0 ? "+" : "";
+    const mTitle = (sortMode === "marginal_p1")
+      ? `Global dA₁ (P1 perspective): ${mSign}${mAdv.toFixed(2)}‰`
+      : (u.owner === 1
+          ? `P1 Unit: ${mSign}${mAdv.toFixed(2)}‰ to P1 Advantage`
+          : (u.owner === 2
+              ? `P2 Unit: ${mSign}${mAdv.toFixed(2)}‰ to P2 Advantage (Global dA₁: ${(-mAdv >= 0 ? "+" : "") + (-mAdv).toFixed(2)}‰)`
+              : `Neutral: ${mSign}${mAdv.toFixed(2)}‰`));
+
     tr.innerHTML = `
       <td style="white-space:nowrap; font-weight:${isSel ? '700' : '400'};">
         ${u.name} <span style="color:var(--text-muted)">#${u.row}</span>${isSel ? ' <span style="color:#f87171;">✕</span>' : ''}
@@ -1695,8 +1737,8 @@ function renderContributingUnitsPanel() {
       <td style="color:${ownCol}; font-weight:600;">${ownTxt}</td>
       <td style="white-space:nowrap;">${actCellHtml}</td>
       <td style="white-space:nowrap;">${wtCellHtml}</td>
-      <td style="color:${u.marginal_adv >= 0 ? '#38bdf8' : '#fb7185'}; white-space:nowrap;">
-        ${u.marginal_adv >= 0 ? "+" : ""}${u.marginal_adv.toFixed(2)}
+      <td style="color:${mCol}; white-space:nowrap; font-weight:600;" title="${mTitle}">
+        ${mSign}${mAdv.toFixed(2)}
       </td>
       <td style="color:var(--text-secondary); max-width:75px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
         ${u.order_abil.split("/").pop()}
@@ -2479,10 +2521,14 @@ function renderMap() {
     // Marginal advantage or mass halo
     if (colorMode === "owner" || colorMode === "marginal") {
       const mFrac = Math.min(1.0, Math.abs(u.marginal_adv) / maxMargAbs);
-      if (mFrac > 0.12) {
-        ctx.fillStyle = u.marginal_adv >= 0
-          ? `rgba(56, 189, 248, ${0.15 + 0.35 * mFrac})`
-          : `rgba(251, 113, 133, ${0.15 + 0.35 * mFrac})`;
+      if (mFrac > 0.10) {
+        let haloCol = "rgba(148, 163, 184, 0.2)";
+        if (u.owner === 1) {
+          haloCol = u.marginal_adv >= 0 ? `rgba(56, 189, 248, ${0.15 + 0.35 * mFrac})` : `rgba(248, 113, 113, ${0.15 + 0.35 * mFrac})`;
+        } else if (u.owner === 2) {
+          haloCol = u.marginal_adv >= 0 ? `rgba(251, 113, 133, ${0.15 + 0.35 * mFrac})` : `rgba(56, 189, 248, ${0.15 + 0.35 * mFrac})`;
+        }
+        ctx.fillStyle = haloCol;
         ctx.beginPath();
         ctx.arc(sx, sy, rad + 2 + 6 * mFrac, 0, Math.PI * 2);
         ctx.fill();
@@ -2532,9 +2578,13 @@ function renderMap() {
         : (u.owner === 2 ? `rgb(252, ${Math.round(70 + 90*t)}, ${Math.round(100 + 80*t)})` : "rgba(217, 119, 6, 0.4)");
     } else if (colorMode === "marginal") {
       const t = Math.max(-1, Math.min(1, u.marginal_adv / maxMargAbs));
-      fillCol = t >= 0
-        ? `rgb(${Math.round(40 + 16*(1-t))}, ${Math.round(110 + 120*t)}, 248)`
-        : `rgb(251, ${Math.round(113 * (1+t))}, ${Math.round(133 * (1+t))})`;
+      if (u.owner === 1) {
+        fillCol = t >= 0 ? `rgb(56, ${Math.round(150 + 70*t)}, 248)` : `rgb(248, ${Math.round(113*(1+t))}, 113)`;
+      } else if (u.owner === 2) {
+        fillCol = t >= 0 ? `rgb(251, ${Math.round(113 + 60*t)}, ${Math.round(133 + 70*t)})` : `rgb(${Math.round(56*(1+t))}, 189, 248)`;
+      } else {
+        fillCol = "rgb(251, 191, 36)";
+      }
     } else if (colorMode === "gram_mode") {
       const gv = gramScores[u.row] || 0.0;
       const t = Math.max(-1, Math.min(1, gv / maxGramAbs));
@@ -3383,7 +3433,7 @@ function renderAttnPanel() {
     document.getElementById("selectedUnitStats").innerHTML = `
       <div><b>${u.name} #${u.row}</b> (Owner P${u.owner}, ${u.category}, Value: ${u.value}, Mass m_u: <b>${u.mass ?? "—"}</b>, Flying: ${u.flying})</div>
       <div>Pos: (${u.x}, ${u.y}) | Vel: (${u.vx}, ${u.vy}) | HP: ${u.hp}/${u.hp_max} | Shd: ${u.shield}/${u.shield_max} | En: ${u.energy}</div>
-      <div>Order: <span style="color:#38bdf8">${u.order_abil}</span> | Prod: <span style="color:#a78bfa">${u.prod_abil}</span> | d(-A₁)/dw_i: <b>${u.marginal_adv >= 0 ? "+" : ""}${u.marginal_adv}‰</b></div>
+      <div>Order: <span style="color:#38bdf8">${u.order_abil}</span> | Prod: <span style="color:#a78bfa">${u.prod_abil}</span> | Owner Adv <b>dA_own: ${u.marginal_adv >= 0 ? "+" : ""}${u.marginal_adv}‰ (P${u.owner})</b> | Global <b>dA₁: ${(u.marginal_adv_p1 ?? -u.marginal_adv) >= 0 ? "+" : ""}${(u.marginal_adv_p1 ?? -u.marginal_adv).toFixed(2)}‰</b></div>
       <div>Non-Neg Latent Z (r=${u.z.length}): [${u.z.map(v => v.toFixed(2)).join(", ")}]</div>
       ${saeHtml}
     `;
@@ -3755,7 +3805,10 @@ mapCanvas.addEventListener("mousemove", e => {
         zStr = ` | ||z||=${(nearest.mass || 0).toFixed(2)}`;
       }
     }
-    infoEl.textContent = `(${wx.toFixed(1)}, ${wy.toFixed(1)}) • P${nearest.owner} ${nearest.name} #${nearest.row} | d(-A₁)=${nearest.marginal_adv >= 0 ? "+" : ""}${nearest.marginal_adv.toFixed(3)}‰${zStr}${fStr}`;
+    const mOwn = nearest.marginal_adv >= 0 ? `+${nearest.marginal_adv.toFixed(2)}` : nearest.marginal_adv.toFixed(2);
+    const mP1Val = (nearest.marginal_adv_p1 ?? -nearest.marginal_adv);
+    const mP1 = mP1Val >= 0 ? `+${mP1Val.toFixed(2)}` : mP1Val.toFixed(2);
+    infoEl.textContent = `(${wx.toFixed(1)}, ${wy.toFixed(1)}) • P${nearest.owner} ${nearest.name} #${nearest.row} | dA_own=${mOwn}‰ (dA₁=${mP1}‰)${zStr}${fStr}`;
   } else {
     infoEl.textContent = `Map (${wx.toFixed(1)}, ${wy.toFixed(1)})${fStr}`;
   }
