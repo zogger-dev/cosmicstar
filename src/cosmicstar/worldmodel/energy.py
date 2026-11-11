@@ -505,6 +505,12 @@ def evaluate_spatial_fields_grid(
         scale = 1.0 / (N0**0.5)
         F_grid = {}
         Pi_grid = {}
+        J_grid = {}
+
+        # Mass per unit: norm of latent mode vector z_u
+        mass_u = z.norm(dim=-1, keepdim=True) * scale  # [R, 1]
+        mom_u = mass_u * vel_u                          # [R, 2] physical spatial momentum
+
         for own_id in (GROUND, P1, P2):
             m = (mask & (owner == own_id)).unsqueeze(-1).float()
             zp = z * (m * scale)
@@ -514,11 +520,19 @@ def evaluate_spatial_fields_grid(
                 Pi_wave = (psi_dot_u * m).t() @ zp  # [2*M_w, r]
                 Pi_grid[own_id] = (psi_grid @ Pi_wave).reshape(G, G, r) # [G, G, r]
 
+                # 2D physical spatial momentum flux J_p(x, y) = [J_x, J_y]
+                J_wave = (psi_u * m).t() @ mom_u
+                J_grid[own_id] = (psi_grid @ J_wave).reshape(G, G, 2)
+
         F_env = F_grid[GROUND]
         F1 = F_grid[P1]
         F2 = F_grid[P2]
         Pi1 = Pi_grid[P1]
         Pi2 = Pi_grid[P2]
+        J1 = J_grid[P1]
+        J2 = J_grid[P2]
+        J_tot = J1 + J2
+        j_density = J_tot.norm(dim=-1)
 
         f_diff_norm = F1.norm(dim=-1) - F2.norm(dim=-1)
         f_contest = (F1 * F2).sum(dim=-1)
@@ -533,6 +547,13 @@ def evaluate_spatial_fields_grid(
             "F_diff_norm": f_diff_norm,     # [G, G]
             "F_contest": f_contest,         # [G, G]
             "T_density": t_density,         # [G, G]
+            "J_x": J_tot[..., 0],           # [G, G]
+            "J_y": J_tot[..., 1],           # [G, G]
+            "J_p1_x": J1[..., 0],           # [G, G]
+            "J_p1_y": J1[..., 1],           # [G, G]
+            "J_p2_x": J2[..., 0],           # [G, G]
+            "J_p2_y": J2[..., 1],           # [G, G]
+            "J_density": j_density,         # [G, G]
         }
 
 

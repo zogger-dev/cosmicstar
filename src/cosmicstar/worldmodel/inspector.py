@@ -2107,6 +2107,12 @@ class WorldModelInspector:
                 f_env_modes = sf["F_env"].cpu().numpy().round(4).tolist()
                 pi_p1_modes = sf["Pi_p1"].cpu().numpy().round(4).tolist()
                 pi_p2_modes = sf["Pi_p2"].cpu().numpy().round(4).tolist()
+                flux_x = sf["J_x"].cpu().numpy().round(4).tolist()
+                flux_y = sf["J_y"].cpu().numpy().round(4).tolist()
+                flux_p1_x = sf["J_p1_x"].cpu().numpy().round(4).tolist()
+                flux_p1_y = sf["J_p1_y"].cpu().numpy().round(4).tolist()
+                flux_p2_x = sf["J_p2_x"].cpu().numpy().round(4).tolist()
+                flux_p2_y = sf["J_p2_y"].cpu().numpy().round(4).tolist()
 
                 # Evaluate 7-Layer Post-Hoc Top-K SAE Stack if available
                 self._maybe_load_sae()
@@ -2138,6 +2144,12 @@ class WorldModelInspector:
                 f_env_modes = [z_grid] * r_modes
                 pi_p1_modes = [z_grid] * r_modes
                 pi_p2_modes = [z_grid] * r_modes
+                flux_x = z_grid
+                flux_y = z_grid
+                flux_p1_x = z_grid
+                flux_p1_y = z_grid
+                flux_p2_x = z_grid
+                flux_p2_y = z_grid
 
         map_hash = g.meta.get("map_hash", "")
         map_name = g.meta.get("map", "")
@@ -2167,6 +2179,12 @@ class WorldModelInspector:
             "field_env_modes": f_env_modes, # [r, G_pot, G_pot]
             "field_pi1_modes": pi_p1_modes, # [r, G_pot, G_pot]
             "field_pi2_modes": pi_p2_modes, # [r, G_pot, G_pot]
+            "flux_x": flux_x,               # [G_pot, G_pot] 2D momentum vector flux X
+            "flux_y": flux_y,               # [G_pot, G_pot] 2D momentum vector flux Y
+            "flux_p1_x": flux_p1_x,
+            "flux_p1_y": flux_p1_y,
+            "flux_p2_x": flux_p2_x,
+            "flux_p2_y": flux_p2_y,
             "sae_features": sae_features,   # Top active L6 SAE features painted on 2D map
             "sae_layer_r2": sae_layer_r2,   # 7-layer SAE explained variance R^2
             "s2ma": s2ma_info,
@@ -2335,6 +2353,8 @@ class WorldModelInspector:
             cand = last
 
         cand_lower = cand.lower()
+        if cand_lower in ("execute", "cancel", "none", "halt", "on", "off", "stop", "holdfire"):
+            return "", "unit"
         if cand_lower in cls.SPECIAL_PROD_MAP:
             name = cls.SPECIAL_PROD_MAP[cand_lower]
         else:
@@ -2345,6 +2365,9 @@ class WorldModelInspector:
                     break
             if name.lower() in cls.SPECIAL_PROD_MAP:
                 name = cls.SPECIAL_PROD_MAP[name.lower()]
+
+        if name.lower() in ("execute", "cancel", "none", "halt", "on", "off", "stop", "holdfire"):
+            return "", "unit"
 
         low_name = name.lower()
         low_ab = ab_str.lower()

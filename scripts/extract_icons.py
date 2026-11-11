@@ -139,6 +139,8 @@ KNOWN_UNIT_ALIASES = {
     "banshee": "btn-unit-terran-banshee.png",
     "battlecruiser": "btn-unit-terran-battlecruiser.png",
     "scv": "btn-unit-terran-scv.png",
+    "mule": "btn-unit-terran-mule.png",
+    "calldownmule": "btn-unit-terran-mule.png",
     "commandcenter": "btn-building-terran-commandcenter.png",
     "commandcenterflying": "btn-building-terran-commandcenter.png",
     "orbitalcommand": "btn-techupgrade-terran-orbitalcommand.png",

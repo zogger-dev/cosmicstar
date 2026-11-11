@@ -1015,6 +1015,9 @@
               <label title="Draw iso-potential contour lines on the 2D field overlay" style="display:flex;align-items:center;gap:3px;cursor:pointer;">
                 <input type="checkbox" id="chkFieldContours" checked />Contours
               </label>
+              <label title="Draw 2D momentum flux vector arrows (quivers) showing direction of momentum flow" style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                <input type="checkbox" id="chkMomentumQuivers" checked />Quivers
+              </label>
             </div>
           </div>
 
@@ -2176,8 +2179,16 @@ function getUnitOrUpgradeIcon(rawName, category, raceHint) {
   const name = String(rawName).trim();
   const n = name.toLowerCase().replace(/[\s\-_]/g, "");
 
-  let assetFile = null;
-  if (ICON_MANIFEST) {
+  const KNOWN_DIRECT_ALIASES = {
+    mule: "btn-unit-terran-mule.png",
+    calldownmule: "btn-unit-terran-mule.png",
+    oraclestasistrap: "btn-unit-protoss-stasisward.png",
+    stasistrap: "btn-unit-protoss-stasisward.png",
+    stasisward: "btn-unit-protoss-stasisward.png",
+  };
+
+  let assetFile = KNOWN_DIRECT_ALIASES[n] || null;
+  if (!assetFile && ICON_MANIFEST) {
     const isUp = category === "upgrade" || /weapon|armor|shield|speed|stimpack|drillclaws|centrifical|chitinous|anabolic|glial|punisher/i.test(n);
     if (isUp) {
       assetFile = (ICON_MANIFEST.upgrades && ICON_MANIFEST.upgrades[n]) || (ICON_MANIFEST.units && ICON_MANIFEST.units[n]);
@@ -3510,6 +3521,80 @@ function renderMap() {
     }
     ctx.restore();
 
+    // 2D Momentum Flux Quivers (directional arrows showing spatial momentum flow)
+    const chkQuiv = document.getElementById("chkMomentumQuivers");
+    const showQuivers = chkQuiv && chkQuiv.checked && (bgMode === "kinetic" || bgMode === "diff" || bgMode === "contest");
+    if (showQuivers && mp.flux_x && mp.flux_y) {
+      const fx = mp.flux_x;
+      const fy = mp.flux_y;
+      const p1x = mp.flux_p1_x || fx;
+      const p1y = mp.flux_p1_y || fy;
+      const p2x = mp.flux_p2_x || fx;
+      const p2y = mp.flux_p2_y || fy;
+      const G = fx.length;
+
+      let maxFlux = 1e-6;
+      for (let iy = 0; iy < G; iy++) {
+        for (let ix = 0; ix < G; ix++) {
+          const m = Math.hypot(fx[iy][ix], fy[iy][ix]);
+          if (m > maxFlux) maxFlux = m;
+        }
+      }
+
+      if (maxFlux > 1e-4) {
+        ctx.save();
+        const step = G > 30 ? 2 : 1;
+        const dx = (x1 - x0) / (G - 1);
+        const dy = (y1 - y0) / (G - 1);
+        const maxArrowLen = 22.0;
+
+        for (let iy = 0; iy < G; iy += step) {
+          for (let ix = 0; ix < G; ix += step) {
+            const jx = fx[iy][ix];
+            const jy = fy[iy][ix];
+            const mag = Math.hypot(jx, jy);
+            if (mag < 0.06 * maxFlux) continue;
+
+            const wx = x0 + ix * dx;
+            const wy = y0 + iy * dy;
+            const [sx, sy] = worldToCanvas(wx, wy, w, h);
+
+            const angle = Math.atan2(-jy, jx);
+            const len = Math.max(6, (mag / maxFlux) * maxArrowLen);
+
+            const m1 = Math.hypot(p1x[iy][ix], p1y[iy][ix]);
+            const m2 = Math.hypot(p2x[iy][ix], p2y[iy][ix]);
+            let arrowCol = "#fde047";
+            if (m1 > 1.25 * m2) arrowCol = "#f87171";
+            else if (m2 > 1.25 * m1) arrowCol = "#38bdf8";
+
+            ctx.save();
+            ctx.translate(sx, sy);
+            ctx.rotate(angle);
+
+            ctx.strokeStyle = arrowCol;
+            ctx.fillStyle = arrowCol;
+            ctx.lineWidth = 1.7;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(len, 0);
+            ctx.stroke();
+
+            const headLen = Math.min(5.5, len * 0.45);
+            ctx.beginPath();
+            ctx.moveTo(len, 0);
+            ctx.lineTo(len - headLen, -headLen * 0.5);
+            ctx.lineTo(len - headLen, headLen * 0.5);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.restore();
+          }
+        }
+        ctx.restore();
+      }
+    }
+
     const legEl = document.getElementById("mapModeLegend");
     if (legEl) {
       legEl.textContent = isDiverging
@@ -4003,7 +4088,7 @@ document.getElementById("btnPlayPause").addEventListener("click", e => {
   }
 });
 
-["mapBgMode", "fieldCombineMode", "unitColorMode", "chkFieldContours", "chkAttnRays", "chkForceAdv", "chkForceKin", "chkS2MA", "chkAnchors"].forEach(id => {
+["mapBgMode", "fieldCombineMode", "unitColorMode", "chkFieldContours", "chkMomentumQuivers", "chkAttnRays", "chkForceAdv", "chkForceKin", "chkS2MA", "chkAnchors"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("change", () => renderMap());
 });
