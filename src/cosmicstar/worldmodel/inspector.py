@@ -2283,9 +2283,9 @@ class WorldModelInspector:
                     if vr is not None:
                         vesp_rate[0] = int(vr[idx1])
                     if mla is not None and mle is not None and mlt is not None:
-                        min_lost[0] = int(mla[idx1] + mle[idx1] + mlt[idx1])
+                        min_lost[0] = max(0, int(mla[idx1] + mle[idx1] + mlt[idx1]))
                     if vla is not None and vle is not None and vlt is not None:
-                        vesp_lost[0] = int(vla[idx1] + vle[idx1] + vlt[idx1])
+                        vesp_lost[0] = max(0, int(vla[idx1] + vle[idx1] + vlt[idx1]))
                 if m2.any():
                     idx2 = np.where(m2)[0][-1]
                     if mr is not None:
@@ -2293,9 +2293,9 @@ class WorldModelInspector:
                     if vr is not None:
                         vesp_rate[1] = int(vr[idx2])
                     if mla is not None and mle is not None and mlt is not None:
-                        min_lost[1] = int(mla[idx2] + mle[idx2] + mlt[idx2])
+                        min_lost[1] = max(0, int(mla[idx2] + mle[idx2] + mlt[idx2]))
                     if vla is not None and vle is not None and vlt is not None:
-                        vesp_lost[1] = int(vla[idx2] + vle[idx2] + vlt[idx2])
+                        vesp_lost[1] = max(0, int(vla[idx2] + vle[idx2] + vlt[idx2]))
 
             u_l = cst_stats.get("up_loop")
             u_p = cst_stats.get("up_player")
