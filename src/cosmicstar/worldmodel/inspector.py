@@ -29,6 +29,7 @@ Provides deep, on-demand introspection of:
 from __future__ import annotations
 
 import glob
+import html
 import json
 import math
 import os
@@ -342,9 +343,9 @@ class WorldModelInspector:
                     "subset": subset,
                     "map": meta.get("map", "Unknown Map"),
                     "map_hash": meta.get("map_hash", ""),
-                    "p1_name": p1.get("name", "Player 1"),
+                    "p1_name": html.unescape(p1.get("name", "Player 1")),
                     "p1_race": p1.get("race", "Unknown"),
-                    "p2_name": p2.get("name", "Player 2"),
+                    "p2_name": html.unescape(p2.get("name", "Player 2")),
                     "p2_race": p2.get("race", "Unknown"),
                     "winner": winner,
                     "duration_loops": loops,
@@ -2126,6 +2127,76 @@ class WorldModelInspector:
             self._cst_cache[gid] = None
             return None
 
+    SPECIAL_PROD_MAP: dict[str, str] = {
+        "orbital": "OrbitalCommand",
+        "upgradetoorbital": "OrbitalCommand",
+        "orbitalcommand": "OrbitalCommand",
+        "planetary": "PlanetaryFortress",
+        "planetaryfortress": "PlanetaryFortress",
+        "upgradetoplanetaryfortress": "PlanetaryFortress",
+        "upgradetowarpgate": "WarpGate",
+        "warpgate": "WarpGate",
+        "upgradetolair": "Lair",
+        "lair": "Lair",
+        "upgradetohive": "Hive",
+        "hive": "Hive",
+        "upgradetogreaterspire": "GreaterSpire",
+        "greaterspire": "GreaterSpire",
+        "morphtotransportoverlord": "OverlordTransport",
+        "morphtohelliontank": "Hellbat",
+        "morphtolurker": "Lurker",
+        "morphtoravager": "Ravager",
+        "morphtobaneling": "Baneling",
+        "morphtobroodlord": "BroodLord",
+        "morphtodevourermp": "Devourer",
+        "morphtoguardianmp": "Guardian",
+        "morphtooverseer": "Overseer",
+        "morphtomothership": "Mothership",
+        "barracksaddons": "TechLab",
+        "barrackstechlab": "TechLab",
+        "barracksreactor": "Reactor",
+        "factorytechlab": "TechLab",
+        "factoryreactor": "Reactor",
+        "starporttechlab": "TechLab",
+        "starportreactor": "Reactor",
+    }
+
+    @classmethod
+    def _parse_prod_abil_name(cls, ab_str: str) -> tuple[str, str]:
+        if not ab_str or ab_str in ("None", "Unknown"):
+            return "", "unit"
+        parts = ab_str.split("/")
+        last = parts[-1]
+        first = parts[0]
+
+        # If last part is an action keyword like Execute, Cancel, None
+        if last.lower() in ("execute", "cancel", "none", "halt", "on", "off"):
+            cand = first
+        else:
+            cand = last
+
+        cand_lower = cand.lower()
+        if cand_lower in cls.SPECIAL_PROD_MAP:
+            name = cls.SPECIAL_PROD_MAP[cand_lower]
+        else:
+            name = cand
+            for pfx in ("UpgradeTo", "MorphTo", "Build", "Train", "Research"):
+                if name.startswith(pfx) and len(name) > len(pfx):
+                    name = name[len(pfx):]
+                    break
+            if name.lower() in cls.SPECIAL_PROD_MAP:
+                name = cls.SPECIAL_PROD_MAP[name.lower()]
+
+        low_name = name.lower()
+        low_ab = ab_str.lower()
+        if "research" in low_ab or any(u in low_name for u in ["weapons", "armors", "plating", "shield", "speed", "stimpack", "boost", "glaives"]):
+            cat = "upgrade"
+        elif any(s in low_name for s in ["orbitalcommand", "planetaryfortress", "lair", "hive", "greaterspire", "warpgate", "techlab", "reactor"]):
+            cat = "structure"
+        else:
+            cat = "unit"
+        return name, cat
+
     def _extract_hud_and_production(
         self,
         g: PD.Game,
@@ -2143,8 +2214,8 @@ class WorldModelInspector:
         v = torch.expm1(pl * 8.0)
 
         meta = meta_info or (g.meta if hasattr(g, "meta") else {})
-        p1_name = meta.get("p1_name", "Player 1")
-        p2_name = meta.get("p2_name", "Player 2")
+        p1_name = html.unescape(meta.get("p1_name", "Player 1"))
+        p2_name = html.unescape(meta.get("p2_name", "Player 2"))
         p1_race = meta.get("p1_race", "Terran")
         p2_race = meta.get("p2_race", "Zerg")
 
@@ -2229,6 +2300,12 @@ class WorldModelInspector:
         prod = {"p1": [], "p2": []}
         pw_list = w.get("prod_where", [])
         pv_list = w.get("prod_vals", [])
+        EXCLUDE_FROM_FORCES = {
+            "egg", "larva",
+            "banelingcocoon", "ravagercocoon",
+            "lurkeregg", "lurkermpcocoon",
+            "broodlordcocoon", "overlordcocoon", "transportoverlordcocoon",
+        }
         for p_idx in [0, 1]:
             owner_id = p_idx + 1
             p_key = f"p{owner_id}"
@@ -2242,12 +2319,9 @@ class WorldModelInspector:
                     prog = float(vl[i, 1])
                     tok = self.vocab._abil.get(raw_abil) if hasattr(self.vocab, "_abil") else None
                     ab_str = self.vocab_abil_name.get(tok, "") if tok is not None else ""
-                    parts = ab_str.split("/")
-                    raw_name = parts[-1] if len(parts) > 1 else ab_str
+                    raw_name, cat = self._parse_prod_abil_name(ab_str)
                     if not raw_name:
                         continue
-                    is_up = "research" in ab_str.lower() or "upgrade" in ab_str.lower()
-                    cat = "upgrade" if is_up else "unit"
                     mult = 2 if raw_name.lower() == "zergling" else 1
                     groups[raw_name]["count"] += mult
                     groups[raw_name]["max_prog"] = max(groups[raw_name]["max_prog"], prog)
@@ -2264,6 +2338,22 @@ class WorldModelInspector:
                             groups[sname]["count"] += 1
                             groups[sname]["max_prog"] = max(groups[sname]["max_prog"], bld)
                             groups[sname]["category"] = "structure"
+
+            # Check eggs or cocoons currently morphing if not already captured
+            for u in units_out:
+                if u.get("owner") == owner_id and u.get("name", "").lower() in EXCLUDE_FROM_FORCES:
+                    target_abil = u.get("prod_abil") or u.get("order_abil")
+                    if target_abil and target_abil not in ("None", "Unknown"):
+                        t_name, t_cat = self._parse_prod_abil_name(target_abil)
+                        if t_name and t_name not in groups:
+                            r = u.get("row")
+                            bld = 0.0
+                            if r is not None and r < b["num"].shape[2]:
+                                bld = float(b["num"][0, f_curr, r, ED.I["build"]].item())
+                            mult = 2 if t_name.lower() == "zergling" else 1
+                            groups[t_name]["count"] += mult
+                            groups[t_name]["max_prog"] = max(groups[t_name]["max_prog"], bld)
+                            groups[t_name]["category"] = t_cat
 
             items = []
             for k, val in groups.items():
@@ -2288,6 +2378,8 @@ class WorldModelInspector:
             own = u.get("owner")
             if own in (1, 2):
                 nm = u["name"]
+                if nm.lower() in EXCLUDE_FROM_FORCES:
+                    continue
                 if u.get("worker"):
                     f_groups[own]["workers"][nm].append(u["row"])
                 elif u.get("structure"):
