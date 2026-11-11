@@ -175,7 +175,7 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument(
         "--l1_ckpt",
-        default="data/worldmodel/runs/energy_r16_zerogram/model_step120.pt",
+        default="data/worldmodel/runs/energy_r16_zerogram/model_step35000.pt",
     )
     ap.add_argument(
         "--l2_ckpt",

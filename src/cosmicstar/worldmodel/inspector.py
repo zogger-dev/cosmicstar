@@ -193,7 +193,7 @@ class WorldModelInspector:
         split_path: str = "data/games/splits/default.json",
         unit_data_path: str = "data/worldmodel/unit_data.json",
         rulesets_path: str = "data/worldmodel/rulesets.json",
-        l1_ckpt: str = "data/worldmodel/runs/energy_r16_zerogram/model_step120.pt",
+        l1_ckpt: str = "data/worldmodel/runs/energy_r16_zerogram/model_step35000.pt",
         l2_ckpt: str = "data/worldmodel/runs/energy_l2_535g_cont_5k/model_l2_step5000.pt",
         l2_summary_dir: str = "data/worldmodel/l2_summaries_5014_cont",
         l2_burst_summary_dir: str = "data/worldmodel/l2_summaries_5014",
