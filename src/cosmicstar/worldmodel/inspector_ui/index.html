@@ -1,0 +1,3379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CosmicStar — Replay &amp; Neural World Model Inspector</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --bg-panel: #111827;
+    --bg-card: #1e293b;
+    --bg-elevated: #334155;
+    --border: #2dd4bf22;
+    --border-solid: #334155;
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --p1: #38bdf8;
+    --p2: #fb7185;
+    --neutral: #fbbf24;
+    --cons: #818cf8;
+    --diss: #f59e0b;
+    --ctrl: #10b981;
+    --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    height: 100vh;
+    overflow: hidden;
+  }
+  .app-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+  /* Top Toolbar */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-solid);
+    border-radius: 8px;
+    padding: 6px 10px;
+    flex-wrap: nowrap;
+    min-height: 40px;
+  }
+  .topbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+  #gameSelect { max-width: 265px; text-overflow: ellipsis; }
+  #l1CkptSelect { max-width: 195px; text-overflow: ellipsis; }
+  #l2ModeSelect { max-width: 170px; text-overflow: ellipsis; }
+  #btnPlayPause { width: 68px; text-align: center; flex-shrink: 0; }
+  #latencyBadge {
+    width: 72px;
+    text-align: center;
+    display: inline-block;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .brand {
+    font-weight: 700;
+    font-size: 13.5px;
+    letter-spacing: 0.02em;
+    color: #e2e8f0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: 4px;
+  }
+  .brand-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
+    box-shadow: 0 0 8px #38bdf888;
+  }
+  select, input[type="number"], button {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border-solid);
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-family: var(--font-sans);
+    outline: none;
+  }
+  button {
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  button:hover {
+    background: var(--bg-elevated);
+    border-color: #64748b;
+  }
+  button.active, button.primary {
+    background: var(--accent);
+    border-color: var(--accent-hover);
+    color: #fff;
+    font-weight: 600;
+  }
+  button.danger {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: #ef4444;
+    color: #fca5a5;
+  }
+  .badge {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(15, 23, 42, 0.7);
+    border: 1px solid var(--border-solid);
+  }
+  /* Main Grid */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 540px 1fr;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+  }
+  .col-left, .col-right {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+  }
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-solid);
+    border-radius: 8px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+  }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+    padding-bottom: 5px;
+    flex-wrap: nowrap;
+  }
+  .panel-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #cbd5e1;
+  }
+  /* KPI Strip */
+  .kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 5px;
+  }
+  .kpi-card {
+    background: rgba(30, 41, 59, 0.65);
+    border: 1px solid var(--border-solid);
+    border-radius: 6px;
+    padding: 4px 7px;
+  }
+  .kpi-label {
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .kpi-val {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 700;
+    margin-top: 1px;
+  }
+  /* Tabs */
+  .tab-bar {
+    display: flex;
+    gap: 4px;
+    background: rgba(15, 23, 42, 0.6);
+    padding: 3px;
+    border-radius: 6px;
+    border: 1px solid var(--border-solid);
+  }
+  .tab-btn {
+    flex: 1;
+    text-align: center;
+    padding: 5px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 4px;
+  }
+  .tab-btn.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .tab-pane {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tab-pane.active {
+    display: flex;
+  }
+  /* Map Canvas */
+  .map-wrap {
+    position: relative;
+    width: 100%;
+    height: 410px;
+    background: #070b14;
+    border: 1px solid var(--border-solid);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  #mapCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: crosshair;
+  }
+  .map-overlay-pill {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid var(--border-solid);
+    border-radius: 5px;
+    padding: 3px 7px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    pointer-events: none;
+  }
+  .map-legend-pill {
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    right: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid var(--border-solid);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+    pointer-events: none;
+  }
+  .checkbox-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+  }
+  .checkbox-row label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    user-select: none;
+  }
+  /* Potential Field Layer Selector Bar */
+  .field-layer-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    background: rgba(15, 23, 42, 0.72);
+    border: 1px solid var(--border-solid);
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  .field-dim-pills {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .dim-pill {
+    position: relative;
+    padding: 3px 8px 6px 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 4px;
+    border: 1px solid #334155;
+    background: #0f172a;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.12s ease;
+    min-width: 34px;
+    text-align: center;
+  }
+  .dim-pill:hover {
+    border-color: #6366f1;
+    color: #f8fafc;
+  }
+  .dim-pill.active {
+    background: rgba(99, 102, 241, 0.28);
+    border-color: #818cf8;
+    color: #ffffff;
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.35);
+  }
+  .dim-pill-bar {
+    position: absolute;
+    left: 3px;
+    right: 3px;
+    bottom: 2px;
+    height: 2.5px;
+    background: rgba(51, 65, 85, 0.6);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .dim-pill-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #38bdf8, #fb7185);
+    width: 0%;
+  }
+  /* Tables & Lists */
+  table.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+  table.data-table th, table.data-table td {
+    padding: 4px 6px;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.45);
+    text-align: left;
+  }
+  table.data-table th {
+    color: var(--text-secondary);
+    font-weight: 600;
+    background: rgba(15, 23, 42, 0.5);
+    position: sticky;
+    top: 0;
+  }
+  table.data-table tr:hover {
+    background: rgba(99, 102, 241, 0.14);
+    cursor: pointer;
+  }
+  table.data-table tr.selected-row {
+    background: rgba(99, 102, 241, 0.28);
+  }
+  .sub-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    min-height: 0;
+  }
+  .gram-layout {
+    display: grid;
+    grid-template-columns: minmax(520px, 1.35fr) minmax(300px, 0.85fr);
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+  }
+  .gram-layout.expanded {
+    grid-template-columns: 1fr;
+  }
+  .gram-layout.expanded .gram-side-col {
+    display: none;
+  }
+  .card-box {
+    background: rgba(30, 41, 59, 0.45);
+    border: 1px solid var(--border-solid);
+    border-radius: 6px;
+    padding: 7px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .scroll-box {
+    overflow-y: auto;
+    max-height: 220px;
+  }
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <!-- TOP CONTROL BAR -->
+  <div class="topbar">
+    <div class="topbar-group">
+      <div class="brand"><span class="brand-dot"></span>CosmicStar WorldModel Inspector</div>
+      <select id="gameSelect" title="Select Replay (Unseen or Train)"></select>
+      <select id="l1CkptSelect" title="Layer 1 Checkpoint"></select>
+      <select id="l2ModeSelect" title="Layer 2 Summary Mode">
+        <option value="cont">L2: Continuous Prefix (cont_5k)</option>
+        <option value="burst">L2: Isolated 0.13s Burst (5k)</option>
+      </select>
+    </div>
+    <div class="topbar-group">
+      <button id="btnStepBack5s" title="-5 seconds (-112 loops)">-5s</button>
+      <button id="btnStepBack1" title="-1 frame">-1f</button>
+      <button id="btnPlayPause" title="Play / Pause scrub">▶ Play</button>
+      <button id="btnStepFwd1" title="+1 frame">+1f</button>
+      <button id="btnStepFwd5s" title="+5 seconds (+112 loops)">+5s</button>
+      <span style="color:var(--text-secondary);font-size:11.5px;">Loop:</span>
+      <input type="number" id="loopInput" style="width:70px;" value="2000" step="14" />
+      <span style="color:var(--text-secondary);font-size:11.5px;">Win:</span>
+      <select id="winLenSelect" title="Causal temporal attention window length (frames)">
+        <option value="4">4f</option>
+        <option value="8" selected>8f</option>
+        <option value="16">16f</option>
+      </select>
+      <span id="latencyBadge" class="badge">Ready</span>
+    </div>
+  </div>
+
+  <!-- MAIN 2-COLUMN WORKSPACE -->
+  <div class="main-grid">
+    <!-- LEFT COLUMN: 2D Map Canvas + Multi-Scale Timeline -->
+    <div class="col-left">
+      <!-- PANEL 1: 2D Map & Battlefield Canvas -->
+      <div class="panel" style="flex:1;">
+        <div class="panel-header">
+          <span class="panel-title">1. 2D Map, Potential Field Overlay &amp; Attribution</span>
+          <div style="display:flex; gap:5px; align-items:center;">
+            <select id="unitColorMode" title="Unit Color &amp; Halo Attribution">
+              <option value="owner">Units: Owner + Marginal Halo</option>
+              <option value="field_dim">Units: Active Field Layer z_k / SAE Feature</option>
+              <option value="marginal">Units: Marginal d(-A₁)/dw_i</option>
+              <option value="mass">Units: Learned Mass m_u = ||z_u||₂</option>
+              <option value="gram_mode">Units: Active Field / SVD Mode</option>
+              <option value="pca_rgb">Units: Layer l 3D PCA → RGB</option>
+              <option value="cos_sim">Units: Cosine Sim to Selected</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Potential Field Overlay & Layer (Dimension / SAE) Inspector Bar -->
+        <div class="field-layer-bar">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; flex-wrap:wrap;">
+            <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+              <span style="font-size:11px; font-weight:700; color:#a5b4fc; text-transform:uppercase; letter-spacing:0.04em;">Potential Field Overlay:</span>
+              <select id="mapBgMode" title="Select which 2D Spatial Field to overlay on top of the terrain">
+                <option value="diff" selected>P1 − P2 Field: F₁(x,y) − F₂(x,y)</option>
+                <option value="p1">Player 1 Field: F₁(x,y)</option>
+                <option value="p2">Player 2 Field: F₂(x,y)</option>
+                <option value="contest">Contest Overlap: F₁(x,y) · F₂(x,y)</option>
+                <option value="env">Neutral / Resource Field: F_env(x,y)</option>
+                <option value="kinetic">Kinetic Momentum Field: Π(x,y)</option>
+                <option value="terrain_v">Terrain CNN Field: V_loc(x,y)</option>
+                <option value="terrain">Off (Terrain + Fog + Creep Only)</option>
+              </select>
+              <select id="fieldCombineMode" title="How to combine multiple selected dimensions" style="font-size:11px; padding:2px 5px;">
+                <option value="l2" selected>Multi-Dim: L2 Norm ||F||_S</option>
+                <option value="signed">Multi-Dim: Sum Σ F_k</option>
+              </select>
+              <select id="saeMapSelect" title="Overlay a monosemantic Top-K Sparse Autoencoder (SAE) feature onto the 2D map instead of raw z0..z15 channels" style="font-size:11px; padding:2px 5px; max-width:250px; border-color:#818cf8; color:#e0e7ff;">
+                <option value="-1">SAE Feature Overlay: Off (Use z0..z15)</option>
+              </select>
+            </div>
+            <div style="display:flex; gap:7px; align-items:center; font-size:11px; color:var(--text-secondary);">
+              <label title="Blend opacity of the Potential Field overlay over the map terrain" style="display:flex;align-items:center;gap:4px;">
+                <span>Opacity</span>
+                <input type="range" id="fieldAlphaSlider" min="15" max="95" value="72" style="width:58px; accent-color:#6366f1; cursor:pointer;" />
+              </label>
+              <label title="Draw iso-potential contour lines on the 2D field overlay" style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                <input type="checkbox" id="chkFieldContours" checked />Contours
+              </label>
+            </div>
+          </div>
+
+          <div class="field-dim-pills" id="dimPillsWrap">
+            <span style="font-size:11px; color:var(--text-secondary); margin-right:2px;">Layers (z_k ≥ 0):</span>
+            <button class="dim-pill active" id="dimPillAll" data-dim="all" title="Inspect all non-negative field dimensions combined">
+              <span id="dimPillAllLabel">All 16D</span>
+              <div class="dim-pill-bar"><div class="dim-pill-fill" style="width:100%;"></div></div>
+            </button>
+            <button class="dim-pill" data-dim="0" title="Click to inspect non-negative field layer z0">z0<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill0"></div></div></button>
+            <button class="dim-pill" data-dim="1" title="Click to inspect non-negative field layer z1">z1<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill1"></div></div></button>
+            <button class="dim-pill" data-dim="2" title="Click to inspect non-negative field layer z2">z2<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill2"></div></div></button>
+            <button class="dim-pill" data-dim="3" title="Click to inspect non-negative field layer z3">z3<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill3"></div></div></button>
+            <button class="dim-pill" data-dim="4" title="Click to inspect non-negative field layer z4">z4<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill4"></div></div></button>
+            <button class="dim-pill" data-dim="5" title="Click to inspect non-negative field layer z5">z5<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill5"></div></div></button>
+            <button class="dim-pill" data-dim="6" title="Click to inspect non-negative field layer z6">z6<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill6"></div></div></button>
+            <button class="dim-pill" data-dim="7" title="Click to inspect non-negative field layer z7">z7<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill7"></div></div></button>
+            <button class="dim-pill" data-dim="8" title="Click to inspect non-negative field layer z8">z8<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill8"></div></div></button>
+            <button class="dim-pill" data-dim="9" title="Click to inspect non-negative field layer z9">z9<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill9"></div></div></button>
+            <button class="dim-pill" data-dim="10" title="Click to inspect non-negative field layer z10">z10<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill10"></div></div></button>
+            <button class="dim-pill" data-dim="11" title="Click to inspect non-negative field layer z11">z11<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill11"></div></div></button>
+            <button class="dim-pill" data-dim="12" title="Click to inspect non-negative field layer z12">z12<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill12"></div></div></button>
+            <button class="dim-pill" data-dim="13" title="Click to inspect non-negative field layer z13">z13<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill13"></div></div></button>
+            <button class="dim-pill" data-dim="14" title="Click to inspect non-negative field layer z14">z14<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill14"></div></div></button>
+            <button class="dim-pill" data-dim="15" title="Click to inspect non-negative field layer z15">z15<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill15"></div></div></button>
+            <label title="When checked, clicking z0..z15 toggles multiple dimensions on/off instead of soloing a single dimension" style="display:flex;align-items:center;gap:3px;font-size:11px;color:#c084fc;margin-left:auto;cursor:pointer;user-select:none;">
+              <input type="checkbox" id="chkMultiDim" />+Multi
+            </label>
+          </div>
+
+          <div id="fieldLayerSummary" style="font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; border-top:1px solid rgba(51,65,85,0.45); padding-top:4px;">
+            <span>Click any layer <b>z0..z15</b> or select an <b>SAE Feature</b> above to inspect its 2D potential field &amp; unit loadings</span>
+          </div>
+        </div>
+
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="chkAttnRays" checked />2D-RoPE Attn Rays</label>
+          <label><input type="checkbox" id="chkForceAdv" checked />Force -∇A₁</label>
+          <label><input type="checkbox" id="chkForceKin" />Force ∇T</label>
+          <label><input type="checkbox" id="chkS2MA" checked />.s2ma AirBlockers/Shrines</label>
+          <label style="display:none;"><input type="checkbox" id="chkAnchors" />Anchors</label>
+          <label style="color:#c084fc;font-weight:600;"><input type="checkbox" id="chkDragMove" />Drag Unit (What-If)</label>
+          <button id="btnResetView" style="padding:1px 6px;font-size:11px;">Reset Zoom</button>
+        </div>
+
+        <div class="map-wrap">
+          <canvas id="mapCanvas"></canvas>
+          <div id="mapOverlayTop" class="map-overlay-pill">Loading...</div>
+          <div id="mapOverlayBottom" class="map-legend-pill">
+            <span id="mapCursorInfo">Hover or click any unit / anchor</span>
+            <span id="mapModeLegend" style="font-family:var(--font-mono);color:var(--text-secondary);">P1: Blue | P2: Rose | NFZ: Magenta</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- PANEL 2: Multi-Scale Timeline Scrubber -->
+      <div class="panel" style="height:215px;">
+        <div class="panel-header">
+          <span class="panel-title">2. Multi-Scale Hamiltonian Timeline (L1 0.6s + L2 5.0s)</span>
+          <div style="display:flex; gap:10px; font-size:11px; color:var(--text-secondary);">
+            <span><b style="color:#38bdf8;">━</b> -A₁(L1)</span>
+            <span><b style="color:#a78bfa;">━</b> -A₁(L2)</span>
+            <span><b style="color:#10b981;">━</b> -A₁(Total)</span>
+            <span>Click chart to seek</span>
+          </div>
+        </div>
+        <canvas id="timelineAdvCanvas" height="90" style="width:100%;display:block;cursor:pointer;"></canvas>
+        <canvas id="timelineHpCanvas" height="65" style="width:100%;display:block;cursor:pointer;"></canvas>
+      </div>
+    </div>
+
+    <!-- RIGHT COLUMN: KPI Strip + 3 Deep Inspection Tabs (Panels 3, 4, 5) -->
+    <div class="col-right">
+      <!-- KPI Strip -->
+      <div class="kpi-strip">
+        <div class="kpi-card">
+          <div class="kpi-label">P1 Energy (-H₁)</div>
+          <div id="kpiH1" class="kpi-val" style="color:var(--p1);">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">P2 Energy (-H₂)</div>
+          <div id="kpiH2" class="kpi-val" style="color:var(--p2);">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">L1 Advantage (-A₁)</div>
+          <div id="kpiA1" class="kpi-val">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Tug-of-War (-2·E_tug)</div>
+          <div id="kpiTug" class="kpi-val" style="color:#c084fc;">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Dissipation (D₁ / D₂)</div>
+          <div id="kpiDiss" class="kpi-val" style="color:var(--diss);">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Goal Cosine (P1 / P2)</div>
+          <div id="kpiGoalCos" class="kpi-val" style="color:var(--ctrl);">—</div>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs for Panels 3, 4, 5 -->
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="tabGram">3. Continuous Field Overlaps &amp; Mode Explorer</button>
+        <button class="tab-btn" data-tab="tabAttn">4. Transformer Layers (0..5) &amp; Attention</button>
+        <button class="tab-btn" data-tab="tabPhd">5. Port-Hamiltonian Flow &amp; Counterfactuals</button>
+      </div>
+
+      <!-- TAB 3: CONTINUOUS FIELD OVERLAPS & SPECTRAL EXPLORER -->
+      <div id="tabGram" class="tab-pane active panel">
+        <div class="panel-header">
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            <span class="panel-title">Continuous Field Overlaps &amp; Back-Projection</span>
+            <select id="gramOwnerSelect">
+              <option value="p1">Owner: Player 1</option>
+              <option value="p2">Owner: Player 2</option>
+              <option value="diff">Owner: P1 − P2 Diff</option>
+              <option value="neutral">Owner: Neutral</option>
+            </select>
+            <select id="gramMatType">
+              <optgroup label="16×16 Continuous Spatial Field Overlaps (Zero-Gram Phase-Space)">
+                <option value="F_self_8x8" selected>r×r Self-Field Overlap F_self = ∫ F_p(r) F_p(r)ᵀ dr</option>
+                <option value="grad_F_self">r×r Self-Field Sensitivity ∂(-A₁)/∂F_self (×10⁻³)</option>
+                <option value="contrib_F_self">r×r Self-Field Attribution F_self ⊙ ∂(-A₁)/∂F_self</option>
+                <option value="F_cross_8x8">r×r P1–P2 Contest Overlap F_cross = ∫ F_p(r) F_{-p}(r)ᵀ dr</option>
+                <option value="grad_F_cross">r×r Contest Sensitivity ∂(-A₁)/∂F_cross (×10⁻³)</option>
+                <option value="contrib_F_cross">r×r Contest Attribution F_cross ⊙ ∂(-A₁)/∂F_cross</option>
+              </optgroup>
+              <optgroup label="Spatial Wave-Packet &amp; 256×256 Encoder Kernels">
+                <option value="K_spatial">N×N 2D Polar Gauss-Rayleigh Spatial Kernel K(r_u − r_v)</option>
+                <option value="K_uu">N×N Entity-by-Entity Cosine Kernel K_uv = ĉ_u · ĉ_vᵀ</option>
+                <option value="G_cc_active">256×256 Active W_z Rowspace Covariance (rD Subspace)</option>
+                <option value="G_cc_clustered">256×256 Clustered Covariance Cov(C_p)</option>
+                <option value="G_cc_cov">256×256 Centered Covariance Cov(C_p)</option>
+                <option value="G_cc_256">256×256 Raw Entity Feature Covariance C_pᵀ C_p / N₀</option>
+              </optgroup>
+              <optgroup label="(8+r)×(8+r) Combined Totals + Field View &amp; Layer 2">
+                <option value="G_16x16">(8+r)×(8+r) Combined Grounded Diag + F_self</option>
+                <option value="grad_G">(8+r)×(8+r) Sensitivity ∂(-A₁)/∂[Totals ⊕ F_self]</option>
+                <option value="contrib_G">(8+r)×(8+r) Attribution [Totals ⊕ F_self] ⊙ ∂(-A₁)</option>
+                <option value="l2_cc">16×16 Layer 2 Congruence tanh(W_cᵀ G_cc W_c)</option>
+              </optgroup>
+            </select>
+            <button id="btnGramResetZoom" style="padding:2px 7px;font-size:11px;" title="Reset matrix zoom &amp; pan (Scroll wheel to zoom in)">1× Zoom</button>
+            <button id="btnGramExpand" style="padding:2px 7px;font-size:11px;" title="Toggle full-panel matrix view">⛶ Expand</button>
+          </div>
+          <span id="gramCellBadge" class="badge">Click any cell (a,b) or eigenmode k to project onto map</span>
+        </div>
+
+        <div id="gramLayout" class="gram-layout">
+          <!-- Left: Large Interactive Matrix Canvas (supports Scroll Zoom + Drag Pan + Loupe) -->
+          <div id="gramCard" class="card-box" style="align-items:center;justify-content:center;min-height:520px;min-width:0;position:relative;overflow:hidden;">
+            <div id="gramCanvasWrap" style="width:100%;flex:1;min-height:0;min-width:0;overflow:hidden;display:flex;align-items:center;justify-content:center;">
+              <canvas id="gramCanvas" style="cursor:crosshair;display:block;"></canvas>
+            </div>
+            <div id="gramHoverText" style="font-family:var(--font-mono);font-size:11.5px;color:var(--text-secondary);text-align:center;width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              Scroll wheel to zoom (up to 16×) • Drag to pan • Click cell to project onto map
+            </div>
+          </div>
+
+          <!-- Right: 256x256 G_cc SVD Spectrum + Unit Attribution Table -->
+          <div class="gram-side-col" style="display:flex;flex-direction:column;gap:6px;min-height:0;">
+            <div class="card-box">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-weight:600;font-size:11.5px;">Full-Rank 256×256 G_cc Spectrum (Click Bar for Mode)</span>
+                <span id="effRankBadge" class="badge">Eff Rank: —</span>
+              </div>
+              <canvas id="svdCanvas" height="95" style="width:100%;display:block;cursor:pointer;"></canvas>
+              <div style="display:flex;gap:4px;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-secondary);">
+                <span>L2 Learned Basis W_c Column (0..15):</span>
+                <select id="l2BasisSelect" style="padding:2px 5px;font-size:11px;">
+                  <option value="-1">None</option>
+                  <option value="0">W_c Mode 0</option><option value="1">W_c Mode 1</option>
+                  <option value="2">W_c Mode 2</option><option value="3">W_c Mode 3</option>
+                  <option value="4">W_c Mode 4</option><option value="5">W_c Mode 5</option>
+                  <option value="6">W_c Mode 6</option><option value="7">W_c Mode 7</option>
+                  <option value="8">W_c Mode 8</option><option value="9">W_c Mode 9</option>
+                  <option value="10">W_c Mode 10</option><option value="11">W_c Mode 11</option>
+                  <option value="12">W_c Mode 12</option><option value="13">W_c Mode 13</option>
+                  <option value="14">W_c Mode 14</option><option value="15">W_c Mode 15</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="gramCorrCard" class="card-box" style="font-size:11px;font-family:var(--font-mono);line-height:1.45;">
+              <div style="font-weight:700;color:#e2e8f0;font-family:var(--font-sans);font-size:11.5px;">
+                Active Cell Feature Correlations (What This Mode Encodes)
+              </div>
+              <div id="gramCorrBody" style="color:var(--text-secondary);">
+                Click any cell in a 256×256, N×N, or 8×256 Gram matrix to decode its top physical &amp; unit-type correlations.
+              </div>
+            </div>
+
+            <div class="card-box" style="flex:1;min-height:0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span id="gramAttrTitle" style="font-weight:600;font-size:11.5px;">Top Contributing Units on Map</span>
+                <span id="gramTypeSummary" style="font-size:11px;color:var(--text-secondary);"></span>
+              </div>
+              <div class="scroll-box" style="flex:1;">
+                <table class="data-table">
+                  <thead>
+                    <tr><th>Unit</th><th>Own</th><th>Score</th><th>d(-A₁)</th><th>HP/Shd</th><th>Order</th></tr>
+                  </thead>
+                  <tbody id="gramUnitTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 4: TRANSFORMER LAYER & ATTENTION INSPECTOR -->
+      <div id="tabAttn" class="tab-pane panel">
+        <div class="panel-header">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <span class="panel-title">Spatiotemporal Block Inspector</span>
+            <select id="tokenSelect" style="max-width:190px;" title="Selected Token"></select>
+            <button id="btnTokCLS" style="padding:2px 6px;font-size:11px;">[CLS]</button>
+            <button id="btnTokP1" style="padding:2px 6px;font-size:11px;color:var(--p1);">[P1]</button>
+            <button id="btnTokP2" style="padding:2px 6px;font-size:11px;color:var(--p2);">[P2]</button>
+          </div>
+          <div style="display:flex;gap:5px;align-items:center;">
+            <span style="font-size:11px;color:var(--text-secondary);">Layer:</span>
+            <select id="layerSelect">
+              <option value="0">Block 0 (L1)</option>
+              <option value="1">Block 1 (L2)</option>
+              <option value="2">Block 2 (L3)</option>
+              <option value="3">Block 3 (L4)</option>
+              <option value="4">Block 4 (L5)</option>
+              <option value="5" selected>Block 5 (Final L6)</option>
+            </select>
+            <span style="font-size:11px;color:var(--text-secondary);">Head:</span>
+            <select id="headSelect">
+              <option value="0" selected>Mean (H0..3)</option>
+              <option value="1">Head 0</option>
+              <option value="2">Head 1</option>
+              <option value="3">Head 2</option>
+              <option value="4">Head 3</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sub-grid-2" style="flex:1;">
+          <!-- Left: Outgoing & Incoming Spatial 2D-RoPE Attention -->
+          <div style="display:flex;flex-direction:column;gap:6px;min-height:0;">
+            <div class="card-box" style="flex:1;min-height:0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-weight:600;font-size:11.5px;">Spatial 2D-RoPE Outgoing Attention (Query = Selected)</span>
+                <span style="font-size:10.5px;color:var(--text-secondary);">Click row to inspect target</span>
+              </div>
+              <div class="scroll-box" style="flex:1;">
+                <table class="data-table">
+                  <thead>
+                    <tr><th>Target Token</th><th>Weight</th><th>H0</th><th>H1</th><th>H2</th><th>H3</th></tr>
+                  </thead>
+                  <tbody id="attnOutTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="card-box" style="height:155px;">
+              <span style="font-weight:600;font-size:11.5px;">Causal 1D-RoPE Temporal Attention (Blocks 0..5 × Window Frames)</span>
+              <canvas id="tempAttnCanvas" height="115" style="width:100%;display:block;"></canvas>
+            </div>
+          </div>
+
+          <!-- Right: Layer Trajectory + Additive Input Embedding Breakdown -->
+          <div style="display:flex;flex-direction:column;gap:6px;min-height:0;">
+            <div class="card-box">
+              <span style="font-weight:600;font-size:11.5px;">Representation Evolution Across Depth (Embed → Block 0..5)</span>
+              <canvas id="layerEvolCanvas" height="125" style="width:100%;display:block;"></canvas>
+              <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-secondary);">
+                <span><b style="color:#38bdf8;">━</b> ||c^(l)||₂ Norm</span>
+                <span><b style="color:#818cf8;">■</b> ΔSpace Norm</span>
+                <span><b style="color:#f59e0b;">■</b> ΔTime Norm</span>
+                <span><b style="color:#10b981;">┄</b> Cos(c^(l), c^(6))</span>
+              </div>
+            </div>
+
+            <div class="card-box">
+              <span style="font-weight:600;font-size:11.5px;">Additive Input Embedding Norms at l=0 (Ruleset vs Kinematics vs Field)</span>
+              <canvas id="embPartsCanvas" height="105" style="width:100%;display:block;"></canvas>
+            </div>
+
+            <div class="card-box" style="flex:1; min-height:0; overflow-y:auto;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-weight:600;font-size:11.5px;">Selected Unit Grounded Q, Latent Z (r≥0) &amp; 7-Layer Top-K SAE</span>
+                <span id="saeR2Badge" class="badge" style="font-size:10px;">SAE L0..L6</span>
+              </div>
+              <div id="selectedUnitStats" style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);line-height:1.45;">
+                Select a unit on the map to inspect its Q, Z, and 7-Layer Top-K Sparse Autoencoder features.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 5: PORT-HAMILTONIAN FLOW & COUNTERFACTUAL SANDBOX -->
+      <div id="tabPhd" class="tab-pane panel">
+        <div class="panel-header">
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span class="panel-title">Port-Hamiltonian Flow: dx = (J(x) − R(x))∇H + B(x)u</span>
+            <select id="phdPlayerSelect">
+              <option value="p1">Player 1 Flow</option>
+              <option value="p2">Player 2 Flow</option>
+            </select>
+          </div>
+          <div style="display:flex;gap:10px;font-size:11px;">
+            <span><b style="color:var(--cons);">■</b> Conservative J∇H</span>
+            <span><b style="color:var(--diss);">■</b> Dissipative -R∇H</span>
+            <span><b style="color:var(--ctrl);">■</b> Control Port Bu</span>
+            <span><b style="color:#fff;">◆</b> True dx</span>
+          </div>
+        </div>
+
+        <canvas id="phdFlowCanvas" height="145" style="width:100%;display:block;"></canvas>
+
+        <div class="sub-grid-2" style="flex:1;min-height:0;">
+          <div class="card-box" style="min-height:0;">
+            <span style="font-weight:600;font-size:11.5px;">Per-Coordinate Phase-Space Velocity Table (Weighted)</span>
+            <div class="scroll-box" style="flex:1;">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Observable</th><th>x_t</th><th>J∇H</th><th>-R∇H</th><th>Bu</th><th>Pred dx</th><th>True dx</th><th>∇(-A₁)</th></tr>
+                </thead>
+                <tbody id="phdTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card-box" style="min-height:0;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-weight:600;font-size:11.5px;">Counterfactual Sandbox ("What-If" Probe)</span>
+              <button id="btnClearCF" class="danger" style="padding:2px 7px;font-size:11px;">Reset Edits</button>
+            </div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap;">
+              <button id="btnCFDeleteSel" style="font-size:11px;">Delete Selected Unit</button>
+              <button id="btnCFHalfHP" style="font-size:11px;">50% HP on Selected</button>
+              <button id="btnCFDelP1Army" style="font-size:11px;">Delete Top 5 P1 Army</button>
+              <button id="btnCFDelP2Army" style="font-size:11px;">Delete Top 5 P2 Army</button>
+            </div>
+            <div id="cfDeltaBox" style="background:rgba(15,23,42,0.65);border:1px solid var(--border-solid);border-radius:5px;padding:7px;font-family:var(--font-mono);font-size:11.5px;line-height:1.5;">
+              No active counterfactual edits. Click "Delete Selected Unit" or enable "Drag Unit (What-If)" above the map to move units and see live Hamiltonian deltas!
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// GLOBAL STATE
+// ============================================================================
+let CATALOG = [];
+let CURRENT_GID = "";
+let CURRENT_LOOP = 2000;
+let TIMELINE = null;
+let FRAME = null;
+let TOKEN_DETAILS = null;
+
+let SELECTED_UNIT_ROW = null;
+let SELECTED_TOK_IDX = 0; // default [CLS]
+let ACTIVE_GRAM_CELL = [0, 0]; // default (z0, z0) in r x r F_self
+let ACTIVE_GRAM256_CELL = [0, 0]; // default (0, 0) in 256x256 / NxN / 8x256
+let GRAM_256_DATA = null;
+let ACTIVE_SVD_MODE = null; // 0..7 if eigenmode selected
+let ACTIVE_L2_BASIS = -1;   // 0..15 if W_c column selected
+let ACTIVE_FIELD_DIMS = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]); // Selected potential field dimensions
+let ACTIVE_SAE_FID = -1;    // Selected Layer-6 SAE feature ID (-1 = Off, use z0..z15)
+let LAST_FIELD_EVAL = null; // Cached { grid, G, isDiverging, lo, hi, maxAbs, label }
+let _fieldOffscreenCanvas = null;
+
+function getRDim() {
+  if (FRAME && FRAME.gram && FRAME.gram.labels_8 && FRAME.gram.labels_8.length > 0) {
+    return FRAME.gram.labels_8.length;
+  }
+  return 16;
+}
+
+let COUNTERFACTUAL = {
+  deleted_rows: [],
+  moved_rows: {},
+  hp_scale: {}
+};
+
+// Map Pan/Zoom & Drag state
+let mapZoom = 1.0;
+let mapPanX = 0.0;
+let mapPanY = 0.0;
+let isDraggingMap = false;
+let isDraggingUnit = false;
+let dragStartMouse = [0, 0];
+let playTimer = null;
+
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s < 10 ? "0" : ""}${s}`;
+}
+
+function setupHiDPICanvas(canvas, fixedW = null, fixedH = null) {
+  const dpr = window.devicePixelRatio || 1;
+  if (!canvas.dataset.baseH) {
+    const attrH = canvas.getAttribute("height");
+    canvas.dataset.baseH = attrH ? attrH : "rect";
+    if (attrH) {
+      canvas.style.height = `${attrH}px`;
+    }
+  }
+  const rect = canvas.getBoundingClientRect();
+  const w = fixedW || Math.max(10, Math.round(rect.width));
+  const h = fixedH || (
+    canvas.dataset.baseH === "rect"
+      ? Math.max(10, Math.round(rect.height))
+      : parseInt(canvas.dataset.baseH, 10)
+  );
+  const targetW = Math.round(w * dpr);
+  const targetH = Math.round(h * dpr);
+  if (canvas.width !== targetW) canvas.width = targetW;
+  if (canvas.height !== targetH) canvas.height = targetH;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+// ============================================================================
+// INITIALIZATION & API CALLS
+// ============================================================================
+async function initApp() {
+  const res = await fetch("/api/init");
+  const data = await res.json();
+  CATALOG = data.games;
+
+  const gSel = document.getElementById("gameSelect");
+  gSel.innerHTML = "";
+  const grpUnseen = document.createElement("optgroup");
+  grpUnseen.label = "Unseen Validation Games (5.0.14)";
+  const grpTrain = document.createElement("optgroup");
+  grpTrain.label = "Training Games (5.0.14)";
+
+  CATALOG.forEach(g => {
+    const opt = document.createElement("option");
+    opt.value = g.gid;
+    const winTag = g.winner === 1 ? `P1 ${g.p1_name}` : (g.winner === 2 ? `P2 ${g.p2_name}` : "Draw");
+    opt.textContent = `[${g.map}] ${g.p1_name} (${g.p1_race[0]}) vs ${g.p2_name} (${g.p2_race[0]}) — ${fmtTime(g.duration_s)} (Win: ${winTag})`;
+    if (g.subset === "unseen_games") grpUnseen.appendChild(opt);
+    else grpTrain.appendChild(opt);
+  });
+  gSel.appendChild(grpUnseen);
+  gSel.appendChild(grpTrain);
+
+  const l1Sel = document.getElementById("l1CkptSelect");
+  l1Sel.innerHTML = "";
+  data.checkpoints.l1.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p;
+    const parts = p.split("/");
+    opt.textContent = `L1: ${parts[parts.length - 2].replace("energy_", "")}/${parts[parts.length - 1]}`;
+    if (p === data.active_l1_ckpt) opt.selected = true;
+    l1Sel.appendChild(opt);
+  });
+
+  if (CATALOG.length > 0) {
+    CURRENT_GID = CATALOG[0].gid;
+    CURRENT_LOOP = Math.min(2500, Math.floor(CATALOG[0].duration_loops * 0.45));
+    document.getElementById("loopInput").value = CURRENT_LOOP;
+    await loadGameTimeline(CURRENT_GID);
+    await loadFrame(CURRENT_GID, CURRENT_LOOP);
+  }
+}
+
+async function loadGameTimeline(gid) {
+  const mode = document.getElementById("l2ModeSelect").value;
+  const res = await fetch(`/api/game/${gid}/timeline?mode=${mode}`);
+  TIMELINE = await res.json();
+  renderTimeline();
+}
+
+function hasCounterfactuals() {
+  return (
+    COUNTERFACTUAL.deleted_rows.length > 0 ||
+    Object.keys(COUNTERFACTUAL.moved_rows).length > 0 ||
+    Object.keys(COUNTERFACTUAL.hp_scale).length > 0
+  );
+}
+
+let isLoadingFrame = false;
+let pendingFrameReq = null;
+
+async function loadFrame(gid, loop_t) {
+  if (isLoadingFrame) {
+    pendingFrameReq = [gid, loop_t];
+    return;
+  }
+  isLoadingFrame = true;
+  const badge = document.getElementById("latencyBadge");
+  badge.style.borderColor = "#f59e0b";
+  badge.style.color = "#fbbf24";
+
+  try {
+    const winLen = parseInt(document.getElementById("winLenSelect").value, 10);
+    let res;
+    if (hasCounterfactuals()) {
+      res = await fetch(`/api/game/${gid}/frame/${loop_t}?window=${winLen}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(COUNTERFACTUAL)
+      });
+    } else {
+      res = await fetch(`/api/game/${gid}/frame/${loop_t}?window=${winLen}`);
+    }
+    FRAME = await res.json();
+    CURRENT_LOOP = FRAME.loop_t;
+    document.getElementById("loopInput").value = CURRENT_LOOP;
+    badge.textContent = `${Math.round(FRAME.elapsed_ms)} ms`;
+    badge.style.borderColor = "var(--border-solid)";
+    badge.style.color = "#10b981";
+
+    // Keep selected unit row if still alive, else pick highest marginal value unit
+    const aliveRows = new Set(FRAME.units.map(u => u.row));
+    if (SELECTED_UNIT_ROW === null || !aliveRows.has(SELECTED_UNIT_ROW)) {
+      if (FRAME.units.length > 0) {
+        let bestU = FRAME.units[0];
+        FRAME.units.forEach(u => {
+          if (Math.abs(u.marginal_adv) > Math.abs(bestU.marginal_adv)) bestU = u;
+        });
+        SELECTED_UNIT_ROW = bestU.row;
+        SELECTED_TOK_IDX = bestU.tok_idx;
+      }
+    } else {
+      const u = FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
+      if (u) SELECTED_TOK_IDX = u.tok_idx;
+    }
+
+    populateTokenSelect();
+    populateSaeMapSelect();
+    await fetchTokenDetails(SELECTED_TOK_IDX);
+    if (isFullGramMode()) {
+      await fetchGram256();
+    }
+    renderAll();
+  } finally {
+    isLoadingFrame = false;
+    if (pendingFrameReq) {
+      const [nextGid, nextLoop] = pendingFrameReq;
+      pendingFrameReq = null;
+      loadFrame(nextGid, nextLoop);
+    }
+  }
+}
+
+async function fetchTokenDetails(tokIdx) {
+  const layer = parseInt(document.getElementById("layerSelect").value, 10);
+  const head = parseInt(document.getElementById("headSelect").value, 10);
+  const res = await fetch(`/api/token/${tokIdx}?layer=${layer}&head=${head}`);
+  TOKEN_DETAILS = await res.json();
+}
+
+function isFullGramMode() {
+  const mt = document.getElementById("gramMatType").value;
+  return (
+    mt === "G_cc_active" ||
+    mt === "G_cc_256" ||
+    mt === "G_cc_cov" ||
+    mt === "G_cc_clustered" ||
+    mt === "K_uu" ||
+    mt === "K_spatial" ||
+    mt === "G_qc_8x256"
+  );
+}
+
+function is8x8FieldMode() {
+  const mt = document.getElementById("gramMatType").value;
+  return (
+    mt === "F_self_8x8" ||
+    mt === "grad_F_self" ||
+    mt === "contrib_F_self" ||
+    mt === "F_cross_8x8" ||
+    mt === "grad_F_cross" ||
+    mt === "contrib_F_cross"
+  );
+}
+
+async function fetchGram256() {
+  const owner = document.getElementById("gramOwnerSelect").value;
+  const mt = document.getElementById("gramMatType").value;
+  const [ci, cj] = ACTIVE_GRAM256_CELL;
+  const res = await fetch(`/api/gram256?owner=${owner}&mat_type=${mt}&i=${ci}&j=${cj}`);
+  GRAM_256_DATA = await res.json();
+}
+
+function populateTokenSelect() {
+  const sel = document.getElementById("tokenSelect");
+  sel.innerHTML = "";
+  if (!FRAME) return;
+  FRAME.tokens.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.tok_idx;
+    const ownTag = t.owner === 1 ? "P1 " : (t.owner === 2 ? "P2 " : "");
+    opt.textContent = `${ownTag}${t.label}`;
+    if (t.tok_idx === SELECTED_TOK_IDX) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+// ============================================================================
+// RENDER ORCHESTRATION
+// ============================================================================
+function renderAll() {
+  if (!FRAME) return;
+  renderKPIs();
+  renderMap();
+  renderTimeline();
+  renderGramPanel();
+  renderAttnPanel();
+  renderPhdPanel();
+}
+
+function renderKPIs() {
+  const s = FRAME.scalars;
+  const v1 = s.V1 !== undefined ? s.V1 : s.H1;
+  const v2 = s.V2 !== undefined ? s.V2 : s.H2;
+  const t1 = s.T1 !== undefined ? -s.T1 : 0.0;
+  const t2 = s.T2 !== undefined ? -s.T2 : 0.0;
+  document.getElementById("kpiH1").innerHTML =
+    `${s.H1 >= 0 ? "+" : ""}${s.H1.toFixed(2)}‰ <span style="font-size:10px;font-weight:400;color:var(--text-secondary)">(V:${v1.toFixed(1)} T:${t1.toFixed(2)})</span>`;
+  document.getElementById("kpiH2").innerHTML =
+    `${s.H2 >= 0 ? "+" : ""}${s.H2.toFixed(2)}‰ <span style="font-size:10px;font-weight:400;color:var(--text-secondary)">(V:${v2.toFixed(1)} T:${t2.toFixed(2)})</span>`;
+
+  const elA1 = document.getElementById("kpiA1");
+  elA1.textContent = `${s.A1 >= 0 ? "+" : ""}${s.A1.toFixed(3)}‰ (${s.A1 >= 0 ? "P1" : "P2"})`;
+  elA1.style.color = s.A1 >= 0 ? "var(--p1)" : "var(--p2)";
+
+  const tug2 = 2.0 * s.tug;
+  document.getElementById("kpiTug").textContent = `${tug2 >= 0 ? "+" : ""}${tug2.toFixed(3)}‰`;
+  document.getElementById("kpiDiss").textContent = `${s.diss1.toFixed(3)} / ${s.diss2.toFixed(3)}`;
+  document.getElementById("kpiGoalCos").textContent =
+    `${s.u1_active ? s.goal_cos1.toFixed(2) : "idle"} / ${s.u2_active ? s.goal_cos2.toFixed(2) : "idle"}`;
+}
+
+// ============================================================================
+// PANEL 1: 2D MAP & BATTLEFIELD CANVAS
+// ============================================================================
+function worldToCanvas(wx, wy, w, h) {
+  const [x0, y0, x1, y1] = FRAME.map.playable;
+  const pw = x1 - x0;
+  const ph = y1 - y0;
+  const scale = Math.min(w / pw, h / ph) * 0.94 * mapZoom;
+  const cx = (x0 + x1) * 0.5;
+  const cy = (y0 + y1) * 0.5;
+  const sx = w * 0.5 + (wx - cx) * scale + mapPanX;
+  // Flip Y so North (+y in SC2) is Up on canvas
+  const sy = h * 0.5 - (wy - cy) * scale + mapPanY;
+  return [sx, sy, scale];
+}
+
+function canvasToWorld(sx, sy, w, h) {
+  const [x0, y0, x1, y1] = FRAME.map.playable;
+  const pw = x1 - x0;
+  const ph = y1 - y0;
+  const scale = Math.min(w / pw, h / ph) * 0.94 * mapZoom;
+  const cx = (x0 + x1) * 0.5;
+  const cy = (y0 + y1) * 0.5;
+  const wx = cx + (sx - w * 0.5 - mapPanX) / scale;
+  const wy = cy - (sy - h * 0.5 - mapPanY) / scale;
+  return [wx, wy];
+}
+
+function computeUnitGramScores() {
+  const scores = {};
+  if (!FRAME) return scores;
+  const ownerMode = document.getElementById("gramOwnerSelect").value;
+  if (ACTIVE_L2_BASIS >= 0) {
+    FRAME.units.forEach(u => {
+      scores[u.row] = u.l2_w_proj[ACTIVE_L2_BASIS] || 0.0;
+    });
+    return scores;
+  }
+  if (ACTIVE_SVD_MODE !== null) {
+    const ownKey = ownerMode === "p2" ? "p2" : (ownerMode === "neutral" ? "neutral" : "p1");
+    const gOwn = FRAME.gram.owners[ownKey];
+    const loadings = gOwn.eigenmode_unit_loadings[ACTIVE_SVD_MODE] || [];
+    gOwn.unit_rows.forEach((r, idx) => {
+      scores[r] = loadings[idx] || 0.0;
+    });
+    return scores;
+  }
+  if (isFullGramMode() && GRAM_256_DATA && GRAM_256_DATA.unit_scores) {
+    Object.entries(GRAM_256_DATA.unit_scores).forEach(([r, val]) => {
+      scores[parseInt(r, 10)] = val;
+    });
+    return scores;
+  }
+  const [a, b] = ACTIVE_GRAM_CELL;
+  const rDim = getRDim();
+  if (is8x8FieldMode()) {
+    const ia = Math.min(rDim - 1, a);
+    const ib = Math.min(rDim - 1, b);
+    FRAME.units.forEach(u => {
+      scores[u.row] = ((u.z[ia] || 0) * (u.z[ib] || 0)) / 100.0;
+    });
+    return scores;
+  }
+  FRAME.units.forEach(u => {
+    const va = a < 8 ? u.q[a] : (u.z[a - 8] || 0);
+    const vb = b < 8 ? u.q[b] : (u.z[b - 8] || 0);
+    scores[u.row] = (va * vb) / 100.0;
+  });
+  return scores;
+}
+
+function getSortedActiveDims() {
+  const rDim = getRDim();
+  const arr = Array.from(ACTIVE_FIELD_DIMS).filter(d => d < rDim).sort((a, b) => a - b);
+  return arr.length > 0 ? arr : [0];
+}
+
+function getActiveSAEFeature() {
+  if (!FRAME || !FRAME.map || !FRAME.map.sae_features || ACTIVE_SAE_FID < 0) return null;
+  return FRAME.map.sae_features.find(f => f.fid === ACTIVE_SAE_FID) || null;
+}
+
+function cleanSaeLabel(lbl) {
+  return String(lbl || "").replace(/^F\d+:\s*/, "");
+}
+
+function populateSaeMapSelect() {
+  const sel = document.getElementById("saeMapSelect");
+  if (!sel || !FRAME || !FRAME.map) return;
+  const feats = FRAME.map.sae_features || [];
+  const prevVal = ACTIVE_SAE_FID;
+  sel.innerHTML = `<option value="-1">SAE Feature Overlay: Off (Use z0..z${getRDim() - 1})</option>`;
+  feats.forEach(f => {
+    const opt = document.createElement("option");
+    opt.value = f.fid;
+    opt.textContent = `SAE F${String(f.fid).padStart(3, "0")}: ${cleanSaeLabel(f.label)} [${f.n_units}u]`;
+    if (f.fid === prevVal) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  if (prevVal >= 0 && !feats.some(f => f.fid === prevVal)) {
+    ACTIVE_SAE_FID = -1;
+    sel.value = "-1";
+  }
+}
+
+function computeFieldOverlayGrid() {
+  if (!FRAME || !FRAME.map) return null;
+  const mp = FRAME.map;
+  const bgMode = document.getElementById("mapBgMode").value;
+  if (bgMode === "terrain") {
+    LAST_FIELD_EVAL = null;
+    return null;
+  }
+
+  const G = mp.pot_res || 44;
+  const grid = Array.from({ length: G }, () => new Float32Array(G));
+  let isDiverging = true;
+  let label = "";
+
+  // Case A: Monosemantic Layer-6 Top-K SAE Feature Overlay is selected!
+  const saeFeat = getActiveSAEFeature();
+  if (saeFeat) {
+    const g1 = saeFeat.grid_p1 || [];
+    const g2 = saeFeat.grid_p2 || [];
+    const ge = saeFeat.grid_env || [];
+    const fTag = `SAE F${String(saeFeat.fid).padStart(3, "0")} (${cleanSaeLabel(saeFeat.label)})`;
+    for (let iy = 0; iy < G; iy++) {
+      for (let ix = 0; ix < G; ix++) {
+        const v1 = (g1[iy] && g1[iy][ix]) || 0;
+        const v2 = (g2[iy] && g2[iy][ix]) || 0;
+        const ve = (ge[iy] && ge[iy][ix]) || 0;
+        if (bgMode === "diff") {
+          grid[iy][ix] = v1 - v2;
+          isDiverging = true;
+          label = `F₁ − F₂ [${fTag}]`;
+        } else if (bgMode === "p1") {
+          grid[iy][ix] = v1;
+          isDiverging = false;
+          label = `F₁ [${fTag}]`;
+        } else if (bgMode === "p2") {
+          grid[iy][ix] = v2;
+          isDiverging = false;
+          label = `F₂ [${fTag}]`;
+        } else if (bgMode === "contest") {
+          grid[iy][ix] = v1 * v2;
+          isDiverging = false;
+          label = `F₁ · F₂ [${fTag}]`;
+        } else {
+          grid[iy][ix] = ve + v1 + v2;
+          isDiverging = false;
+          label = `Total [${fTag}]`;
+        }
+      }
+    }
+    let lo = 1e9, hi = -1e9, maxAbs = 1e-6;
+    for (let iy = 0; iy < G; iy++) {
+      for (let ix = 0; ix < G; ix++) {
+        const v = grid[iy][ix];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        if (Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
+      }
+    }
+    LAST_FIELD_EVAL = { grid, G, isDiverging, lo, hi, maxAbs, label, dims: [], bgMode };
+    return LAST_FIELD_EVAL;
+  }
+
+  // Case B: Non-Negative Continuous Field Modes z0..z_{r-1}
+  const rDim = getRDim();
+  const combineMode = document.getElementById("fieldCombineMode").value;
+  const dims = getSortedActiveDims();
+  const isSingle = dims.length === 1;
+  const k0 = dims[0];
+  const dimTag = dims.length === rDim ? `All ${rDim}D` : dims.map(d => `z${d}`).join("+");
+
+  const p1M = mp.field_p1_modes || [];
+  const p2M = mp.field_p2_modes || [];
+  const envM = mp.field_env_modes || [];
+  const pi1M = mp.field_pi1_modes || [];
+  const pi2M = mp.field_pi2_modes || [];
+  const tvM = mp.pot_z_modes || [];
+
+  for (let iy = 0; iy < G; iy++) {
+    for (let ix = 0; ix < G; ix++) {
+      let val = 0.0;
+      if (bgMode === "diff") {
+        if (isSingle) {
+          const v1 = p1M[k0] ? p1M[k0][iy][ix] : 0;
+          const v2 = p2M[k0] ? p2M[k0][iy][ix] : 0;
+          val = v1 - v2;
+        } else if (combineMode === "signed") {
+          for (const d of dims) {
+            val += (p1M[d] ? p1M[d][iy][ix] : 0) - (p2M[d] ? p2M[d][iy][ix] : 0);
+          }
+        } else {
+          let s1 = 0, s2 = 0;
+          for (const d of dims) {
+            const v1 = p1M[d] ? p1M[d][iy][ix] : 0;
+            const v2 = p2M[d] ? p2M[d][iy][ix] : 0;
+            s1 += v1 * v1;
+            s2 += v2 * v2;
+          }
+          val = Math.sqrt(s1) - Math.sqrt(s2);
+        }
+        isDiverging = true;
+        label = isSingle ? `F₁[z${k0}] − F₂[z${k0}]` : (combineMode === "signed" ? `Σ(F₁ − F₂) [${dimTag}]` : `||F₁|| − ||F₂|| [${dimTag}]`);
+      } else if (bgMode === "p1") {
+        if (isSingle || combineMode === "signed") {
+          for (const d of dims) val += p1M[d] ? p1M[d][iy][ix] : 0;
+          isDiverging = false;
+          label = `F₁ [${dimTag}]`;
+        } else {
+          let s1 = 0;
+          for (const d of dims) {
+            const v1 = p1M[d] ? p1M[d][iy][ix] : 0;
+            s1 += v1 * v1;
+          }
+          val = Math.sqrt(s1);
+          isDiverging = false;
+          label = `||F₁|| [${dimTag}]`;
+        }
+      } else if (bgMode === "p2") {
+        if (isSingle || combineMode === "signed") {
+          for (const d of dims) val += p2M[d] ? p2M[d][iy][ix] : 0;
+          isDiverging = false;
+          label = `F₂ [${dimTag}]`;
+        } else {
+          let s2 = 0;
+          for (const d of dims) {
+            const v2 = p2M[d] ? p2M[d][iy][ix] : 0;
+            s2 += v2 * v2;
+          }
+          val = Math.sqrt(s2);
+          isDiverging = false;
+          label = `||F₂|| [${dimTag}]`;
+        }
+      } else if (bgMode === "contest") {
+        for (const d of dims) {
+          const v1 = p1M[d] ? p1M[d][iy][ix] : 0;
+          const v2 = p2M[d] ? p2M[d][iy][ix] : 0;
+          val += v1 * v2;
+        }
+        isDiverging = false;
+        label = `F₁ · F₂ [${dimTag}]`;
+      } else if (bgMode === "env") {
+        if (isSingle || combineMode === "signed") {
+          for (const d of dims) val += envM[d] ? envM[d][iy][ix] : 0;
+          isDiverging = false;
+          label = `F_env [${dimTag}]`;
+        } else {
+          let se = 0;
+          for (const d of dims) {
+            const ve = envM[d] ? envM[d][iy][ix] : 0;
+            se += ve * ve;
+          }
+          val = Math.sqrt(se);
+          isDiverging = false;
+          label = `||F_env|| [${dimTag}]`;
+        }
+      } else if (bgMode === "kinetic") {
+        if (isSingle && combineMode === "signed") {
+          val = (pi1M[k0] ? pi1M[k0][iy][ix] : 0) - (pi2M[k0] ? pi2M[k0][iy][ix] : 0);
+          isDiverging = true;
+          label = `Π₁[z${k0}] − Π₂[z${k0}]`;
+        } else {
+          for (const d of dims) {
+            const a1 = pi1M[d] ? pi1M[d][iy][ix] : 0;
+            const a2 = pi2M[d] ? pi2M[d][iy][ix] : 0;
+            val += a1 * a1 + a2 * a2;
+          }
+          isDiverging = false;
+          label = `||Π₁||² + ||Π₂||² [${dimTag}]`;
+        }
+      } else if (bgMode === "terrain_v") {
+        if (isSingle || combineMode === "signed") {
+          for (const d of dims) val += tvM[d] ? tvM[d][iy][ix] : 0;
+          isDiverging = true;
+          label = `V_loc [${dimTag}]`;
+        } else {
+          let sv = 0;
+          for (const d of dims) {
+            const vv = tvM[d] ? tvM[d][iy][ix] : 0;
+            sv += vv * vv;
+          }
+          val = Math.sqrt(sv);
+          isDiverging = false;
+          label = `||V_loc|| [${dimTag}]`;
+        }
+      }
+      grid[iy][ix] = val;
+    }
+  }
+
+  let lo = 1e9, hi = -1e9, maxAbs = 1e-6;
+  for (let iy = 0; iy < G; iy++) {
+    for (let ix = 0; ix < G; ix++) {
+      const v = grid[iy][ix];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+      if (Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
+    }
+  }
+
+  LAST_FIELD_EVAL = { grid, G, isDiverging, lo, hi, maxAbs, label, dims, bgMode };
+  return LAST_FIELD_EVAL;
+}
+
+function sampleFieldAtWorld(wx, wy) {
+  if (!LAST_FIELD_EVAL || !FRAME || !FRAME.map) return null;
+  const [x0, y0, x1, y1] = FRAME.map.playable;
+  const G = LAST_FIELD_EVAL.G;
+  const fx = ((wx - x0) / Math.max(1e-5, x1 - x0)) * (G - 1);
+  const fy = ((wy - y0) / Math.max(1e-5, y1 - y0)) * (G - 1);
+  if (fx < 0 || fx > G - 1 || fy < 0 || fy > G - 1) return null;
+  const ix = Math.min(G - 1, Math.max(0, Math.round(fx)));
+  const iy = Math.min(G - 1, Math.max(0, Math.round(fy)));
+  return LAST_FIELD_EVAL.grid[iy][ix];
+}
+
+function updateFieldLayerBar() {
+  if (!FRAME || !FRAME.gram || !FRAME.gram.owners) return;
+  const rDim = getRDim();
+  const dims = getSortedActiveDims();
+  const isAll = dims.length === rDim;
+  const saeFeat = getActiveSAEFeature();
+
+  const allLbl = document.getElementById("dimPillAllLabel");
+  if (allLbl) allLbl.textContent = `All ${rDim}D`;
+
+  // Update active button classes and hide z8..z15 if rDim === 8
+  const allBtn = document.getElementById("dimPillAll");
+  if (allBtn) allBtn.classList.toggle("active", !saeFeat && isAll);
+  document.querySelectorAll(".dim-pill[data-dim]").forEach(btn => {
+    const dAttr = btn.getAttribute("data-dim");
+    if (dAttr === "all") return;
+    const dIdx = parseInt(dAttr, 10);
+    btn.style.display = dIdx < rDim ? "" : "none";
+    btn.classList.toggle("active", !saeFeat && !isAll && ACTIVE_FIELD_DIMS.has(dIdx));
+  });
+
+  // Update mini energy bars on z0..z_{r-1} pills using F_self[k,k] (P1 + P2)
+  const p1O = FRAME.gram.owners.p1;
+  const p2O = FRAME.gram.owners.p2;
+  if (p1O && p2O && p1O.F_self_8x8 && p2O.F_self_8x8) {
+    let maxE = 1e-6;
+    const diagE = [];
+    for (let k = 0; k < rDim; k++) {
+      const e = ((p1O.F_self_8x8[k] && p1O.F_self_8x8[k][k]) || 0) + ((p2O.F_self_8x8[k] && p2O.F_self_8x8[k][k]) || 0);
+      diagE.push(e);
+      if (e > maxE) maxE = e;
+    }
+    for (let k = 0; k < rDim; k++) {
+      const fillEl = document.getElementById(`dimFill${k}`);
+      if (fillEl) {
+        fillEl.style.width = `${Math.round(Math.min(100, (diagE[k] / maxE) * 100))}%`;
+      }
+    }
+  }
+
+  // Update live summary strip for selected dimension(s) or active SAE feature
+  const sumEl = document.getElementById("fieldLayerSummary");
+  if (!sumEl || !p1O || !p2O) return;
+
+  if (saeFeat) {
+    const p1Units = {}, p2Units = {};
+    FRAME.units.forEach(u => {
+      const act = (saeFeat.unit_acts && saeFeat.unit_acts[u.row]) || 0;
+      if (act > 0.05) {
+        if (u.owner === 1) p1Units[u.name] = (p1Units[u.name] || 0) + 1;
+        else if (u.owner === 2) p2Units[u.name] = (p2Units[u.name] || 0) + 1;
+      }
+    });
+    const fmtU = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v})`).join(", ") || "—";
+    sumEl.innerHTML =
+      `<span><b style="color:#c084fc;">[Layer-6 Top-K SAE F${String(saeFeat.fid).padStart(3, "0")}: ${cleanSaeLabel(saeFeat.label)}]</b> ` +
+      `Active Units: <b>${saeFeat.n_units}</b> | Total Activation Σf: <b style="color:#10b981;">${saeFeat.total_act}</b> | Peak: <b>${saeFeat.max_act}</b></span>` +
+      `<span><b style="color:#38bdf8;">P1 Units:</b> ${fmtU(p1Units)} &nbsp;•&nbsp; <b style="color:#fb7185;">P2 Units:</b> ${fmtU(p2Units)}</span>`;
+    return;
+  }
+
+  let f1Self = 0, f2Self = 0, fCross = 0, fEnv = 0, tField = 0, gradSelf = 0;
+  dims.forEach(k => {
+    f1Self += (p1O.F_self_8x8 && p1O.F_self_8x8[k] && p1O.F_self_8x8[k][k]) || 0;
+    f2Self += (p2O.F_self_8x8 && p2O.F_self_8x8[k] && p2O.F_self_8x8[k][k]) || 0;
+    fCross += (p1O.F_cross_8x8 && p1O.F_cross_8x8[k] && p1O.F_cross_8x8[k][k]) || 0;
+    gradSelf += (p1O.grad_F_self_8x8 && p1O.grad_F_self_8x8[k] && p1O.grad_F_self_8x8[k][k]) || 0;
+    if (p1O.mode_vectors && p2O.mode_vectors) {
+      fEnv += (p1O.mode_vectors.F_env[k] || 0) + (p2O.mode_vectors.F_env[k] || 0);
+      tField += (p1O.mode_vectors.T_field[k] || 0) + (p2O.mode_vectors.T_field[k] || 0);
+    }
+  });
+
+  // Compute top P1 and P2 units loading onto the selected non-negative dimension(s)
+  const p1Counts = {}, p2Counts = {};
+  FRAME.units.forEach(u => {
+    if (!u.z) return;
+    let score = 0;
+    dims.forEach(k => { score += u.z[k] || 0; });
+    score /= dims.length;
+    if (Math.abs(score) > 0.08) {
+      if (u.owner === 1) p1Counts[u.name] = (p1Counts[u.name] || 0) + 1;
+      else if (u.owner === 2) p2Counts[u.name] = (p2Counts[u.name] || 0) + 1;
+    }
+  });
+  const fmtTop = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v})`).join(", ") || "—";
+
+  const dimLabel = isAll ? `All ${rDim}D (z0..z${rDim - 1})` : dims.map(d => `z${d}`).join("+");
+  const gradCol = gradSelf >= 0 ? "#10b981" : "#f43f5e";
+  sumEl.innerHTML =
+    `<span><b style="color:#a5b4fc;">[${dimLabel}]</b> ` +
+    `P1 ∫F₁²: <b style="color:#38bdf8;">${f1Self.toFixed(4)}</b> | ` +
+    `P2 ∫F₂²: <b style="color:#fb7185;">${f2Self.toFixed(4)}</b> | ` +
+    `∫F₁·F₂: <b style="color:#c084fc;">${fCross >= 0 ? "+" : ""}${fCross.toFixed(4)}</b> | ` +
+    `∫Π²: <b style="color:#fbbf24;">${tField.toFixed(4)}</b> | ` +
+    `∂(-A₁)/∂F₁: <b style="color:${gradCol};">${gradSelf >= 0 ? "+" : ""}${gradSelf.toFixed(2)}‰</b></span>` +
+    `<span><b style="color:#38bdf8;">P1 Units:</b> ${fmtTop(p1Counts)} &nbsp;•&nbsp; <b style="color:#fb7185;">P2 Units:</b> ${fmtTop(p2Counts)}</span>`;
+}
+
+function renderMap() {
+  const canvas = document.getElementById("mapCanvas");
+  const { ctx, w, h } = setupHiDPICanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  if (!FRAME) return;
+
+  updateFieldLayerBar();
+
+  const mp = FRAME.map;
+  const [x0, y0, x1, y1] = mp.playable;
+  const bgMode = document.getElementById("mapBgMode").value;
+  const colorMode = document.getElementById("unitColorMode").value;
+  const layerIdx = parseInt(document.getElementById("layerSelect").value, 10);
+
+  // 1. ALWAYS Render Base Map Terrain (Height + Pathable + Creep + Fog of War)
+  {
+    const G = mp.grid_res;
+    const dx = (x1 - x0) / G;
+    const dy = (y1 - y0) / G;
+    for (let iy = 0; iy < G; iy++) {
+      for (let ix = 0; ix < G; ix++) {
+        const wx = x0 + ix * dx;
+        const wy = y0 + (iy + 1) * dy;
+        const [sx, sy, sc] = worldToCanvas(wx, wy, w, h);
+        const cw = Math.ceil(dx * sc) + 1;
+        const ch = Math.ceil(dy * sc) + 1;
+
+        const hVal = mp.height[iy][ix];
+        const path = mp.pathable[iy][ix];
+        const creep = mp.creep[iy][ix];
+        const v1 = mp.p1_vis[iy][ix];
+        const v2 = mp.p2_vis[iy][ix];
+
+        let r = path ? 18 + (hVal - 100) * 0.42 : 9;
+        let g = path ? 27 + (hVal - 100) * 0.50 : 13;
+        let b = path ? 44 + (hVal - 100) * 0.60 : 20;
+        if (creep) { r += 34; g -= 5; b += 38; }
+        if (v1 > 0) { b += 14; g += 6; }
+        if (v2 > 0) { r += 14; }
+        ctx.fillStyle = `rgb(${Math.max(6, Math.min(255, r|0))},${Math.max(8, Math.min(255, g|0))},${Math.max(12, Math.min(255, b|0))})`;
+        ctx.fillRect(sx, sy, cw, ch);
+      }
+    }
+  }
+
+  // 1b. Render Translucent 2D Potential Field Overlay (Bilinearly Smoothed + Iso-Contours)
+  const fev = computeFieldOverlayGrid();
+  if (fev) {
+    const { grid, G, isDiverging, lo, hi, maxAbs, label } = fev;
+    const alphaSlider = document.getElementById("fieldAlphaSlider");
+    const overlayAlpha = (alphaSlider ? parseInt(alphaSlider.value, 10) : 72) / 100.0;
+
+    if (!_fieldOffscreenCanvas || _fieldOffscreenCanvas.width !== G || _fieldOffscreenCanvas.height !== G) {
+      _fieldOffscreenCanvas = document.createElement("canvas");
+      _fieldOffscreenCanvas.width = G;
+      _fieldOffscreenCanvas.height = G;
+    }
+    const octx = _fieldOffscreenCanvas.getContext("2d");
+    const imgData = octx.createImageData(G, G);
+    const data = imgData.data;
+
+    // Note: canvas Y runs top-to-bottom (y1 down to y0), while grid iy=0 is y0 and iy=G-1 is y1
+    for (let iy = 0; iy < G; iy++) {
+      const rowFlip = G - 1 - iy;
+      for (let ix = 0; ix < G; ix++) {
+        const v = grid[iy][ix];
+        const pIdx = (rowFlip * G + ix) * 4;
+        let r = 0, g = 0, b = 0, a = 0;
+
+        if (isDiverging) {
+          const mag = Math.min(1.0, Math.abs(v) / maxAbs);
+          if (mag < 0.03) {
+            a = 0;
+          } else {
+            const norm = Math.pow(mag, 0.72);
+            if (v >= 0) {
+              // Cyan / Sky Blue (+ve potential / P1 dominance)
+              r = Math.round(18 + 38 * norm);
+              g = Math.round(95 + 135 * norm);
+              b = Math.round(165 + 88 * norm);
+            } else {
+              // Rose / Crimson (-ve potential / P2 dominance)
+              r = Math.round(170 + 82 * norm);
+              g = Math.round(28 + 65 * norm);
+              b = Math.round(68 + 65 * norm);
+            }
+            a = Math.round(255 * overlayAlpha * Math.min(1.0, 0.18 + 0.88 * norm));
+          }
+        } else {
+          const t = Math.max(0.0, Math.min(1.0, (v - lo) / Math.max(1e-6, hi - lo)));
+          if (t < 0.04) {
+            a = 0;
+          } else {
+            const tp = Math.pow(t, 0.8);
+            // Magma / Viridis-like warm density colormap
+            r = Math.round(30 + 222 * Math.pow(tp, 1.1));
+            g = Math.round(25 + 195 * Math.sin(tp * Math.PI * 0.88));
+            b = Math.round(110 + 135 * (1.0 - tp));
+            a = Math.round(255 * overlayAlpha * Math.min(1.0, 0.15 + 0.88 * tp));
+          }
+        }
+        data[pIdx] = r;
+        data[pIdx + 1] = g;
+        data[pIdx + 2] = b;
+        data[pIdx + 3] = a;
+      }
+    }
+    octx.putImageData(imgData, 0, 0);
+
+    const [sx0, sy1] = worldToCanvas(x0, y1, w, h);
+    const [sx1, sy0] = worldToCanvas(x1, y0, w, h);
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(_fieldOffscreenCanvas, sx0, sy1, sx1 - sx0, sy0 - sy1);
+
+    // Optional Iso-Potential Contour Lines (marching-squares cell edges at +/- 0.38 and +/- 0.72)
+    const chkContours = document.getElementById("chkFieldContours");
+    if (chkContours && chkContours.checked && maxAbs > 1e-5) {
+      const dx = (x1 - x0) / (G - 1);
+      const dy = (y1 - y0) / (G - 1);
+      const levels = isDiverging
+        ? [
+            { thr: 0.35 * maxAbs, col: "rgba(125, 211, 252, 0.55)", lw: 1.0 },
+            { thr: 0.68 * maxAbs, col: "rgba(224, 242, 254, 0.85)", lw: 1.4 },
+            { thr: -0.35 * maxAbs, col: "rgba(253, 164, 175, 0.55)", lw: 1.0 },
+            { thr: -0.68 * maxAbs, col: "rgba(255, 228, 230, 0.85)", lw: 1.4 }
+          ]
+        : [
+            { thr: lo + 0.40 * (hi - lo), col: "rgba(253, 224, 71, 0.55)", lw: 1.0 },
+            { thr: lo + 0.72 * (hi - lo), col: "rgba(254, 249, 195, 0.85)", lw: 1.4 }
+          ];
+
+      levels.forEach(({ thr, col, lw }) => {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = lw;
+        ctx.beginPath();
+        for (let iy = 0; iy < G - 1; iy++) {
+          for (let ix = 0; ix < G - 1; ix++) {
+            const v00 = grid[iy][ix] - thr;
+            const v10 = grid[iy][ix + 1] - thr;
+            const v01 = grid[iy + 1][ix] - thr;
+            const v11 = grid[iy + 1][ix + 1] - thr;
+            const s00 = v00 >= 0 ? 1 : 0;
+            const s10 = v10 >= 0 ? 1 : 0;
+            const s01 = v01 >= 0 ? 1 : 0;
+            const s11 = v11 >= 0 ? 1 : 0;
+            const mask = s00 | (s10 << 1) | (s11 << 2) | (s01 << 3);
+            if (mask === 0 || mask === 15) continue;
+
+            const wx0 = x0 + ix * dx;
+            const wy0 = y0 + iy * dy;
+            const pts = [];
+            if (s00 !== s10) {
+              const t = v00 / (v00 - v10);
+              pts.push(worldToCanvas(wx0 + t * dx, wy0, w, h));
+            }
+            if (s10 !== s11) {
+              const t = v10 / (v10 - v11);
+              pts.push(worldToCanvas(wx0 + dx, wy0 + t * dy, w, h));
+            }
+            if (s01 !== s11) {
+              const t = v01 / (v01 - v11);
+              pts.push(worldToCanvas(wx0 + t * dx, wy0 + dy, w, h));
+            }
+            if (s00 !== s01) {
+              const t = v00 / (v00 - v01);
+              pts.push(worldToCanvas(wx0, wy0 + t * dy, w, h));
+            }
+            if (pts.length >= 2) {
+              ctx.moveTo(pts[0][0], pts[0][1]);
+              ctx.lineTo(pts[1][0], pts[1][1]);
+            }
+          }
+        }
+        ctx.stroke();
+      });
+    }
+    ctx.restore();
+
+    const legEl = document.getElementById("mapModeLegend");
+    if (legEl) {
+      legEl.textContent = isDiverging
+        ? `${label} • Max |F|=${maxAbs.toFixed(3)} (Cyan: + | Rose: −)`
+        : `${label} • Range [${lo.toFixed(3)}, ${hi.toFixed(3)}]`;
+    }
+  } else {
+    const legEl = document.getElementById("mapModeLegend");
+    if (legEl) legEl.textContent = "P1: Blue | P2: Rose | NFZ: Magenta";
+  }
+
+  // 2. .s2ma NoFlyZone Air Blockers & Healing Shrines
+  if (document.getElementById("chkS2MA").checked && mp.s2ma && mp.s2ma.found_s2ma) {
+    mp.s2ma.healing_shrines.forEach(sh => {
+      const [sx, sy, sc] = worldToCanvas(sh.x, sh.y, w, h);
+      ctx.strokeStyle = "#10b981";
+      ctx.fillStyle = "rgba(16, 185, 129, 0.22)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, Math.max(6, 2.5 * sc), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+    mp.s2ma.no_fly_zones.forEach(nfz => {
+      const [sx, sy, sc] = worldToCanvas(nfz.x, nfz.y, w, h);
+      ctx.save();
+      ctx.strokeStyle = "#e879f9";
+      ctx.fillStyle = "rgba(217, 70, 239, 0.16)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(sx, sy, Math.max(5, nfz.r_hard * sc), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    });
+  }
+
+  // 3. 8x8 Continuous Potential Field Anchor Tokens
+  if (document.getElementById("chkAnchors").checked) {
+    FRAME.tokens.filter(t => t.kind === "field").forEach(ft => {
+      const [sx, sy] = worldToCanvas(ft.x, ft.y, w, h);
+      const isSel = ft.tok_idx === SELECTED_TOK_IDX;
+      ctx.fillStyle = isSel ? "#facc15" : "rgba(148, 163, 184, 0.45)";
+      ctx.beginPath();
+      ctx.arc(sx, sy, isSel ? 5 : 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  // 4. Spatial 2D-RoPE Attention Rays from SELECTED_TOK_IDX
+  if (document.getElementById("chkAttnRays").checked && TOKEN_DETAILS && TOKEN_DETAILS.outgoing) {
+    const srcTok = FRAME.tokens.find(t => t.tok_idx === SELECTED_TOK_IDX);
+    if (srcTok) {
+      const [xA, yA] = worldToCanvas(srcTok.x, srcTok.y, w, h);
+      TOKEN_DETAILS.outgoing.forEach(edge => {
+        if (edge.tok_idx === SELECTED_TOK_IDX) return;
+        const dstTok = FRAME.tokens.find(t => t.tok_idx === edge.tok_idx);
+        if (!dstTok) return;
+        const [xB, yB] = worldToCanvas(dstTok.x, dstTok.y, w, h);
+        const alpha = Math.min(0.95, Math.max(0.12, edge.weight * 4.5));
+        ctx.strokeStyle = dstTok.kind === "field"
+          ? `rgba(250, 204, 21, ${alpha})`
+          : `rgba(167, 139, 250, ${alpha})`;
+        ctx.lineWidth = Math.min(5.0, 0.8 + edge.weight * 14.0);
+        ctx.beginPath();
+        ctx.moveTo(xA, yA);
+        ctx.lineTo(xB, yB);
+        ctx.stroke();
+      });
+    }
+  }
+
+  // 5. Render Living Units
+  const gramScores = colorMode === "gram_mode" ? computeUnitGramScores() : {};
+  let maxGramAbs = 1e-6;
+  Object.values(gramScores).forEach(v => { if (Math.abs(v) > maxGramAbs) maxGramAbs = Math.abs(v); });
+
+  let maxMargAbs = 1e-5;
+  let maxMass = 1e-5;
+  FRAME.units.forEach(u => {
+    if (Math.abs(u.marginal_adv) > maxMargAbs) maxMargAbs = Math.abs(u.marginal_adv);
+    if ((u.mass || 0) > maxMass) maxMass = u.mass;
+  });
+
+  const showForceAdv = document.getElementById("chkForceAdv").checked;
+  const showForceKin = document.getElementById("chkForceKin").checked;
+
+  FRAME.units.forEach(u => {
+    const [sx, sy, sc] = worldToCanvas(u.x, u.y, w, h);
+    const rad = Math.max(3.2, Math.min(13.0, u.radius * sc * (u.structure ? 1.15 : 1.35)));
+    const isSel = u.row === SELECTED_UNIT_ROW || u.tok_idx === SELECTED_TOK_IDX;
+
+    // Marginal advantage or mass halo
+    if (colorMode === "owner" || colorMode === "marginal") {
+      const mFrac = Math.min(1.0, Math.abs(u.marginal_adv) / maxMargAbs);
+      if (mFrac > 0.12) {
+        ctx.fillStyle = u.marginal_adv >= 0
+          ? `rgba(56, 189, 248, ${0.15 + 0.35 * mFrac})`
+          : `rgba(251, 113, 133, ${0.15 + 0.35 * mFrac})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, rad + 2 + 6 * mFrac, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (colorMode === "mass") {
+      const mFrac = Math.min(1.0, (u.mass || 0) / maxMass);
+      ctx.fillStyle = u.owner === 1
+        ? `rgba(56, 189, 248, ${0.18 + 0.38 * mFrac})`
+        : (u.owner === 2 ? `rgba(251, 113, 133, ${0.18 + 0.38 * mFrac})` : `rgba(251, 191, 36, ${0.15 + 0.3 * mFrac})`);
+      ctx.beginPath();
+      ctx.arc(sx, sy, rad + 1 + 8 * mFrac, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Unit fill color based on selected mode
+    let fillCol = "#fbbf24";
+    if (colorMode === "owner") {
+      fillCol = u.owner === 1 ? "#38bdf8" : (u.owner === 2 ? "#fb7185" : "#fbbf24");
+    } else if (colorMode === "field_dim") {
+      const saeFeat = getActiveSAEFeature();
+      let zScore = 0;
+      if (saeFeat && saeFeat.unit_acts) {
+        zScore = (saeFeat.unit_acts[u.row] || 0) / Math.max(0.25, saeFeat.max_act || 1.0);
+      } else if (u.z) {
+        const dims = getSortedActiveDims();
+        dims.forEach(d => { zScore += u.z[d] || 0; });
+        zScore /= dims.length;
+        zScore *= 1.8;
+      }
+      const t = Math.max(-1, Math.min(1, zScore));
+      if (Math.abs(t) < 0.05) {
+        fillCol = "rgba(100, 116, 139, 0.40)";
+      } else if (u.owner === 1) {
+        fillCol = `rgb(${Math.round(20 + 40*(1-Math.abs(t)))}, ${Math.round(135 + 100*Math.abs(t))}, 252)`;
+      } else if (u.owner === 2) {
+        fillCol = `rgb(252, ${Math.round(55 + 85*(1-Math.abs(t)))}, ${Math.round(95 + 75*(1-Math.abs(t)))})`;
+      } else {
+        fillCol = `rgb(250, ${Math.round(170 + 70*Math.abs(t))}, 40)`;
+      }
+    } else if (colorMode === "mass") {
+      const t = Math.min(1.0, (u.mass || 0) / maxMass);
+      fillCol = u.owner === 1
+        ? `rgb(${Math.round(30 + 60*t)}, ${Math.round(120 + 115*t)}, 252)`
+        : (u.owner === 2 ? `rgb(252, ${Math.round(70 + 90*t)}, ${Math.round(100 + 80*t)})` : "#fbbf24");
+    } else if (colorMode === "marginal") {
+      const t = Math.max(-1, Math.min(1, u.marginal_adv / maxMargAbs));
+      fillCol = t >= 0
+        ? `rgb(${Math.round(40 + 16*(1-t))}, ${Math.round(110 + 120*t)}, 248)`
+        : `rgb(251, ${Math.round(113 * (1+t))}, ${Math.round(133 * (1+t))})`;
+    } else if (colorMode === "gram_mode") {
+      const gv = gramScores[u.row] || 0.0;
+      const t = Math.max(-1, Math.min(1, gv / maxGramAbs));
+      fillCol = Math.abs(t) < 0.05
+        ? "rgba(100, 116, 139, 0.35)"
+        : (t >= 0 ? `rgba(16, 185, 129, ${0.35 + 0.65*t})` : `rgba(244, 63, 94, ${0.35 - 0.65*t})`);
+    } else if (colorMode === "pca_rgb") {
+      const rgb = (u.layer_pca_rgb && u.layer_pca_rgb[layerIdx + 1]) || [160, 160, 160];
+      fillCol = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+    } else if (colorMode === "cos_sim" && TOKEN_DETAILS && TOKEN_DETAILS.cosine_similarity) {
+      const cs = TOKEN_DETAILS.cosine_similarity[u.tok_idx] || 0.0;
+      const t = Math.max(0, Math.min(1, (cs + 0.2) / 1.2));
+      fillCol = `rgb(${Math.round(40 + 210*t)}, ${Math.round(60 + 140*t)}, ${Math.round(240 - 120*t)})`;
+    }
+
+    ctx.fillStyle = fillCol;
+    ctx.strokeStyle = isSel ? "#ffffff" : (u.flying ? "#e879f9" : "rgba(15, 23, 42, 0.85)");
+    ctx.lineWidth = isSel ? 2.5 : (u.flying ? 1.5 : 1.0);
+
+    ctx.beginPath();
+    if (u.structure) {
+      ctx.rect(sx - rad, sy - rad, rad * 2, rad * 2);
+    } else {
+      ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    // Force vectors (-grad_{x,y} A1)
+    if (showForceAdv && u.owner !== 0 && !u.structure) {
+      const [fx, fy] = u.force_adv;
+      // For P1, +force_adv increases P1 advantage; for P2, -force_adv increases P2 advantage
+      const sgn = u.owner === 1 ? 1.0 : -1.0;
+      const vx = fx * sgn * 320.0;
+      const vy = -fy * sgn * 320.0; // flip Y for canvas
+      const mag = Math.hypot(vx, vy);
+      if (mag > 2.5) {
+        const clampMag = Math.min(26.0, mag);
+        const ex = sx + (vx / mag) * clampMag;
+        const ey = sy + (vy / mag) * clampMag;
+        ctx.strokeStyle = u.owner === 1 ? "#7dd3fc" : "#fda4af";
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+      }
+    }
+
+    if (showForceKin && u.owner !== 0 && !u.structure) {
+      const [kx, ky] = u.force_kin;
+      const vx = kx * 180.0;
+      const vy = -ky * 180.0;
+      const mag = Math.hypot(vx, vy);
+      if (mag > 2.0) {
+        const clampMag = Math.min(22.0, mag);
+        ctx.strokeStyle = "#fde047";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(sx + (vx / mag) * clampMag, sy + (vy / mag) * clampMag);
+        ctx.stroke();
+      }
+    }
+  });
+
+  const s2maBadge = mp.s2ma && mp.s2ma.found_s2ma
+    ? ` | .s2ma NFZ:${mp.s2ma.no_fly_zones.length} Shrines:${mp.s2ma.healing_shrines.length}`
+    : "";
+  document.getElementById("mapOverlayTop").textContent =
+    `${mp.map_name} • t=${fmtTime(FRAME.time_s)} (Loop ${FRAME.loop_t}) • Live Units: ${FRAME.units.length}${s2maBadge}`;
+}
+
+// ============================================================================
+// PANEL 2: MULTI-SCALE TIMELINE SCRUBBER
+// ============================================================================
+function renderTimeline() {
+  if (!TIMELINE || !TIMELINE.t_sec) return;
+  const N = TIMELINE.t_sec.length;
+  const tMax = TIMELINE.t_sec[N - 1] || 1;
+
+  // Top Canvas: Advantage (-A1_L1, -A1_L2, -A1_tot)
+  const { ctx: c1, w: w1, h: h1 } = setupHiDPICanvas(document.getElementById("timelineAdvCanvas"));
+  c1.clearRect(0, 0, w1, h1);
+  const padL = 42, padR = 12, padT = 8, padB = 16;
+  const pw = w1 - padL - padR;
+  const ph = h1 - padT - padB;
+
+  let maxA = 0.5;
+  for (let i = 0; i < N; i++) {
+    maxA = Math.max(
+      maxA,
+      Math.abs(TIMELINE.A1_l1[i]),
+      Math.abs(TIMELINE.A1_l2[i]),
+      Math.abs(TIMELINE.A1_tot[i])
+    );
+  }
+  maxA *= 1.12;
+
+  const xOf = sec => padL + (sec / tMax) * pw;
+  const yOf = val => padT + ph * (0.5 - 0.5 * (val / maxA));
+
+  // Zero line
+  c1.strokeStyle = "rgba(148, 163, 184, 0.3)";
+  c1.beginPath();
+  c1.moveTo(padL, yOf(0));
+  c1.lineTo(padL + pw, yOf(0));
+  c1.stroke();
+
+  const drawCurve = (arr, color, width = 1.5) => {
+    c1.strokeStyle = color;
+    c1.lineWidth = width;
+    c1.beginPath();
+    for (let i = 0; i < N; i++) {
+      const x = xOf(TIMELINE.t_sec[i]);
+      const y = yOf(arr[i]);
+      if (i === 0) c1.moveTo(x, y);
+      else c1.lineTo(x, y);
+    }
+    c1.stroke();
+  };
+
+  drawCurve(TIMELINE.A1_l1, "#38bdf8", 1.3);
+  drawCurve(TIMELINE.A1_l2, "#a78bfa", 1.3);
+  drawCurve(TIMELINE.A1_tot, "#10b981", 2.0);
+
+  // Playhead line
+  const curSec = CURRENT_LOOP / 22.4;
+  const px = xOf(curSec);
+  c1.strokeStyle = "#facc15";
+  c1.lineWidth = 1.5;
+  c1.beginPath();
+  c1.moveTo(px, padT);
+  c1.lineTo(px, padT + ph);
+  c1.stroke();
+
+  c1.fillStyle = "#94a3b8";
+  c1.font = "10px monospace";
+  c1.fillText(`+${maxA.toFixed(1)}‰`, 2, padT + 8);
+  c1.fillText(`-${maxA.toFixed(1)}‰`, 2, padT + ph);
+
+  // Bottom Canvas: Grounded Vital Pool (P1 vs P2 HP+Shield eq)
+  const { ctx: c2, w: w2, h: h2 } = setupHiDPICanvas(document.getElementById("timelineHpCanvas"));
+  c2.clearRect(0, 0, w2, h2);
+  const ph2 = h2 - padT - padB;
+  let maxHP = 10.0;
+  for (let i = 0; i < N; i++) {
+    maxHP = Math.max(maxHP, TIMELINE.p1_hp_eq[i], TIMELINE.p2_hp_eq[i]);
+  }
+  maxHP *= 1.1;
+  const yHP = v => padT + ph2 * (1.0 - v / maxHP);
+
+  const drawHP = (arr, col) => {
+    c2.strokeStyle = col;
+    c2.lineWidth = 1.5;
+    c2.beginPath();
+    for (let i = 0; i < N; i++) {
+      const x = xOf(TIMELINE.t_sec[i]);
+      const y = yHP(arr[i]);
+      if (i === 0) c2.moveTo(x, y);
+      else c2.lineTo(x, y);
+    }
+    c2.stroke();
+  };
+  drawHP(TIMELINE.p1_hp_eq, "#38bdf8");
+  drawHP(TIMELINE.p2_hp_eq, "#fb7185");
+
+  c2.strokeStyle = "#facc15";
+  c2.beginPath();
+  c2.moveTo(px, padT);
+  c2.lineTo(px, padT + ph2);
+  c2.stroke();
+
+  c2.fillStyle = "#94a3b8";
+  c2.font = "10px monospace";
+  c2.fillText("HP+Shd", 2, padT + 10);
+  for (let m = 0; m <= Math.floor(tMax / 120); m++) {
+    const s = m * 120;
+    const x = xOf(s);
+    c2.fillText(fmtTime(s), x - 12, h2 - 3);
+  }
+}
+
+// ============================================================================
+// PANEL 3: GRAM MATRIX & 256x256 SVD SPECTRUM
+// ============================================================================
+function getActiveGramMatrix() {
+  const g = FRAME.gram;
+  const ownMode = document.getElementById("gramOwnerSelect").value;
+  const matType = document.getElementById("gramMatType").value;
+
+  const pick = (key) => {
+    if (ownMode === "diff") {
+      const m1 = g.owners.p1[key];
+      const m2 = g.owners.p2[key];
+      return m1.map((row, i) => row.map((v, j) => v - m2[i][j]));
+    }
+    return g.owners[ownMode][key];
+  };
+
+  if (matType === "F_self_8x8") return pick("F_self_8x8");
+  if (matType === "grad_F_self") return pick("grad_F_self_8x8");
+  if (matType === "contrib_F_self") {
+    const mF = pick("F_self_8x8");
+    const mG = pick("grad_F_self_8x8");
+    return mF.map((row, i) => row.map((v, j) => v * mG[i][j]));
+  }
+  if (matType === "F_cross_8x8") return pick("F_cross_8x8");
+  if (matType === "grad_F_cross") return pick("grad_F_cross_8x8");
+  if (matType === "contrib_F_cross") {
+    const mF = pick("F_cross_8x8");
+    const mG = pick("grad_F_cross_8x8");
+    return mF.map((row, i) => row.map((v, j) => v * mG[i][j]));
+  }
+
+  if (matType === "G_16x16") return pick("G_16x16");
+  if (matType === "grad_G") return pick("grad_G_16x16");
+  if (matType === "l2_cc") return pick("l2_cc_16x16");
+  const mG = pick("G_16x16");
+  const mGrad = pick("grad_G_16x16");
+  return mG.map((row, i) => row.map((v, j) => v * mGrad[i][j]));
+}
+
+const _gramOffscreen = document.createElement("canvas");
+let gramZoom = 1.0;
+let gramPanU = 0.0; // normalized [0, 1 - 1/gramZoom] along X (cols)
+let gramPanV = 0.0; // normalized [0, 1 - 1/gramZoom] along Y (rows)
+let gramHoverCell = null; // [i, j]
+let isDraggingGram = false;
+let gramDragMoved = false;
+let gramDragStart = [0, 0];
+
+function clampGramPan() {
+  const maxPan = Math.max(0.0, 1.0 - 1.0 / gramZoom);
+  gramPanU = Math.max(0.0, Math.min(maxPan, gramPanU));
+  gramPanV = Math.max(0.0, Math.min(maxPan, gramPanV));
+}
+
+function getGramCanvasSize() {
+  const card = document.getElementById("gramCard");
+  if (!card) return 520;
+  const cw = card.clientWidth - 18;
+  const ch = card.clientHeight - 36;
+  return Math.max(460, Math.floor(Math.min(cw, ch)));
+}
+
+function renderGramPanel() {
+  if (!FRAME) return;
+  const labels = FRAME.gram.labels_16;
+  const canvas = document.getElementById("gramCanvas");
+  const side = getGramCanvasSize();
+  canvas.style.width = `${side}px`;
+  canvas.style.height = `${side}px`;
+  const { ctx, w, h } = setupHiDPICanvas(canvas, side, side);
+  ctx.clearRect(0, 0, w, h);
+
+  const pad = 36;
+  const plotW = w - pad - 8;
+  const plotH = h - pad - 8;
+  clampGramPan();
+
+  if (isFullGramMode()) {
+    if (GRAM_256_DATA && GRAM_256_DATA.matrix && GRAM_256_DATA.shape[0] > 0) {
+      const [rows, cols] = GRAM_256_DATA.shape;
+      const mat = GRAM_256_DATA.matrix;
+      let maxAbs = 1e-6;
+      for (let i = 0; i < rows; i++) {
+        const r = mat[i];
+        for (let j = 0; j < cols; j++) {
+          const a = Math.abs(r[j]);
+          if (a > maxAbs) maxAbs = a;
+        }
+      }
+
+      _gramOffscreen.width = cols;
+      _gramOffscreen.height = rows;
+      const octx = _gramOffscreen.getContext("2d");
+      const img = octx.createImageData(cols, rows);
+      const data = img.data;
+      let p = 0;
+      for (let i = 0; i < rows; i++) {
+        const r = mat[i];
+        for (let j = 0; j < cols; j++) {
+          const v = r[j];
+          const norm = Math.sign(v) * Math.pow(Math.min(1.0, Math.abs(v) / maxAbs), 0.6);
+          if (norm >= 0) {
+            data[p] = Math.round(15 + 40 * norm);
+            data[p + 1] = Math.round(25 + 165 * norm);
+            data[p + 2] = Math.round(45 + 205 * norm);
+          } else {
+            const a = -norm;
+            data[p] = Math.round(25 + 225 * a);
+            data[p + 1] = Math.round(20 + 60 * a);
+            data[p + 2] = Math.round(35 + 85 * a);
+          }
+          data[p + 3] = 255;
+          p += 4;
+        }
+      }
+      octx.putImageData(img, 0, 0);
+
+      const uToX = u => pad + (u - gramPanU) * gramZoom * plotW;
+      const vToY = v => pad + (v - gramPanV) * gramZoom * plotH;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pad, pad, plotW, plotH);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(
+        _gramOffscreen,
+        pad - gramPanU * gramZoom * plotW,
+        pad - gramPanV * gramZoom * plotH,
+        plotW * gramZoom,
+        plotH * gramZoom
+      );
+
+      // Subtle cell grid when zoomed in (gramZoom >= 4)
+      if (gramZoom >= 4.0) {
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.35)";
+        ctx.lineWidth = 0.75;
+        const j0 = Math.max(0, Math.floor(gramPanU * cols));
+        const j1 = Math.min(cols, Math.ceil((gramPanU + 1 / gramZoom) * cols));
+        const i0 = Math.max(0, Math.floor(gramPanV * rows));
+        const i1 = Math.min(rows, Math.ceil((gramPanV + 1 / gramZoom) * rows));
+        ctx.beginPath();
+        for (let j = j0; j <= j1; j++) {
+          const sx = uToX(j / cols);
+          ctx.moveTo(sx, pad); ctx.lineTo(sx, pad + plotH);
+        }
+        for (let i = i0; i <= i1; i++) {
+          const sy = vToY(i / rows);
+          ctx.moveTo(pad, sy); ctx.lineTo(pad + plotW, sy);
+        }
+        ctx.stroke();
+      }
+
+      // Highlight selected cell (ci, cj) inside clipped viewport
+      if (ACTIVE_SVD_MODE === null && ACTIVE_L2_BASIS < 0) {
+        const [ci, cj] = GRAM_256_DATA.cell || ACTIVE_GRAM256_CELL;
+        const cx = uToX((cj + 0.5) / cols);
+        const cy = vToY((ci + 0.5) / rows);
+        const cw = Math.max(6, (plotW * gramZoom) / cols);
+        const ch = Math.max(6, (plotH * gramZoom) / rows);
+        ctx.strokeStyle = "rgba(250, 204, 21, 0.75)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx, pad); ctx.lineTo(cx, pad + plotH);
+        ctx.moveTo(pad, cy); ctx.lineTo(pad + plotW, cy);
+        ctx.stroke();
+        ctx.strokeStyle = "#facc15";
+        ctx.lineWidth = 1.8;
+        ctx.strokeRect(cx - cw * 0.5, cy - ch * 0.5, cw, ch);
+      }
+      ctx.restore();
+
+      // Axis labels & block dividers
+      const mt = GRAM_256_DATA.mat_type;
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "10px monospace";
+
+      if (mt === "K_uu" || mt === "K_spatial") {
+        const owners = GRAM_256_DATA.unit_owners || [];
+        ctx.strokeStyle = "rgba(248, 250, 252, 0.65)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        let startIdx = 0;
+        for (let idx = 1; idx <= owners.length; idx++) {
+          if (idx === owners.length || owners[idx] !== owners[idx - 1]) {
+            const midFrac = ((startIdx + idx) * 0.5) / rows;
+            const posX = uToX(midFrac);
+            const posY = vToY(midFrac);
+            const ownCode = owners[startIdx];
+            const tag = ownCode === 1 ? "P1" : (ownCode === 2 ? "P2" : "Neu");
+            ctx.fillStyle = ownCode === 1 ? "#38bdf8" : (ownCode === 2 ? "#fb7185" : "#fbbf24");
+            if (posY >= pad && posY <= pad + plotH) {
+              ctx.textAlign = "right";
+              ctx.fillText(tag, pad - 5, posY + 3);
+            }
+            if (posX >= pad && posX <= pad + plotW) {
+              ctx.textAlign = "center";
+              ctx.fillText(tag, posX, pad - 7);
+            }
+            if (idx < owners.length) {
+              const divX = uToX(idx / rows);
+              const divY = vToY(idx / rows);
+              ctx.beginPath();
+              if (divX >= pad && divX <= pad + plotW) {
+                ctx.moveTo(divX, pad); ctx.lineTo(divX, pad + plotH);
+              }
+              if (divY >= pad && divY <= pad + plotH) {
+                ctx.moveTo(pad, divY); ctx.lineTo(pad + plotW, divY);
+              }
+              ctx.stroke();
+            }
+            startIdx = idx;
+          }
+        }
+        ctx.setLineDash([]);
+      } else if (mt === "G_qc_8x256") {
+        for (let i = 0; i < 8; i++) {
+          const sy = vToY((i + 0.5) / 8);
+          if (sy >= pad && sy <= pad + plotH) {
+            ctx.textAlign = "right";
+            ctx.fillText(labels[i], pad - 5, sy + 3);
+          }
+        }
+        [0, 32, 64, 96, 128, 160, 192, 224, 255].forEach(d => {
+          const sx = uToX(d / 255);
+          if (sx >= pad && sx <= pad + plotW) {
+            ctx.textAlign = "center";
+            ctx.fillText(`c${d}`, sx, pad - 7);
+          }
+        });
+      } else {
+        // G_cc_256
+        [0, 32, 64, 96, 128, 160, 192, 224, 255].forEach(d => {
+          const sx = uToX(d / 255);
+          const sy = vToY(d / 255);
+          if (sy >= pad && sy <= pad + plotH) {
+            ctx.textAlign = "right";
+            ctx.fillText(`c${d}`, pad - 5, sy + 3);
+          }
+          if (sx >= pad && sx <= pad + plotW) {
+            ctx.textAlign = "center";
+            ctx.fillText(`c${d}`, sx, pad - 7);
+          }
+        });
+      }
+
+      // Live 11x11 Loupe Magnifier on Hover when gramZoom < 4
+      if (gramHoverCell && gramZoom < 4.0 && rows >= 32) {
+        const [hi, hj] = gramHoverCell;
+        const rad = 5;
+        const diam = 2 * rad + 1; // 11x11 cells
+        const cellPx = 8;
+        const loupeSide = diam * cellPx; // 88x88 px
+        const lx = pad + plotW - loupeSide - 6;
+        const ly = pad + 6;
+        ctx.save();
+        ctx.fillStyle = "rgba(7, 11, 20, 0.92)";
+        ctx.fillRect(lx - 2, ly - 2, loupeSide + 4, loupeSide + 4);
+        ctx.imageSmoothingEnabled = false;
+        for (let di = -rad; di <= rad; di++) {
+          for (let dj = -rad; dj <= rad; dj++) {
+            const ii = hi + di;
+            const jj = hj + dj;
+            if (ii >= 0 && ii < rows && jj >= 0 && jj < cols) {
+              ctx.drawImage(
+                _gramOffscreen,
+                jj, ii, 1, 1,
+                lx + (dj + rad) * cellPx,
+                ly + (di + rad) * cellPx,
+                cellPx - 0.5,
+                cellPx - 0.5
+              );
+            }
+          }
+        }
+        ctx.strokeStyle = "#facc15";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(lx + rad * cellPx, ly + rad * cellPx, cellPx, cellPx);
+        ctx.strokeStyle = "#94a3b8";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(lx - 2, ly - 2, loupeSide + 4, loupeSide + 4);
+        ctx.restore();
+      }
+    }
+  } else {
+    const mat = getActiveGramMatrix();
+    const dim = mat.length; // rDim for F_self/F_cross, 8+rDim for G_16x16, 16 for l2_cc
+    const rDim = getRDim();
+    const mt = document.getElementById("gramMatType").value;
+    let activeLabels = labels;
+    if (is8x8FieldMode()) {
+      activeLabels = FRAME.gram.labels_8 || Array.from({ length: dim }, (_, k) => `z${k}`);
+    } else if (mt === "l2_cc") {
+      activeLabels = Array.from({ length: dim }, (_, k) => `w${k}`);
+    }
+    const cell = plotW / dim;
+
+    let maxAbs = 1e-6;
+    for (let i = 0; i < dim; i++) {
+      for (let j = 0; j < dim; j++) {
+        if (Math.abs(mat[i][j]) > maxAbs) maxAbs = Math.abs(mat[i][j]);
+      }
+    }
+
+    for (let i = 0; i < dim; i++) {
+      for (let j = 0; j < dim; j++) {
+        const v = mat[i][j];
+        const norm = Math.sign(v) * Math.pow(Math.min(1.0, Math.abs(v) / maxAbs), 0.65);
+        const x = pad + j * cell;
+        const y = pad + i * cell;
+        if (norm >= 0) {
+          ctx.fillStyle = `rgb(${Math.round(15 + 40 * norm)}, ${Math.round(25 + 165 * norm)}, ${Math.round(45 + 205 * norm)})`;
+        } else {
+          const a = -norm;
+          ctx.fillStyle = `rgb(${Math.round(25 + 225 * a)}, ${Math.round(20 + 60 * a)}, ${Math.round(35 + 85 * a)})`;
+        }
+        ctx.fillRect(x, y, cell - 1, cell - 1);
+
+        if (dim <= 16) {
+          ctx.fillStyle = Math.abs(norm) > 0.5 ? "#f8fafc" : "#cbd5e1";
+          ctx.font = dim <= 8 ? "10px monospace" : "8.5px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(v.toFixed(dim <= 8 ? 3 : 2), x + cell * 0.5, y + cell * 0.56);
+        }
+
+        if (ACTIVE_SVD_MODE === null && ACTIVE_L2_BASIS < 0 && ACTIVE_GRAM_CELL[0] === i && ACTIVE_GRAM_CELL[1] === j) {
+          ctx.strokeStyle = "#facc15";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x + 0.5, y + 0.5, cell - 2, cell - 2);
+        }
+      }
+    }
+
+    if (!is8x8FieldMode() && mt !== "l2_cc" && dim > 8) {
+      // Quadrant divider between Grounded Q (0..7) and Field Z (8..dim-1)
+      ctx.strokeStyle = "rgba(241, 245, 249, 0.55)";
+      ctx.lineWidth = 1.2;
+      const mid = pad + 8 * cell;
+      ctx.beginPath();
+      ctx.moveTo(mid, pad); ctx.lineTo(mid, pad + dim * cell);
+      ctx.moveTo(pad, mid); ctx.lineTo(pad + dim * cell, mid);
+      ctx.stroke();
+    }
+
+    // Axis labels
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = dim > 16 ? "9px monospace" : "10px monospace";
+    for (let i = 0; i < dim; i++) {
+      const lbl = activeLabels[i] || `${i}`;
+      ctx.textAlign = "right";
+      ctx.fillText(lbl, pad - 5, pad + i * cell + cell * 0.65);
+      ctx.save();
+      ctx.translate(pad + i * cell + cell * 0.55, pad - 5);
+      ctx.rotate(-Math.PI / 3);
+      ctx.textAlign = "left";
+      ctx.fillText(lbl, 0, 0);
+      ctx.restore();
+    }
+  }
+
+  // Render 256x256 G_cc SVD Spectrum
+  const ownMode = document.getElementById("gramOwnerSelect").value;
+  const ownKey = ownMode === "p2" ? "p2" : (ownMode === "neutral" ? "neutral" : "p1");
+  const gOwn = FRAME.gram.owners[ownKey];
+  document.getElementById("effRankBadge").textContent = `Eff Rank: ${gOwn.eff_rank} (N=${gOwn.n_units})`;
+
+  const svdC = document.getElementById("svdCanvas");
+  const { ctx: cs, w: ws, h: hs } = setupHiDPICanvas(svdC);
+  cs.clearRect(0, 0, ws, hs);
+  const svs = gOwn.svd_eigenvalues || [];
+  if (svs.length > 0) {
+    const maxS = Math.max(1e-6, svs[0]);
+    const bw = (ws - 20) / svs.length;
+    svs.forEach((val, k) => {
+      const bh = Math.max(3, ((hs - 22) * val) / maxS);
+      const bx = 10 + k * bw;
+      const by = hs - 16 - bh;
+      cs.fillStyle = ACTIVE_SVD_MODE === k ? "#facc15" : (ownKey === "p1" ? "#38bdf8" : "#fb7185");
+      cs.fillRect(bx + 2, by, bw - 4, bh);
+      cs.fillStyle = "#94a3b8";
+      cs.font = "9px monospace";
+      cs.textAlign = "center";
+      cs.fillText(`σ${k}`, bx + bw * 0.5, hs - 4);
+    });
+  }
+
+  // Populate Unit Attribution Table for active Gram cell / SVD mode
+  const scores = computeUnitGramScores();
+  const ownFilter = ownMode === "p1" ? 1 : (ownMode === "p2" ? 2 : (ownMode === "neutral" ? 0 : null));
+  const ranked = FRAME.units
+    .filter(u => ownFilter === null || u.owner === ownFilter)
+    .map(u => ({ u, score: scores[u.row] || 0.0 }))
+    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+
+  // Populate Feature Correlation Decoder Box
+  const corrEl = document.getElementById("gramCorrBody");
+  if (corrEl) {
+    if (ACTIVE_SVD_MODE !== null) {
+      const posU = ranked.filter(x => x.score > 0.0005).slice(0, 4).map(x => `${x.u.name}:${x.u.order_abil.split("/").pop()}`).join(", ") || "—";
+      const negU = ranked.filter(x => x.score < -0.0005).slice(0, 4).map(x => `${x.u.name}:${x.u.order_abil.split("/").pop()}`).join(", ") || "—";
+      corrEl.innerHTML = `
+        <div><b>256×256 Principal Component σ_${ACTIVE_SVD_MODE}² (Rotation-Invariant Eigenvector v_${ACTIVE_SVD_MODE}):</b></div>
+        <div style="margin-top:2px;"><b style="color:#38bdf8;">(+) Pole Units:</b> ${posU}</div>
+        <div><b style="color:#fb7185;">(−) Pole Units:</b> ${negU}</div>
+      `;
+    } else if (isFullGramMode() && GRAM_256_DATA && GRAM_256_DATA.cell_corrs) {
+      const cc = GRAM_256_DATA.cell_corrs;
+      const fmtCorrs = arr =>
+        (arr || [])
+          .map(([k, r]) => `<span style="color:${r >= 0 ? '#38bdf8' : '#fb7185'}">${k}(${r >= 0 ? '+' : ''}${r.toFixed(2)})</span>`)
+          .join(", ") || "—";
+      corrEl.innerHTML = `
+        <div><b>Row ${cc.row_label}:</b> ${fmtCorrs(cc.row_corrs)}</div>
+        <div><b>Col ${cc.col_label}:</b> ${fmtCorrs(cc.col_corrs)}</div>
+        <div style="margin-top:2px;">
+          <b style="color:#38bdf8;">(+) Pole (Row&gt;0):</b> ${cc.pos_pole}
+          &nbsp;|&nbsp;
+          <b style="color:#fb7185;">(−) Pole (Row&lt;0):</b> ${cc.neg_pole}
+        </div>
+      `;
+    } else if (is8x8FieldMode() && gOwn.mode_vectors) {
+      const rDim = getRDim();
+      const ia = Math.min(rDim - 1, ACTIVE_GRAM_CELL[0]);
+      const ib = Math.min(rDim - 1, ACTIVE_GRAM_CELL[1]);
+      const mv = gOwn.mode_vectors;
+      corrEl.innerHTML = `
+        <div><b>Continuous Field Mode Pair (z${ia}, z${ib})</b> &nbsp;|&nbsp; <b>Mode z${ia} Flux Profile (${ownKey.toUpperCase()}):</b></div>
+        <div style="margin-top:2px;">
+          <b>F_env[z${ia}]:</b> ${(mv.F_env[ia] || 0).toFixed(4)} <span style="color:var(--text-muted)">(∇:${(mv.grad_F_env[ia] || 0).toFixed(2)})</span> &nbsp;•&nbsp;
+          <b>T_field[z${ia}]:</b> ${(mv.T_field[ia] || 0).toFixed(4)} <span style="color:var(--text-muted)">(∇:${(mv.grad_T_field[ia] || 0).toFixed(2)})</span>
+        </div>
+        <div>
+          <b>A_self[z${ia}]:</b> ${(mv.A_self[ia] || 0).toFixed(4)} &nbsp;•&nbsp;
+          <b>A_cross[z${ia}]:</b> ${(mv.A_cross[ia] || 0).toFixed(4)} &nbsp;•&nbsp;
+          <b>z_ply[z${ia}]:</b> ${(mv.z_ply[ia] || 0).toFixed(3)}
+        </div>
+      `;
+    } else {
+      const [a, b] = ACTIVE_GRAM_CELL;
+      corrEl.innerHTML = `Combined Mode: Cell <b>(${labels[a] || a}, ${labels[b] || b})</b> — click any <b>σ0..σ7 bar above</b> or switch to <b>r×r Continuous Field Overlaps</b>.`;
+    }
+  }
+
+  // Aggregate by unit type name
+  const typeTotals = {};
+  ranked.forEach(({ u, score }) => {
+    typeTotals[u.name] = (typeTotals[u.name] || 0) + Math.abs(score);
+  });
+  const topTypes = Object.entries(typeTotals)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([nm, val]) => `${nm} (${(val * 100).toFixed(1)})`)
+    .join(", ");
+  document.getElementById("gramTypeSummary").textContent = topTypes;
+
+  const tbody = document.getElementById("gramUnitTableBody");
+  tbody.innerHTML = "";
+  ranked.slice(0, 30).forEach(({ u, score }) => {
+    const tr = document.createElement("tr");
+    if (u.row === SELECTED_UNIT_ROW) tr.classList.add("selected-row");
+    const ownCol = u.owner === 1 ? "#38bdf8" : (u.owner === 2 ? "#fb7185" : "#fbbf24");
+    const scCol = score >= 0 ? "#38bdf8" : "#fb7185";
+    tr.innerHTML = `
+      <td>${u.name} <span style="color:var(--text-muted)">#${u.row}</span></td>
+      <td style="color:${ownCol}">P${u.owner}</td>
+      <td style="color:${scCol};font-weight:600;">${score >= 0 ? "+" : ""}${(score * 100).toFixed(3)}</td>
+      <td style="color:${u.marginal_adv >= 0 ? '#38bdf8' : '#fb7185'}">${u.marginal_adv >= 0 ? "+" : ""}${u.marginal_adv.toFixed(3)}</td>
+      <td>${Math.round(u.hp)}${u.shield_max > 0 ? "+" + Math.round(u.shield) : ""}</td>
+      <td style="color:var(--text-secondary)">${u.order_abil.split("/").pop()}</td>
+    `;
+    tr.addEventListener("click", async () => {
+      SELECTED_UNIT_ROW = u.row;
+      SELECTED_TOK_IDX = u.tok_idx;
+      document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
+      await fetchTokenDetails(SELECTED_TOK_IDX);
+      renderAll();
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+// ============================================================================
+// PANEL 4: TRANSFORMER LAYER & ATTENTION INSPECTOR
+// ============================================================================
+function renderAttnPanel() {
+  if (!FRAME || !TOKEN_DETAILS) return;
+
+  // 1. Outgoing Spatial Attention Table
+  const tbody = document.getElementById("attnOutTableBody");
+  tbody.innerHTML = "";
+  (TOKEN_DETAILS.outgoing || []).forEach(edge => {
+    const t = FRAME.tokens.find(x => x.tok_idx === edge.tok_idx);
+    if (!t) return;
+    const tr = document.createElement("tr");
+    const ownCol = t.owner === 1 ? "#38bdf8" : (t.owner === 2 ? "#fb7185" : "#cbd5e1");
+    const h = edge.heads || [0, 0, 0, 0];
+    tr.innerHTML = `
+      <td style="color:${ownCol}">${t.label}</td>
+      <td style="font-weight:700">${(edge.weight * 100).toFixed(1)}%</td>
+      <td>${(h[0] * 100).toFixed(0)}%</td>
+      <td>${(h[1] * 100).toFixed(0)}%</td>
+      <td>${(h[2] * 100).toFixed(0)}%</td>
+      <td>${(h[3] * 100).toFixed(0)}%</td>
+    `;
+    tr.addEventListener("click", async () => {
+      SELECTED_TOK_IDX = t.tok_idx;
+      if (t.kind === "unit") SELECTED_UNIT_ROW = t.row;
+      document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
+      await fetchTokenDetails(SELECTED_TOK_IDX);
+      renderAll();
+    });
+    tbody.appendChild(tr);
+  });
+
+  // 2. Causal 1D-RoPE Temporal Attention Heatmap [6 layers x nf frames]
+  const tCanvas = document.getElementById("tempAttnCanvas");
+  const { ctx: ct, w: wt, h: ht } = setupHiDPICanvas(tCanvas);
+  ct.clearRect(0, 0, wt, ht);
+  const tAttn = TOKEN_DETAILS.temporal_attn || [];
+  const wLoops = TOKEN_DETAILS.window_loops || [];
+  if (tAttn.length === 6) {
+    const nf = tAttn[0][0].length;
+    const padL = 42, padT = 6, padB = 18;
+    const cw = (wt - padL - 8) / nf;
+    const ch = (ht - padT - padB) / 6;
+    const headIdx = parseInt(document.getElementById("headSelect").value, 10);
+
+    for (let l = 0; l < 6; l++) {
+      ct.fillStyle = "#94a3b8";
+      ct.font = "10px monospace";
+      ct.fillText(`Blk ${l}`, 4, padT + l * ch + ch * 0.72);
+      for (let f = 0; f < nf; f++) {
+        const val = headIdx === 0
+          ? (tAttn[l][0][f] + tAttn[l][1][f] + tAttn[l][2][f] + tAttn[l][3][f]) * 0.25
+          : tAttn[l][headIdx - 1][f];
+        const a = Math.pow(Math.min(1, val), 0.65);
+        ct.fillStyle = `rgb(${Math.round(20 + 80 * a)}, ${Math.round(30 + 160 * a)}, ${Math.round(60 + 190 * a)})`;
+        ct.fillRect(padL + f * cw, padT + l * ch, cw - 2, ch - 2);
+      }
+    }
+    for (let f = 0; f < nf; f++) {
+      ct.fillStyle = "#94a3b8";
+      ct.font = "9.5px monospace";
+      ct.fillText(`Δ${wLoops[f] || f}`, padL + f * cw + 4, ht - 4);
+    }
+  }
+
+  // 3. Selected Unit Layer Evolution + Additive Input Embeddings
+  const u = FRAME.units.find(x => x.tok_idx === SELECTED_TOK_IDX) || FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
+  const lCanvas = document.getElementById("layerEvolCanvas");
+  const { ctx: cl, w: wl, h: hl } = setupHiDPICanvas(lCanvas);
+  cl.clearRect(0, 0, wl, hl);
+
+  const eCanvas = document.getElementById("embPartsCanvas");
+  const { ctx: ce, w: we, h: he } = setupHiDPICanvas(eCanvas);
+  ce.clearRect(0, 0, we, he);
+
+  if (u) {
+    // Layer Evolution (l = 0..6)
+    const norms = u.layer_norms;
+    const spD = u.spatial_deltas;
+    const tmD = u.temporal_deltas;
+    const cosF = u.layer_cos_final;
+    const maxN = Math.max(1.0, ...norms);
+    const padL = 32, padR = 14, padT = 10, padB = 18;
+    const pw = wl - padL - padR;
+    const ph = hl - padT - padB;
+
+    // Bars for spatial vs temporal delta on Blocks 0..5
+    for (let b = 0; b < 6; b++) {
+      const x = padL + ((b + 1) / 6) * pw;
+      const hSp = (spD[b] / maxN) * ph;
+      const hTm = (tmD[b] / maxN) * ph;
+      cl.fillStyle = "#818cf8";
+      cl.fillRect(x - 10, padT + ph - hSp, 8, hSp);
+      cl.fillStyle = "#f59e0b";
+      cl.fillRect(x + 1, padT + ph - hTm, 8, hTm);
+    }
+
+    // Norm line
+    cl.strokeStyle = "#38bdf8";
+    cl.lineWidth = 2;
+    cl.beginPath();
+    for (let l = 0; l < 7; l++) {
+      const x = padL + (l / 6) * pw;
+      const y = padT + ph * (1 - norms[l] / maxN);
+      if (l === 0) cl.moveTo(x, y); else cl.lineTo(x, y);
+    }
+    cl.stroke();
+
+    // Cosine to final layer line
+    cl.strokeStyle = "#10b981";
+    cl.setLineDash([3, 3]);
+    cl.beginPath();
+    for (let l = 0; l < 7; l++) {
+      const x = padL + (l / 6) * pw;
+      const y = padT + ph * (1 - Math.max(0, cosF[l]));
+      if (l === 0) cl.moveTo(x, y); else cl.lineTo(x, y);
+    }
+    cl.stroke();
+    cl.setLineDash([]);
+
+    const lbls = ["Emb", "B0", "B1", "B2", "B3", "B4", "B5"];
+    lbls.forEach((lb, l) => {
+      cl.fillStyle = "#94a3b8";
+      cl.font = "9.5px monospace";
+      cl.fillText(lb, padL + (l / 6) * pw - 8, hl - 4);
+    });
+
+    // Additive Input Embedding Norms
+    const parts = Object.entries(u.emb_parts);
+    const maxP = Math.max(1e-4, ...parts.map(p => p[1]));
+    const bw = (we - 24) / parts.length;
+    parts.forEach(([k, val], idx) => {
+      const bh = ((he - 28) * val) / maxP;
+      const bx = 12 + idx * bw;
+      const by = he - 18 - bh;
+      ce.fillStyle = k === "field" ? "#10b981" : (k === "unit" ? "#38bdf8" : "#818cf8");
+      ce.fillRect(bx + 4, by, bw - 8, bh);
+      ce.fillStyle = "#e2e8f0";
+      ce.font = "9.5px monospace";
+      ce.textAlign = "center";
+      ce.fillText(val.toFixed(1), bx + bw * 0.5, by - 3);
+      ce.fillStyle = "#94a3b8";
+      ce.fillText(k, bx + bw * 0.5, he - 5);
+    });
+
+    const r2Arr = (FRAME.map && FRAME.map.sae_layer_r2) || [];
+    const r2Badge = document.getElementById("saeR2Badge");
+    if (r2Badge) {
+      if (r2Arr.length > 0) {
+        r2Badge.textContent = `SAE R² L0→L6: ${(r2Arr[0] * 100).toFixed(0)}%→${(r2Arr[r2Arr.length - 1] * 100).toFixed(0)}%`;
+      } else {
+        r2Badge.textContent = "SAE: Not Loaded";
+      }
+    }
+
+    let saeHtml = "";
+    if (u.sae_layers && u.sae_layers.length > 0) {
+      const layerNames = ["L0 Emb", "L1 Blk0", "L2 Blk1", "L3 Blk2", "L4 Blk3", "L5 Blk4", "L6 Final"];
+      const rowsHtml = u.sae_layers.map((lFeats, lIdx) => {
+        const pills = (lFeats || []).slice(0, 3).map(f => {
+          const fCode = `F${String(f.fid).padStart(3, "0")}`;
+          const cLbl = cleanSaeLabel(f.label);
+          if (lIdx === 6) {
+            return `<span onclick="window.selectSaeFeatureOnMap(${f.fid})" title="Click to overlay ${fCode} (${cLbl}) onto the 2D map" style="cursor:pointer;background:rgba(99,102,241,0.22);border:1px solid #818cf8;border-radius:3px;padding:0px 4px;color:#e0e7ff;"><b>${fCode}</b>:${cLbl} (${f.act.toFixed(2)})</span>`;
+          }
+          return `<span style="background:rgba(30,41,59,0.75);border:1px solid #334155;border-radius:3px;padding:0px 4px;color:#cbd5e1;"><b>${fCode}</b>:${cLbl} (${f.act.toFixed(2)})</span>`;
+        }).join(" ");
+        return `<div style="display:flex;gap:5px;align-items:baseline;margin-top:2px;"><span style="width:52px;color:#94a3b8;font-weight:600;flex-shrink:0;">${layerNames[lIdx] || 'L'+lIdx}:</span><div style="display:flex;gap:4px;flex-wrap:wrap;">${pills || "—"}</div></div>`;
+      }).join("");
+      saeHtml = `<div style="margin-top:5px;padding-top:4px;border-top:1px solid rgba(51,65,85,0.6);"><div style="color:#a5b4fc;font-weight:700;margin-bottom:2px;">7-Layer Post-Hoc Top-K Sparse Autoencoder (SAE) Trajectory (Click L6 pill to project on map):</div>${rowsHtml}</div>`;
+    }
+
+    document.getElementById("selectedUnitStats").innerHTML = `
+      <div><b>${u.name} #${u.row}</b> (Owner P${u.owner}, ${u.category}, Value: ${u.value}, Mass m_u: <b>${u.mass ?? "—"}</b>, Flying: ${u.flying})</div>
+      <div>Pos: (${u.x}, ${u.y}) | Vel: (${u.vx}, ${u.vy}) | HP: ${u.hp}/${u.hp_max} | Shd: ${u.shield}/${u.shield_max} | En: ${u.energy}</div>
+      <div>Order: <span style="color:#38bdf8">${u.order_abil}</span> | Prod: <span style="color:#a78bfa">${u.prod_abil}</span> | d(-A₁)/dw_i: <b>${u.marginal_adv >= 0 ? "+" : ""}${u.marginal_adv}‰</b></div>
+      <div>Non-Neg Latent Z (r=${u.z.length}): [${u.z.map(v => v.toFixed(2)).join(", ")}]</div>
+      ${saeHtml}
+    `;
+  }
+}
+
+window.selectSaeFeatureOnMap = function(fid) {
+  ACTIVE_SAE_FID = fid;
+  const sel = document.getElementById("saeMapSelect");
+  if (sel) sel.value = String(fid);
+  const bgSel = document.getElementById("mapBgMode");
+  if (bgSel && bgSel.value === "terrain") bgSel.value = "diff";
+  renderMap();
+};
+
+// ============================================================================
+// PANEL 5: PORT-HAMILTONIAN FLOW & COUNTERFACTUAL SANDBOX
+// ============================================================================
+function renderPhdPanel() {
+  if (!FRAME) return;
+  const pl = document.getElementById("phdPlayerSelect").value;
+  const rows = FRAME.phd[pl] || [];
+
+  // Grouped Bar Chart
+  const canvas = document.getElementById("phdFlowCanvas");
+  const { ctx, w, h } = setupHiDPICanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+
+  const padL = 44, padR = 10, padT = 10, padB = 24;
+  const pw = w - padL - padR;
+  const ph = h - padT - padB;
+  const yZero = padT + ph * 0.5;
+
+  let maxV = 1e-4;
+  rows.forEach(r => {
+    maxV = Math.max(maxV, Math.abs(r.cons), Math.abs(r.diss), Math.abs(r.ctrl), Math.abs(r.true_dx));
+  });
+  maxV *= 1.15;
+
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+  ctx.beginPath();
+  ctx.moveTo(padL, yZero);
+  ctx.lineTo(padL + pw, yZero);
+  ctx.stroke();
+
+  const gw = pw / rows.length;
+  rows.forEach((r, idx) => {
+    const gx = padL + idx * gw;
+    const bars = [
+      [r.cons, "#818cf8"],
+      [r.diss, "#f59e0b"],
+      [r.ctrl, "#10b981"],
+      [r.true_dx, "#f8fafc"]
+    ];
+    const bw = (gw - 8) / 4;
+    bars.forEach(([val, col], bIdx) => {
+      const bh = (val / maxV) * (ph * 0.48);
+      ctx.fillStyle = col;
+      if (bh >= 0) ctx.fillRect(gx + 4 + bIdx * bw, yZero - bh, bw - 1, Math.max(1.5, bh));
+      else ctx.fillRect(gx + 4 + bIdx * bw, yZero, bw - 1, Math.max(1.5, -bh));
+    });
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "9px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(r.label.split(" ")[0], gx + gw * 0.5, h - 6);
+  });
+
+  // Populate PHD Table
+  const tbody = document.getElementById("phdTableBody");
+  tbody.innerHTML = "";
+  rows.forEach(r => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${r.label}</td>
+      <td>${r.val.toFixed(4)}</td>
+      <td style="color:var(--cons)">${r.cons >= 0 ? "+" : ""}${r.cons.toFixed(4)}</td>
+      <td style="color:var(--diss)">${r.diss >= 0 ? "+" : ""}${r.diss.toFixed(4)}</td>
+      <td style="color:var(--ctrl)">${r.ctrl >= 0 ? "+" : ""}${r.ctrl.toFixed(4)}</td>
+      <td style="font-weight:700">${r.pred_dx >= 0 ? "+" : ""}${r.pred_dx.toFixed(4)}</td>
+      <td>${r.true_dx >= 0 ? "+" : ""}${r.true_dx.toFixed(4)}</td>
+      <td style="color:${r.grad_adv >= 0 ? '#38bdf8' : '#fb7185'}">${r.grad_adv >= 0 ? "+" : ""}${r.grad_adv.toFixed(2)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // Counterfactual Delta Summary
+  const cfBox = document.getElementById("cfDeltaBox");
+  if (FRAME.base_scalars) {
+    const b = FRAME.base_scalars;
+    const c = FRAME.scalars;
+    const dH1 = c.H1 - b.H1;
+    const dH2 = c.H2 - b.H2;
+    const dA1 = c.A1 - b.A1;
+    cfBox.innerHTML = `
+      <div><b>Active Edits:</b> Deleted: ${COUNTERFACTUAL.deleted_rows.length} | Moved: ${Object.keys(COUNTERFACTUAL.moved_rows).length} | Scaled HP: ${Object.keys(COUNTERFACTUAL.hp_scale).length}</div>
+      <div><b>Baseline  → Counterfactual (×10⁻³):</b></div>
+      <div>• P1 Energy (-H₁): ${b.H1.toFixed(3)} → <b>${c.H1.toFixed(3)}</b> (<span style="color:${dH1>=0?'#10b981':'#ef4444'}">${dH1>=0?'+':''}${dH1.toFixed(3)}‰</span>)</div>
+      <div>• P2 Energy (-H₂): ${b.H2.toFixed(3)} → <b>${c.H2.toFixed(3)}</b> (<span style="color:${dH2>=0?'#10b981':'#ef4444'}">${dH2>=0?'+':''}${dH2.toFixed(3)}‰</span>)</div>
+      <div>• Advantage (-A₁): ${b.A1.toFixed(3)} → <b>${c.A1.toFixed(3)}</b> (<span style="color:${dA1>=0?'#38bdf8':'#fb7185'};font-weight:700">${dA1>=0?'+':''}${dA1.toFixed(3)}‰</span>)</div>
+    `;
+  } else {
+    cfBox.textContent = "No active counterfactual edits. Use the buttons above or enable 'Drag Unit (What-If)' on the map to test counterfactual positions/removals.";
+  }
+}
+
+// ============================================================================
+// EVENT LISTENERS & INTERACTION
+// ============================================================================
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById(btn.dataset.tab).classList.add("active");
+    renderAll();
+  });
+});
+
+document.getElementById("gameSelect").addEventListener("change", async e => {
+  CURRENT_GID = e.target.value;
+  COUNTERFACTUAL = { deleted_rows: [], moved_rows: {}, hp_scale: {} };
+  await loadGameTimeline(CURRENT_GID);
+  const gInfo = CATALOG.find(x => x.gid === CURRENT_GID);
+  CURRENT_LOOP = gInfo ? Math.floor(gInfo.duration_loops * 0.45) : 2000;
+  await loadFrame(CURRENT_GID, CURRENT_LOOP);
+});
+
+document.getElementById("l1CkptSelect").addEventListener("change", async e => {
+  await fetch("/api/checkpoint", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ l1_ckpt: e.target.value })
+  });
+  await loadFrame(CURRENT_GID, CURRENT_LOOP);
+});
+
+document.getElementById("l2ModeSelect").addEventListener("change", async () => {
+  await loadGameTimeline(CURRENT_GID);
+});
+
+document.getElementById("loopInput").addEventListener("change", e => {
+  loadFrame(CURRENT_GID, parseInt(e.target.value, 10));
+});
+document.getElementById("winLenSelect").addEventListener("change", () => {
+  loadFrame(CURRENT_GID, CURRENT_LOOP);
+});
+
+document.getElementById("btnStepBack5s").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP - 112));
+document.getElementById("btnStepBack1").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP - 1));
+document.getElementById("btnStepFwd1").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP + 1));
+document.getElementById("btnStepFwd5s").addEventListener("click", () => loadFrame(CURRENT_GID, CURRENT_LOOP + 112));
+
+document.getElementById("btnPlayPause").addEventListener("click", e => {
+  if (playTimer) {
+    clearInterval(playTimer);
+    playTimer = null;
+    e.target.textContent = "▶ Play";
+    e.target.classList.remove("active");
+  } else {
+    e.target.textContent = "⏸ Pause";
+    e.target.classList.add("active");
+    playTimer = setInterval(() => {
+      loadFrame(CURRENT_GID, CURRENT_LOOP + 28);
+    }, 350);
+  }
+});
+
+["mapBgMode", "fieldCombineMode", "unitColorMode", "chkFieldContours", "chkAttnRays", "chkForceAdv", "chkForceKin", "chkS2MA", "chkAnchors"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", () => renderMap());
+});
+
+const alphaSliderEl = document.getElementById("fieldAlphaSlider");
+if (alphaSliderEl) {
+  alphaSliderEl.addEventListener("input", () => renderMap());
+}
+
+const saeMapSelEl = document.getElementById("saeMapSelect");
+if (saeMapSelEl) {
+  saeMapSelEl.addEventListener("change", e => {
+    ACTIVE_SAE_FID = parseInt(e.target.value, 10);
+    if (ACTIVE_SAE_FID >= 0) {
+      const bgSel = document.getElementById("mapBgMode");
+      if (bgSel && bgSel.value === "terrain") bgSel.value = "diff";
+    }
+    renderMap();
+  });
+}
+
+document.querySelectorAll(".dim-pill[data-dim]").forEach(btn => {
+  btn.addEventListener("click", e => {
+    const rDim = getRDim();
+    const dAttr = btn.getAttribute("data-dim");
+    const isMulti = e.shiftKey || e.ctrlKey || e.metaKey || (document.getElementById("chkMultiDim") && document.getElementById("chkMultiDim").checked);
+
+    // Turn off SAE overlay when clicking a z_k layer pill
+    ACTIVE_SAE_FID = -1;
+    const saeSel = document.getElementById("saeMapSelect");
+    if (saeSel) saeSel.value = "-1";
+
+    if (dAttr === "all") {
+      ACTIVE_FIELD_DIMS = new Set(Array.from({ length: rDim }, (_, i) => i));
+    } else {
+      const k = parseInt(dAttr, 10);
+      if (isMulti) {
+        if (ACTIVE_FIELD_DIMS.size >= rDim) {
+          // Switching from All rD into multi-select starts with the clicked layer
+          ACTIVE_FIELD_DIMS = new Set([k]);
+        } else if (ACTIVE_FIELD_DIMS.has(k)) {
+          if (ACTIVE_FIELD_DIMS.size > 1) ACTIVE_FIELD_DIMS.delete(k);
+        } else {
+          ACTIVE_FIELD_DIMS.add(k);
+        }
+      } else {
+        ACTIVE_FIELD_DIMS = new Set([k]);
+      }
+      // Sync Tab 3 active cell to (z_k, z_k) so the right-hand panel also reflects this layer
+      ACTIVE_GRAM_CELL = [k, k];
+      ACTIVE_SVD_MODE = null;
+      ACTIVE_L2_BASIS = -1;
+    }
+
+    // If overlay was turned off ("terrain"), turn it on to P1-P2 Field when a layer pill is clicked
+    const bgSel = document.getElementById("mapBgMode");
+    if (bgSel && bgSel.value === "terrain") {
+      bgSel.value = "diff";
+    }
+
+    renderMap();
+    renderGramPanel();
+  });
+});
+
+document.getElementById("btnResetView").addEventListener("click", () => {
+  mapZoom = 1.0; mapPanX = 0.0; mapPanY = 0.0;
+  renderMap();
+});
+
+// Map Canvas Click / Drag / Zoom
+const mapCanvas = document.getElementById("mapCanvas");
+mapCanvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.15 : 0.87;
+  mapZoom = Math.max(0.7, Math.min(6.0, mapZoom * factor));
+  renderMap();
+});
+
+mapCanvas.addEventListener("mousedown", async e => {
+  if (!FRAME) return;
+  const rect = mapCanvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  dragStartMouse = [mx, my];
+
+  // Find closest unit or field anchor within 14px
+  let bestDist = 14.0;
+  let clickedUnit = null;
+  let clickedTok = null;
+
+  FRAME.units.forEach(u => {
+    const [sx, sy] = worldToCanvas(u.x, u.y, rect.width, rect.height);
+    const d = Math.hypot(mx - sx, my - sy);
+    if (d < bestDist) {
+      bestDist = d;
+      clickedUnit = u;
+      clickedTok = u.tok_idx;
+    }
+  });
+
+  if (!clickedUnit && document.getElementById("chkAnchors").checked) {
+    FRAME.tokens.filter(t => t.kind === "field").forEach(ft => {
+      const [sx, sy] = worldToCanvas(ft.x, ft.y, rect.width, rect.height);
+      const d = Math.hypot(mx - sx, my - sy);
+      if (d < bestDist) {
+        bestDist = d;
+        clickedTok = ft.tok_idx;
+      }
+    });
+  }
+
+  if (clickedUnit) {
+    SELECTED_UNIT_ROW = clickedUnit.row;
+    SELECTED_TOK_IDX = clickedUnit.tok_idx;
+    document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
+    if (document.getElementById("chkDragMove").checked) {
+      isDraggingUnit = true;
+    }
+    await fetchTokenDetails(SELECTED_TOK_IDX);
+    renderAll();
+  } else if (clickedTok !== null) {
+    SELECTED_TOK_IDX = clickedTok;
+    document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
+    await fetchTokenDetails(SELECTED_TOK_IDX);
+    renderAll();
+  } else {
+    isDraggingMap = true;
+  }
+});
+
+mapCanvas.addEventListener("mousemove", e => {
+  if (!FRAME) return;
+  const rect = mapCanvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const [wx, wy] = canvasToWorld(mx, my, rect.width, rect.height);
+
+  if (isDraggingUnit && SELECTED_UNIT_ROW !== null) {
+    const u = FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
+    if (u) {
+      u.x = Math.round(wx * 10) / 10;
+      u.y = Math.round(wy * 10) / 10;
+      renderMap();
+    }
+    return;
+  }
+  if (isDraggingMap) {
+    mapPanX += mx - dragStartMouse[0];
+    mapPanY += my - dragStartMouse[1];
+    dragStartMouse = [mx, my];
+    renderMap();
+    return;
+  }
+
+  // Hover tooltip
+  let nearest = null, bestD = 14.0;
+  FRAME.units.forEach(u => {
+    const [sx, sy] = worldToCanvas(u.x, u.y, rect.width, rect.height);
+    const d = Math.hypot(mx - sx, my - sy);
+    if (d < bestD) { bestD = d; nearest = u; }
+  });
+  const infoEl = document.getElementById("mapCursorInfo");
+  const fVal = sampleFieldAtWorld(wx, wy);
+  const fStr = fVal !== null && LAST_FIELD_EVAL
+    ? ` | ${LAST_FIELD_EVAL.label}=${fVal >= 0 ? "+" : ""}${fVal.toFixed(3)}`
+    : "";
+  if (nearest) {
+    const dims = getSortedActiveDims();
+    let zStr = "";
+    if (nearest.z) {
+      if (dims.length === 1) {
+        const zv = nearest.z[dims[0]] || 0;
+        zStr = ` | z${dims[0]}=${zv >= 0 ? "+" : ""}${zv.toFixed(3)}`;
+      } else {
+        zStr = ` | ||z||=${(nearest.mass || 0).toFixed(2)}`;
+      }
+    }
+    infoEl.textContent = `(${wx.toFixed(1)}, ${wy.toFixed(1)}) • P${nearest.owner} ${nearest.name} #${nearest.row} | d(-A₁)=${nearest.marginal_adv >= 0 ? "+" : ""}${nearest.marginal_adv.toFixed(3)}‰${zStr}${fStr}`;
+  } else {
+    infoEl.textContent = `Map (${wx.toFixed(1)}, ${wy.toFixed(1)})${fStr}`;
+  }
+});
+
+window.addEventListener("mouseup", async e => {
+  if (isDraggingUnit && SELECTED_UNIT_ROW !== null && FRAME) {
+    isDraggingUnit = false;
+    const u = FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
+    if (u) {
+      COUNTERFACTUAL.moved_rows[u.row] = [u.x, u.y];
+      await loadFrame(CURRENT_GID, CURRENT_LOOP);
+    }
+  }
+  isDraggingMap = false;
+});
+
+// Timeline Click-to-Seek
+["timelineAdvCanvas", "timelineHpCanvas"].forEach(cid => {
+  document.getElementById(cid).addEventListener("click", e => {
+    if (!TIMELINE) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const padL = 42, padR = 12;
+    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left - padL) / (rect.width - padL - padR)));
+    const idx = Math.min(TIMELINE.loops.length - 1, Math.max(0, Math.round(frac * (TIMELINE.loops.length - 1))));
+    loadFrame(CURRENT_GID, TIMELINE.loops[idx]);
+  });
+});
+
+// Gram Matrix Click, Hover, Wheel Zoom & Drag Pan
+const gramCanvas = document.getElementById("gramCanvas");
+
+function gramScreenToUV(e) {
+  const rect = gramCanvas.getBoundingClientRect();
+  const pad = 36;
+  const plotW = rect.width - pad - 8;
+  const plotH = rect.height - pad - 8;
+  const rx = (e.clientX - rect.left - pad) / plotW;
+  const ry = (e.clientY - rect.top - pad) / plotH;
+  const u = isFullGramMode() ? gramPanU + rx / gramZoom : rx;
+  const v = isFullGramMode() ? gramPanV + ry / gramZoom : ry;
+  return { u, v, rx, ry, plotW, plotH };
+}
+
+gramCanvas.addEventListener("wheel", e => {
+  if (!isFullGramMode()) return;
+  e.preventDefault();
+  const { u, v, rx, ry } = gramScreenToUV(e);
+  if (rx < 0 || rx > 1 || ry < 0 || ry > 1) return;
+  const factor = e.deltaY < 0 ? 1.25 : 0.8;
+  const newZoom = Math.max(1.0, Math.min(16.0, gramZoom * factor));
+  // Keep cursor point (u, v) stationary on screen (rx, ry)
+  gramPanU = u - rx / newZoom;
+  gramPanV = v - ry / newZoom;
+  gramZoom = newZoom;
+  clampGramPan();
+  document.getElementById("btnGramResetZoom").textContent = `${gramZoom.toFixed(1)}× Zoom`;
+  renderGramPanel();
+}, { passive: false });
+
+gramCanvas.addEventListener("mousedown", e => {
+  if (!isFullGramMode() || gramZoom <= 1.01) return;
+  isDraggingGram = true;
+  gramDragMoved = false;
+  gramDragStart = [e.clientX, e.clientY];
+});
+
+window.addEventListener("mouseup", () => {
+  isDraggingGram = false;
+});
+
+gramCanvas.addEventListener("mouseleave", () => {
+  gramHoverCell = null;
+  if (isFullGramMode()) renderGramPanel();
+});
+
+document.getElementById("btnGramResetZoom").addEventListener("click", () => {
+  gramZoom = 1.0;
+  gramPanU = 0.0;
+  gramPanV = 0.0;
+  document.getElementById("btnGramResetZoom").textContent = "1× Zoom";
+  renderGramPanel();
+});
+
+document.getElementById("btnGramExpand").addEventListener("click", e => {
+  const layout = document.getElementById("gramLayout");
+  const expanded = layout.classList.toggle("expanded");
+  e.currentTarget.textContent = expanded ? "❐ Split View" : "⛶ Expand";
+  renderGramPanel();
+});
+
+gramCanvas.addEventListener("click", async e => {
+  if (!FRAME || gramDragMoved) return;
+  const { u, v, rx, ry } = gramScreenToUV(e);
+  if (rx < 0 || rx > 1 || ry < 0 || ry > 1) return;
+
+  if (isFullGramMode() && GRAM_256_DATA && GRAM_256_DATA.shape) {
+    const [rows, cols] = GRAM_256_DATA.shape;
+    const j = Math.floor(u * cols);
+    const i = Math.floor(v * rows);
+    if (i >= 0 && i < rows && j >= 0 && j < cols) {
+      ACTIVE_GRAM256_CELL = [i, j];
+      ACTIVE_SVD_MODE = null;
+      ACTIVE_L2_BASIS = -1;
+      document.getElementById("l2BasisSelect").value = "-1";
+      document.getElementById("unitColorMode").value = "gram_mode";
+      await fetchGram256();
+      const mt = GRAM_256_DATA.mat_type;
+      if (mt === "K_uu" && GRAM_256_DATA.unit_labels) {
+        const uRow = GRAM_256_DATA.unit_rows[i];
+        if (uRow !== undefined) {
+          SELECTED_UNIT_ROW = uRow;
+          const uObj = FRAME.units.find(x => x.row === uRow);
+          if (uObj) {
+            SELECTED_TOK_IDX = uObj.tok_idx;
+            document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
+            await fetchTokenDetails(SELECTED_TOK_IDX);
+          }
+        }
+        document.getElementById("gramCellBadge").textContent =
+          `K_uu: ${GRAM_256_DATA.unit_labels[i]} × ${GRAM_256_DATA.unit_labels[j]} = ${GRAM_256_DATA.matrix[i][j].toFixed(3)}`;
+      } else if (mt === "G_qc_8x256") {
+        const qLbl = FRAME.gram.labels_16[i];
+        document.getElementById("gramCellBadge").textContent =
+          `G_qc: (${qLbl}, c_${j}) = ${GRAM_256_DATA.matrix[i][j].toFixed(4)}`;
+      } else {
+        const [ri, rj] = GRAM_256_DATA.real_cell || [i, j];
+        document.getElementById("gramCellBadge").textContent =
+          `${mt}: (c_${ri}, c_${rj}) = ${GRAM_256_DATA.matrix[i][j].toFixed(4)}`;
+      }
+      renderAll();
+    }
+    return;
+  }
+
+  const mat = getActiveGramMatrix();
+  const dim = mat.length;
+  const j = Math.floor(u * dim);
+  const i = Math.floor(v * dim);
+  if (i >= 0 && i < dim && j >= 0 && j < dim) {
+    ACTIVE_GRAM_CELL = [i, j];
+    ACTIVE_SVD_MODE = null;
+    ACTIVE_L2_BASIS = -1;
+    document.getElementById("l2BasisSelect").value = "-1";
+    document.getElementById("unitColorMode").value = "gram_mode";
+    const lbls = is8x8FieldMode() ? (FRAME.gram.labels_8 || []) : FRAME.gram.labels_16;
+    document.getElementById("gramCellBadge").textContent = `Active Field Cell: (${lbls[i] || i}, ${lbls[j] || j})`;
+    renderAll();
+  }
+});
+
+gramCanvas.addEventListener("mousemove", e => {
+  if (!FRAME) return;
+  if (isDraggingGram) {
+    const dx = e.clientX - gramDragStart[0];
+    const dy = e.clientY - gramDragStart[1];
+    if (Math.hypot(dx, dy) > 3) gramDragMoved = true;
+    const rect = gramCanvas.getBoundingClientRect();
+    const plotW = rect.width - 44;
+    const plotH = rect.height - 44;
+    gramPanU -= dx / (plotW * gramZoom);
+    gramPanV -= dy / (plotH * gramZoom);
+    gramDragStart = [e.clientX, e.clientY];
+    clampGramPan();
+    renderGramPanel();
+    return;
+  }
+
+  const { u, v, rx, ry } = gramScreenToUV(e);
+  const hoverEl = document.getElementById("gramHoverText");
+  if (rx < 0 || rx > 1 || ry < 0 || ry > 1) {
+    gramHoverCell = null;
+    return;
+  }
+
+  if (isFullGramMode() && GRAM_256_DATA && GRAM_256_DATA.shape) {
+    const [rows, cols] = GRAM_256_DATA.shape;
+    const j = Math.floor(u * cols);
+    const i = Math.floor(v * rows);
+    if (i >= 0 && i < rows && j >= 0 && j < cols) {
+      gramHoverCell = [i, j];
+      const val = GRAM_256_DATA.matrix[i][j];
+      const mt = GRAM_256_DATA.mat_type;
+      if (mt === "K_uu" && GRAM_256_DATA.unit_labels) {
+        hoverEl.textContent = `[${i},${j}] ${GRAM_256_DATA.unit_labels[i]} · ${GRAM_256_DATA.unit_labels[j]} = ${val.toFixed(3)} (Scroll to zoom)`;
+      } else if (mt === "G_qc_8x256") {
+        hoverEl.textContent = `G_qc[${FRAME.gram.labels_16[i]}, c_${j}] = ${val.toFixed(4)} (Scroll to zoom)`;
+      } else {
+        const chOrd = GRAM_256_DATA.channel_order || [];
+        const ri = chOrd[i] !== undefined ? chOrd[i] : i;
+        const rj = chOrd[j] !== undefined ? chOrd[j] : j;
+        hoverEl.textContent = `${mt}[c_${ri}, c_${rj}] = ${val.toFixed(4)} • Scroll wheel to zoom (${gramZoom.toFixed(1)}×) • Click to decode`;
+      }
+      renderGramPanel();
+    }
+    return;
+  }
+
+  const mat = getActiveGramMatrix();
+  const dim = mat.length;
+  const j = Math.floor(u * dim);
+  const i = Math.floor(v * dim);
+  if (i >= 0 && i < dim && j >= 0 && j < dim) {
+    const lbls = is8x8FieldMode() ? (FRAME.gram.labels_8 || []) : FRAME.gram.labels_16;
+    hoverEl.textContent = `[${lbls[i] || i}, ${lbls[j] || j}] = ${mat[i][j].toFixed(4)}`;
+  }
+});
+
+// SVD Spectrum Click
+document.getElementById("svdCanvas").addEventListener("click", e => {
+  if (!FRAME) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const k = Math.floor(((e.clientX - rect.left - 10) / (rect.width - 20)) * 16);
+  if (k >= 0 && k < 8) {
+    ACTIVE_SVD_MODE = k;
+    ACTIVE_L2_BASIS = -1;
+    document.getElementById("l2BasisSelect").value = "-1";
+    document.getElementById("unitColorMode").value = "gram_mode";
+    document.getElementById("gramCellBadge").textContent = `Active 256×256 G_cc Eigenmode: σ_${k}²`;
+    renderAll();
+  }
+});
+
+document.getElementById("l2BasisSelect").addEventListener("change", e => {
+  ACTIVE_L2_BASIS = parseInt(e.target.value, 10);
+  if (ACTIVE_L2_BASIS >= 0) {
+    ACTIVE_SVD_MODE = null;
+    document.getElementById("unitColorMode").value = "gram_mode";
+    document.getElementById("gramCellBadge").textContent = `Active Layer 2 Learned Basis: W_c[:, ${ACTIVE_L2_BASIS}]`;
+  }
+  renderAll();
+});
+
+["gramOwnerSelect", "gramMatType"].forEach(id => {
+  document.getElementById(id).addEventListener("change", async () => {
+    if (isFullGramMode()) {
+      await fetchGram256();
+    }
+    renderAll();
+  });
+});
+
+// Transformer Layer & Token Selectors
+["tokenSelect", "layerSelect", "headSelect"].forEach(id => {
+  document.getElementById(id).addEventListener("change", async e => {
+    if (id === "tokenSelect") {
+      SELECTED_TOK_IDX = parseInt(e.target.value, 10);
+      const t = FRAME.tokens.find(x => x.tok_idx === SELECTED_TOK_IDX);
+      if (t && t.kind === "unit") SELECTED_UNIT_ROW = t.row;
+    }
+    await fetchTokenDetails(SELECTED_TOK_IDX);
+    renderAll();
+  });
+});
+
+document.getElementById("btnTokCLS").addEventListener("click", async () => {
+  SELECTED_TOK_IDX = 0; document.getElementById("tokenSelect").value = 0;
+  await fetchTokenDetails(0); renderAll();
+});
+document.getElementById("btnTokP1").addEventListener("click", async () => {
+  SELECTED_TOK_IDX = 1; document.getElementById("tokenSelect").value = 1;
+  await fetchTokenDetails(1); renderAll();
+});
+document.getElementById("btnTokP2").addEventListener("click", async () => {
+  SELECTED_TOK_IDX = 2; document.getElementById("tokenSelect").value = 2;
+  await fetchTokenDetails(2); renderAll();
+});
+
+document.getElementById("phdPlayerSelect").addEventListener("change", () => renderPhdPanel());
+
+// Counterfactual Buttons
+document.getElementById("btnClearCF").addEventListener("click", () => {
+  COUNTERFACTUAL = { deleted_rows: [], moved_rows: {}, hp_scale: {} };
+  loadFrame(CURRENT_GID, CURRENT_LOOP);
+});
+document.getElementById("btnCFDeleteSel").addEventListener("click", () => {
+  if (SELECTED_UNIT_ROW !== null) {
+    COUNTERFACTUAL.deleted_rows.push(SELECTED_UNIT_ROW);
+    loadFrame(CURRENT_GID, CURRENT_LOOP);
+  }
+});
+document.getElementById("btnCFHalfHP").addEventListener("click", () => {
+  if (SELECTED_UNIT_ROW !== null) {
+    COUNTERFACTUAL.hp_scale[SELECTED_UNIT_ROW] = 0.5;
+    loadFrame(CURRENT_GID, CURRENT_LOOP);
+  }
+});
+document.getElementById("btnCFDelP1Army").addEventListener("click", () => {
+  if (!FRAME) return;
+  FRAME.units
+    .filter(u => u.owner === 1 && !u.structure && !u.worker)
+    .sort((a, b) => Math.abs(b.marginal_adv) - Math.abs(a.marginal_adv))
+    .slice(0, 5)
+    .forEach(u => COUNTERFACTUAL.deleted_rows.push(u.row));
+  loadFrame(CURRENT_GID, CURRENT_LOOP);
+});
+document.getElementById("btnCFDelP2Army").addEventListener("click", () => {
+  if (!FRAME) return;
+  FRAME.units
+    .filter(u => u.owner === 2 && !u.structure && !u.worker)
+    .sort((a, b) => Math.abs(b.marginal_adv) - Math.abs(a.marginal_adv))
+    .slice(0, 5)
+    .forEach(u => COUNTERFACTUAL.deleted_rows.push(u.row));
+  loadFrame(CURRENT_GID, CURRENT_LOOP);
+});
+
+window.addEventListener("resize", () => renderAll());
+initApp();
+</script>
+</body>
+</html>
