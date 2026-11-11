@@ -31,18 +31,22 @@ from __future__ import annotations
 import glob
 import html
 import json
+import logging
 import math
 import os
 import re
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from typing import Any
 
 import mpyq
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 from . import energy as E
 from . import energy_data as ED
@@ -251,6 +255,28 @@ class WorldModelInspector:
                 "worker": bool(u.get("worker", False)),
                 "category": cat,
             }
+
+        # Unit costs indexed by lowercase unit name
+        self._unit_costs: dict[str, tuple[int, int]] = {
+            u["name"].lower(): (int(u.get("minerals", 0)), int(u.get("vespene", 0)))
+            for u in self.unit_meta.values()
+            if "name" in u
+        }
+
+        # Replay file path index for rapid tracker event extraction
+        self._replay_path_map: dict[str, str] = {
+            os.path.splitext(os.path.basename(p))[0]: p
+            for p in glob.glob("data/replays/**/*.SC2Replay", recursive=True)
+        }
+
+        # Temporary / auxiliary units to exclude from casualties
+        self.EXCLUDE_FROM_DEAD: set[str] = {
+            "larva", "egg", "adeptphaseshift", "kd8charge", "interceptorsucceed",
+            "interceptor", "pointdefensedrone", "autoturret", "broodling",
+            "broodlingescort", "locustmp", "locustmpflying", "disruptorphased",
+            "parasiticbombdummy", "mule", "creeptumor", "creeptumorburrowed",
+            "creeptumorqueen",
+        }
 
         # Ability name lookup (indexed by vocab ability index and raw ability id)
         rs_doc = json.load(open(rulesets_path))
@@ -2124,38 +2150,94 @@ class WorldModelInspector:
         try:
             g = self._get_game(gid)
             cst_path = g.base + ".p1.cst"
-            if not os.path.exists(cst_path):
-                self._cst_cache[gid] = None
-                return None
-            with statefile.load(cst_path) as d:
-                stats = {
-                    "p_loop": d["p_loop"].copy() if "p_loop" in d.files else None,
-                    "p_player": d["p_player"].copy() if "p_player" in d.files else None,
-                    "p_mineral_rate": d["p_mineral_rate"].copy() if "p_mineral_rate" in d.files else None,
-                    "p_vespene_rate": d["p_vespene_rate"].copy() if "p_vespene_rate" in d.files else None,
-                    "p_minerals_lost_army": d["p_minerals_lost_army"].copy() if "p_minerals_lost_army" in d.files else None,
-                    "p_minerals_lost_economy": d["p_minerals_lost_economy"].copy() if "p_minerals_lost_economy" in d.files else None,
-                    "p_minerals_lost_technology": d["p_minerals_lost_technology"].copy() if "p_minerals_lost_technology" in d.files else None,
-                    "p_vespene_lost_army": d["p_vespene_lost_army"].copy() if "p_vespene_lost_army" in d.files else None,
-                    "p_vespene_lost_economy": d["p_vespene_lost_economy"].copy() if "p_vespene_lost_economy" in d.files else None,
-                    "p_vespene_lost_technology": d["p_vespene_lost_technology"].copy() if "p_vespene_lost_technology" in d.files else None,
-                    "dead_frame_start": d["dead_frame_start"].copy() if "dead_frame_start" in d.files else None,
-                    "dead_id": d["dead_id"].copy() if "dead_id" in d.files else None,
-                    "up_loop": d["up_loop"].copy() if "up_loop" in d.files else None,
-                    "up_player": d["up_player"].copy() if "up_player" in d.files else None,
-                    "up_name": d["up_name"].copy() if "up_name" in d.files else None,
-                }
-            unit_map = {}
-            arrow_path = g.base + ".p1.units.arrow"
-            if os.path.exists(arrow_path):
-                import pyarrow.feather as feather
-                table = feather.read_table(arrow_path, columns=["u_id", "u_type", "u_owner"])
-                u_ids = table.column("u_id").to_numpy(zero_copy_only=False)
-                u_types = table.column("u_type").to_numpy(zero_copy_only=False)
-                u_owners = table.column("u_owner").to_numpy(zero_copy_only=False)
-                _, idx = np.unique(u_ids, return_index=True)
-                unit_map = {int(u_ids[i]): (int(u_types[i]), int(u_owners[i])) for i in idx}
-            stats["unit_map"] = unit_map
+            stats = {}
+            if os.path.exists(cst_path):
+                with statefile.load(cst_path) as d:
+                    stats = {
+                        "p_loop": d["p_loop"].copy() if "p_loop" in d.files else None,
+                        "p_player": d["p_player"].copy() if "p_player" in d.files else None,
+                        "p_mineral_rate": d["p_mineral_rate"].copy() if "p_mineral_rate" in d.files else None,
+                        "p_vespene_rate": d["p_vespene_rate"].copy() if "p_vespene_rate" in d.files else None,
+                        "p_minerals_lost_army": d["p_minerals_lost_army"].copy() if "p_minerals_lost_army" in d.files else None,
+                        "p_minerals_lost_economy": d["p_minerals_lost_economy"].copy() if "p_minerals_lost_economy" in d.files else None,
+                        "p_minerals_lost_technology": d["p_minerals_lost_technology"].copy() if "p_minerals_lost_technology" in d.files else None,
+                        "p_vespene_lost_army": d["p_vespene_lost_army"].copy() if "p_vespene_lost_army" in d.files else None,
+                        "p_vespene_lost_economy": d["p_vespene_lost_economy"].copy() if "p_vespene_lost_economy" in d.files else None,
+                        "p_vespene_lost_technology": d["p_vespene_lost_technology"].copy() if "p_vespene_lost_technology" in d.files else None,
+                        "dead_frame_start": d["dead_frame_start"].copy() if "dead_frame_start" in d.files else None,
+                        "dead_id": d["dead_id"].copy() if "dead_id" in d.files else None,
+                        "up_loop": d["up_loop"].copy() if "up_loop" in d.files else None,
+                        "up_player": d["up_player"].copy() if "up_player" in d.files else None,
+                        "up_name": d["up_name"].copy() if "up_name" in d.files else None,
+                    }
+                unit_map = {}
+                arrow_path = g.base + ".p1.units.arrow"
+                if os.path.exists(arrow_path):
+                    import pyarrow.feather as feather
+                    table = feather.read_table(arrow_path, columns=["u_id", "u_type", "u_owner"])
+                    u_ids = table.column("u_id").to_numpy(zero_copy_only=False)
+                    u_types = table.column("u_type").to_numpy(zero_copy_only=False)
+                    u_owners = table.column("u_owner").to_numpy(zero_copy_only=False)
+                    _, idx = np.unique(u_ids, return_index=True)
+                    unit_map = {int(u_ids[i]): (int(u_types[i]), int(u_owners[i])) for i in idx}
+                stats["unit_map"] = unit_map
+
+            # Parse genuine combat casualties from replay tracker events if replay is available
+            kills = None
+            replay_path = self._replay_path_map.get(gid)
+            if replay_path and os.path.exists(replay_path):
+                try:
+                    import s2protocol.versions
+                    archive = mpyq.MPQArchive(replay_path)
+                    header_content = archive.header["user_data_header"]["content"]
+                    header = s2protocol.versions.latest().decode_replay_header(header_content)
+                    base_build = header["m_version"]["m_baseBuild"]
+                    protocol = s2protocol.versions.build(base_build)
+                    contents = archive.read_file("replay.tracker.events")
+                    events = list(protocol.decode_replay_tracker_events(contents))
+
+                    unit_dict = {}
+                    kills_list = []
+                    for e in events:
+                        ev = e["_event"]
+                        idx = e.get("m_unitTagIndex")
+                        rec = e.get("m_unitTagRecycle")
+                        key = (idx, rec)
+                        if ev in ("NNet.Replay.Tracker.SUnitBornEvent", "NNet.Replay.Tracker.SUnitInitEvent"):
+                            unit_dict[key] = {
+                                "type": e["m_unitTypeName"].decode("utf-8", errors="ignore"),
+                                "owner": e["m_controlPlayerId"],
+                            }
+                        elif ev == "NNet.Replay.Tracker.SUnitTypeChangeEvent":
+                            if key in unit_dict:
+                                unit_dict[key]["type"] = e["m_unitTypeName"].decode("utf-8", errors="ignore")
+                        elif ev == "NNet.Replay.Tracker.SUnitDiedEvent":
+                            u_info = unit_dict.get(key)
+                            if not u_info:
+                                continue
+                            u_own = u_info["owner"]
+                            u_type = u_info["type"]
+                            if u_own not in (1, 2):
+                                continue
+                            if u_type.lower() in self.EXCLUDE_FROM_DEAD:
+                                continue
+                            k_pid = e.get("m_killerPlayerId")
+                            k_idx = e.get("m_killerUnitTagIndex")
+                            k_rec = e.get("m_killerUnitTagRecycle")
+                            # Exclude morphs (k_pid is None) and self-cancellations (k_idx == idx and k_rec == rec)
+                            if k_pid is None:
+                                continue
+                            if k_idx == idx and k_rec == rec:
+                                continue
+                            loop_k = e["_gameloop"]
+                            costs = self._unit_costs.get(u_type.lower(), (0, 0))
+                            kills_list.append((loop_k, u_own, u_type, costs[0], costs[1]))
+                    kills_list.sort(key=lambda x: x[0])
+                    kills = kills_list
+                except Exception as ex:
+                    logger.warning("Failed to decode tracker events for %s: %s", gid, ex)
+
+            stats["kills"] = kills
             self._cst_cache[gid] = stats
             return stats
         except Exception:
@@ -2261,18 +2343,13 @@ class WorldModelInspector:
         vesp_rate = [0, 0]
         min_lost = [0, 0]
         vesp_lost = [0, 0]
+        dead_groups = {1: defaultdict(int), 2: defaultdict(int)}
         p1_ups, p2_ups = [], []
         if cst_stats is not None:
             p_l = cst_stats.get("p_loop")
             p_p = cst_stats.get("p_player")
             mr = cst_stats.get("p_mineral_rate")
             vr = cst_stats.get("p_vespene_rate")
-            mla = cst_stats.get("p_minerals_lost_army")
-            mle = cst_stats.get("p_minerals_lost_economy")
-            mlt = cst_stats.get("p_minerals_lost_technology")
-            vla = cst_stats.get("p_vespene_lost_army")
-            vle = cst_stats.get("p_vespene_lost_economy")
-            vlt = cst_stats.get("p_vespene_lost_technology")
             if p_l is not None and p_p is not None:
                 m1 = (p_l <= loop_t) & (p_p == 1)
                 m2 = (p_l <= loop_t) & (p_p == 2)
@@ -2282,20 +2359,60 @@ class WorldModelInspector:
                         min_rate[0] = int(mr[idx1])
                     if vr is not None:
                         vesp_rate[0] = int(vr[idx1])
-                    if mla is not None and mle is not None and mlt is not None:
-                        min_lost[0] = max(0, int(mla[idx1] + mle[idx1] + mlt[idx1]))
-                    if vla is not None and vle is not None and vlt is not None:
-                        vesp_lost[0] = max(0, int(vla[idx1] + vle[idx1] + vlt[idx1]))
                 if m2.any():
                     idx2 = np.where(m2)[0][-1]
                     if mr is not None:
                         min_rate[1] = int(mr[idx2])
                     if vr is not None:
                         vesp_rate[1] = int(vr[idx2])
-                    if mla is not None and mle is not None and mlt is not None:
-                        min_lost[1] = max(0, int(mla[idx2] + mle[idx2] + mlt[idx2]))
-                    if vla is not None and vle is not None and vlt is not None:
-                        vesp_lost[1] = max(0, int(vla[idx2] + vle[idx2] + vlt[idx2]))
+
+            kills = cst_stats.get("kills")
+            if kills is not None:
+                for loop_k, own, nm, mc, vc in kills:
+                    if loop_k <= loop_t:
+                        dead_groups[own][nm] += 1
+                        min_lost[own - 1] += mc
+                        vesp_lost[own - 1] += vc
+            else:
+                # Fallback to CST stats if tracker events unavailable
+                mla = cst_stats.get("p_minerals_lost_army")
+                mle = cst_stats.get("p_minerals_lost_economy")
+                mlt = cst_stats.get("p_minerals_lost_technology")
+                vla = cst_stats.get("p_vespene_lost_army")
+                vle = cst_stats.get("p_vespene_lost_economy")
+                vlt = cst_stats.get("p_vespene_lost_technology")
+                if p_l is not None and p_p is not None:
+                    m1 = (p_l <= loop_t) & (p_p == 1)
+                    m2 = (p_l <= loop_t) & (p_p == 2)
+                    if m1.any():
+                        idx1 = np.where(m1)[0][-1]
+                        if mla is not None and mle is not None and mlt is not None:
+                            min_lost[0] = max(0, int(mla[idx1] + mle[idx1] + mlt[idx1]))
+                        if vla is not None and vle is not None and vlt is not None:
+                            vesp_lost[0] = max(0, int(vla[idx1] + vle[idx1] + vlt[idx1]))
+                    if m2.any():
+                        idx2 = np.where(m2)[0][-1]
+                        if mla is not None and mle is not None and mlt is not None:
+                            min_lost[1] = max(0, int(mla[idx2] + mle[idx2] + mlt[idx2]))
+                        if vla is not None and vle is not None and vlt is not None:
+                            vesp_lost[1] = max(0, int(vla[idx2] + vle[idx2] + vlt[idx2]))
+
+                dfs = cst_stats.get("dead_frame_start")
+                did = cst_stats.get("dead_id")
+                unit_map = cst_stats.get("unit_map", {})
+                if dfs is not None and did is not None and len(dfs) > 0 and len(did) > 0:
+                    l_idx = min(max(0, loop_t), len(dfs) - 1)
+                    dead_cnt = int(dfs[l_idx])
+                    dead_slice = did[:dead_cnt]
+                    for uid in dead_slice:
+                        info = unit_map.get(int(uid))
+                        if info:
+                            utype, uown = info
+                            if uown in (1, 2):
+                                um = self.unit_meta.get(utype, {})
+                                nm = um.get("name", f"Unit_{utype}")
+                                if nm.lower() not in self.EXCLUDE_FROM_DEAD:
+                                    dead_groups[uown][nm] += 1
 
             u_l = cst_stats.get("up_loop")
             u_p = cst_stats.get("up_player")
@@ -2357,7 +2474,6 @@ class WorldModelInspector:
         }
 
         # 2. Production queue (actively building slot 0 only!)
-        from collections import defaultdict
         pw_list = w.get("prod_where", [])
         pv_list = w.get("prod_vals", [])
         EXCLUDE_FROM_FORCES = {
@@ -2474,28 +2590,6 @@ class WorldModelInspector:
                 forces[pk][cat] = sorted(items, key=lambda x: -x["count"])
 
         # 4. Casualties & Lost Units
-        EXCLUDE_FROM_DEAD = {
-            "larva", "kd8charge", "interceptorsucceed", "pointdefensedrone",
-        }
-        dead_groups = {1: defaultdict(int), 2: defaultdict(int)}
-        dfs = cst_stats.get("dead_frame_start") if cst_stats else None
-        did = cst_stats.get("dead_id") if cst_stats else None
-        unit_map = cst_stats.get("unit_map") if cst_stats else {}
-
-        if dfs is not None and did is not None and len(dfs) > 0 and len(did) > 0:
-            l_idx = min(max(0, loop_t), len(dfs) - 1)
-            dead_cnt = int(dfs[l_idx])
-            dead_slice = did[:dead_cnt]
-            for uid in dead_slice:
-                info = unit_map.get(int(uid))
-                if info:
-                    utype, uown = info
-                    if uown in (1, 2):
-                        um = self.unit_meta.get(utype, {})
-                        nm = um.get("name", f"Unit_{utype}")
-                        if nm.lower() not in EXCLUDE_FROM_DEAD:
-                            dead_groups[uown][nm] += 1
-
         units_lost = {"p1": [], "p2": []}
         for own in (1, 2):
             pk = f"p{own}"
