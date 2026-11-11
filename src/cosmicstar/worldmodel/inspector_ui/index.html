@@ -340,14 +340,38 @@
     text-overflow: ellipsis;
   }
   .esl-race-crest {
-    font-size: 10px;
-    font-weight: 800;
-    padding: 0 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
     border-radius: 3px;
     background: rgba(15, 23, 42, 0.7);
     border: 1px solid #475569;
     color: #f1f5f9;
     flex-shrink: 0;
+    overflow: hidden;
+  }
+  .esl-race-crest-img {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9));
+  }
+  .hud-divider-icon {
+    width: 15px;
+    height: 15px;
+    object-fit: contain;
+    vertical-align: middle;
+    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8));
+  }
+  .sc2-game-icon-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    border-radius: 3px;
+    image-rendering: -webkit-optimize-contrast;
   }
   .esl-col-stat {
     display: flex;
@@ -1104,22 +1128,28 @@
             <span>PLAYER</span>
           </div>
           <div class="esl-col-stat" style="color:#cbd5e1;" title="Supply (Used / Cap)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            <img class="hud-divider-icon" src="/assets/icons/icon-supply-terran_nobg.png" alt="Supply" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           </div>
           <div class="esl-col-stat" style="color:#fde047;" title="Workers">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            <img class="hud-divider-icon" src="/assets/icons/ui_console_helperbutton_icon_worker_terr.png" alt="Workers" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
           </div>
           <div class="esl-col-stat" style="color:#fdba74;" title="Army">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="14.5 17.5 3 6 3 3 6 3 17.5 14.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>
+            <img class="hud-divider-icon" src="/assets/icons/ui_console_helperbutton_icon_army_terr.png" alt="Army" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="14.5 17.5 3 6 3 3 6 3 17.5 14.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>
           </div>
           <div class="esl-col-stat" style="color:#38bdf8;" title="Minerals">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="6 3 18 3 22 9 12 22 2 9"/></svg>
+            <img class="hud-divider-icon" src="/assets/icons/icon-mineral-nobg.png" alt="Minerals" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="6 3 18 3 22 9 12 22 2 9"/></svg>
           </div>
           <div class="esl-col-stat" style="color:#4ade80;" title="Vespene Gas">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+            <img class="hud-divider-icon" src="/assets/icons/icon-gas-terran-nobg.png" alt="Vespene Gas" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
           </div>
-          <div style="display:flex; align-items:center; gap:3px; font-weight:700; color:#cbd5e1; font-size:9.5px; padding-left:2px;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <div style="display:flex; align-items:center; gap:4px; font-weight:700; color:#cbd5e1; font-size:9.5px; padding-left:2px;">
+            <img class="hud-divider-icon" src="/assets/icons/btn-upgrade-terran-infantryweaponslevel1.png" alt="Upgrades" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             <span>UPGRADES</span>
           </div>
         </div>
@@ -2290,7 +2320,46 @@ function formatRace(rawRace, pKey) {
   return { code: s[0].toUpperCase(), name: rawRace };
 }
 
+let ICON_MANIFEST = null;
+fetch("/assets/icons/manifest.json")
+  .then(r => r.json())
+  .then(m => {
+    ICON_MANIFEST = m;
+    if (FRAME && FRAME.hud) renderHUDAndForces();
+  })
+  .catch(e => console.warn("Icon manifest load skipped:", e));
+
 function getUnitOrUpgradeIcon(rawName, category, raceHint) {
+  if (!rawName) return "";
+  const name = String(rawName).trim();
+  const n = name.toLowerCase().replace(/[\s\-_]/g, "");
+
+  let assetFile = null;
+  if (ICON_MANIFEST) {
+    const isUp = category === "upgrade" || /weapon|armor|shield|speed|stimpack|drillclaws|centrifical|chitinous|anabolic|glial|punisher/i.test(n);
+    if (isUp) {
+      assetFile = (ICON_MANIFEST.upgrades && ICON_MANIFEST.upgrades[n]) || (ICON_MANIFEST.units && ICON_MANIFEST.units[n]);
+      if (!assetFile && ICON_MANIFEST.upgrades) {
+        const stripped = n.replace(/level[123]|mp/g, "");
+        assetFile = ICON_MANIFEST.upgrades[stripped] || (ICON_MANIFEST.units && ICON_MANIFEST.units[stripped]);
+      }
+    } else {
+      assetFile = (ICON_MANIFEST.units && ICON_MANIFEST.units[n]) || (ICON_MANIFEST.upgrades && ICON_MANIFEST.upgrades[n]);
+      if (!assetFile && ICON_MANIFEST.units) {
+        const stripped = n.replace(/flying|burrowed|sieged|mp|cocoon/g, "");
+        assetFile = ICON_MANIFEST.units[stripped] || (ICON_MANIFEST.upgrades && ICON_MANIFEST.upgrades[stripped]);
+      }
+    }
+  }
+
+  const fallback = getFallbackSvg(rawName, category, raceHint);
+  if (assetFile) {
+    return `<img class="sc2-game-icon-img" src="/assets/icons/${assetFile}" alt="${name}" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='block';"/><div style="display:none;width:100%;height:100%;">${fallback}</div>`;
+  }
+  return fallback;
+}
+
+function getFallbackSvg(rawName, category, raceHint) {
   if (!rawName) return "";
   const name = String(rawName);
   const n = name.toLowerCase();
@@ -2580,7 +2649,10 @@ function renderHUDAndForces() {
     const elRace = document.getElementById(`hud${pUpper}Race`);
     if (elRace) {
       const r = formatRace(d.race, pKey);
-      elRace.textContent = r.code;
+      let crest = "icon-1v1-terran.png";
+      if (r.code === "Z") crest = "icon-1v1-zerg.png";
+      else if (r.code === "P") crest = "icon-1v1-protoss.png";
+      elRace.innerHTML = `<img class="esl-race-crest-img" src="/assets/icons/${crest}" alt="${r.name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-block';"/><span style="display:none; font-size:10px; font-weight:800;">${r.code}</span>`;
       elRace.title = r.name;
     }
 
@@ -2739,8 +2811,12 @@ function renderReverseSaeAttribution(playerKey, unitName, rows) {
 
   const pName = playerKey === "p1" ? (FRAME.hud ? FRAME.hud.p1.name : "Player 1") : (FRAME.hud ? FRAME.hud.p2.name : "Player 2");
   const pCol = playerKey === "p1" ? "var(--p1)" : "var(--p2)";
+  const groupIcon = getUnitOrUpgradeIcon(unitName, "unit");
   if (pnlTitle) {
-    pnlTitle.innerHTML = `<span style="color:${pCol};font-weight:800;">${pName}</span> • ${unitName} (${rows.length} units)`;
+    pnlTitle.innerHTML = `<span style="display:inline-flex; align-items:center; gap:6px;">
+      <span style="width:20px; height:20px; display:inline-block; border-radius:3px; overflow:hidden; vertical-align:middle;">${groupIcon}</span>
+      <span style="color:${pCol};font-weight:800;">${pName}</span> • ${unitName} (${rows.length} units)
+    </span>`;
   }
   if (btnDeselect) {
     btnDeselect.style.display = "inline-block";

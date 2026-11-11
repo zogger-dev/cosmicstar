@@ -32,6 +32,22 @@ UI_HTML_PATH = os.path.abspath(
         "index.html",
     )
 )
+ASSET_DIRS = [
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "data", "worldmodel", "assets")
+    ),
+    os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "src",
+            "cosmicstar",
+            "worldmodel",
+            "inspector_ui",
+            "assets",
+        )
+    ),
+]
 
 
 class InspectorHTTPHandler(BaseHTTPRequestHandler):
@@ -73,6 +89,38 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             with open(UI_HTML_PATH, "rb") as f:
                 self._send_html(f.read())
+            return
+
+        if path.startswith("/assets/"):
+            rel_path = path[len("/assets/") :].lstrip("/")
+            if ".." in rel_path:
+                self._send_json({"error": "Forbidden"}, status=403)
+                return
+            for base_dir in ASSET_DIRS:
+                full_path = os.path.join(base_dir, rel_path)
+                if os.path.isfile(full_path):
+                    content_type = "application/octet-stream"
+                    if full_path.endswith(".png"):
+                        content_type = "image/png"
+                    elif full_path.endswith(".json"):
+                        content_type = "application/json; charset=utf-8"
+                    elif full_path.endswith(".svg"):
+                        content_type = "image/svg+xml"
+                    elif full_path.endswith(".css"):
+                        content_type = "text/css; charset=utf-8"
+                    elif full_path.endswith(".js"):
+                        content_type = "application/javascript; charset=utf-8"
+
+                    with open(full_path, "rb") as f:
+                        data = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "public, max-age=86400")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+            self._send_json({"error": f"Asset not found: {path}"}, status=404)
             return
 
         if path == "/api/init":
@@ -184,6 +232,15 @@ def main():
     args = ap.parse_args()
 
     print("Initializing CosmicStar WorldModelInspector on GPU...", flush=True)
+    manifest_path = os.path.join(ASSET_DIRS[0], "icons", "manifest.json")
+    if not os.path.exists(manifest_path):
+        try:
+            print("Extracting StarCraft II game icons from local CASC storage...", flush=True)
+            from extract_icons import extract_icons
+            extract_icons(out_dir=os.path.join(ASSET_DIRS[0], "icons"))
+        except Exception as e:
+            print(f"Warning: could not auto-extract SC2 game icons ({e}); falling back to SVGs.", flush=True)
+
     INSPECTOR = WorldModelInspector(l1_ckpt=args.l1_ckpt, l2_ckpt=args.l2_ckpt)
     # Warm up CUDA autograd kernels on first unseen game so first browser load is <140ms
     if INSPECTOR.catalog:
