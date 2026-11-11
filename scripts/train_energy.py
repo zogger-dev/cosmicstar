@@ -207,7 +207,7 @@ def run_batch(model, enc, b, pairs=None, backward=True, weight=1.0):
     attention) and the fixed-dimension Gram Port-Hamiltonian model (fp32)."""
     B, F_, R = b["mask"].shape
     X = b["eff_mask"].shape[2] if "eff_mask" in b else 0
-    T = R + 67 + X
+    T = R + 3 + X
     if backward and B > 1 and B * T > 6200:
         B_keep = max(1, 6200 // T)
         b = {k: v[:B_keep] for k, v in b.items()}
@@ -334,6 +334,7 @@ def main():
     ap.add_argument("--eval_seqs", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", default="")
+    ap.add_argument("--warm_start", default="", help="warm-start matching weights & split 8D->16D z_proj from an earlier checkpoint")
     args = ap.parse_args()
     t_start = time.time()
     torch.manual_seed(args.seed)
@@ -440,11 +441,26 @@ def main():
         model.load_state_dict(ck["model"])
         enc.load_state_dict(ck["enc"])
         start = ck["step"]
+    elif args.warm_start and os.path.exists(args.warm_start):
+        wck = torch.load(args.warm_start, map_location="cpu", weights_only=False)
+        m_sd = model.state_dict()
+        ck_m = {k: v for k, v in wck.get("model", {}).items() if k in m_sd and m_sd[k].shape == v.shape}
+        model.load_state_dict(ck_m, strict=False)
+        e_sd = enc.state_dict()
+        ck_e = {k: v for k, v in wck.get("enc", {}).items() if k in e_sd and e_sd[k].shape == v.shape}
+        # If upgrading from r=8 signed z_proj to r=16 non-negative z_proj, split +W_z and -W_z
+        old_w = wck.get("enc", {}).get("z_proj.weight")
+        if old_w is not None and old_w.shape == (8, args.d) and e_sd["z_proj.weight"].shape == (16, args.d):
+            ck_e["z_proj.weight"] = torch.cat([old_w, -old_w], dim=0)
+            ck_e["z_proj.bias"] = torch.full((16,), -0.8, dtype=old_w.dtype)
+        enc.load_state_dict(ck_e, strict=False)
+        print(f"warm-started {len(ck_e)}/{len(e_sd)} enc tensors and {len(ck_m)}/{len(m_sd)} model tensors from {args.warm_start}", flush=True)
+        del wck
     chosen = None
     eff_seqs = args.seqs
     if args.measure:
         chosen, info = tp.largest_windows(bases, args.frames, args.seqs)
-        eff_seqs = max(1, min(args.seqs, args.tokens // (info[0][0] + 67)))
+        eff_seqs = max(1, min(args.seqs, args.tokens // (info[0][0] + 3)))
         print(
             "largest",
             [(i[0], i[1], i[2]) for i in info[:eff_seqs]],
@@ -457,7 +473,7 @@ def main():
         width=args.bucket,
         min_games=args.min_bucket_games,
         tokens=args.tokens,
-        per_window=67,
+        per_window=3,
         accum=args.accum,
     )
     data = energy_batches(
@@ -473,7 +489,15 @@ def main():
         prefetch=args.prefetch,
         chosen=chosen,
     )
-    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05)
+    decay_params = [p for p in params if p.ndim >= 2]
+    nodecay_params = [p for p in params if p.ndim < 2]
+    opt = torch.optim.AdamW(
+        [
+            {"params": decay_params, "weight_decay": 0.05},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ],
+        lr=args.lr,
+    )
     if ck:
         opt.load_state_dict(ck["opt"])
         del ck

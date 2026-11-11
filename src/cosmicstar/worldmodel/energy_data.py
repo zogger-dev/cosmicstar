@@ -202,15 +202,16 @@ def _compute_dtype(ref: torch.Tensor) -> torch.dtype:
 
 class ContinuousPotentialField(nn.Module):
     """Continuous localized potential/terrain field V_loc(x, y) over the map.
-    Instead of a full-map 2D Conv ResNet tower, evaluates multi-scale 2D Fourier
-    coordinate features in physical map units (wavelengths 4 to 256 map units) plus a
-    5-point local stencil (center and +-delta cardinal offsets in map units) sampled
-    via bilinear grid_sample from the live visibility, creep, pathability, buildability,
-    and static terrain height layers."""
+    Instead of a full-map 2D Conv ResNet tower or discrete map anchor tokens, evaluates
+    multi-scale 2D Fourier coordinate features in physical map units (wavelengths 4 to
+    256 map units) plus a 5-point local stencil (center and +-delta cardinal offsets in
+    map units) sampled via bilinear grid_sample from the live visibility, creep,
+    pathability, buildability, and static terrain height layers strictly at continuous
+    entity positions."""
 
-    def __init__(self, d, n_freqs=MAP_WAVES, grid_size=8, stencil_step=2.0):
+    def __init__(self, d, n_freqs=MAP_WAVES, grid_size=0, stencil_step=2.0):
         super().__init__()
-        self.grid_size = grid_size
+        self.grid_size = 0
         self.n_freqs = n_freqs
         # Physical map-unit wavelengths from 4 to 256 map units (same as entity_encoder)
         self.register_buffer(
@@ -235,31 +236,12 @@ class ContinuousPotentialField(nn.Module):
         c_map = C_LIVE + C_STATIC
         in_dim = (4 * n_freqs) + len(offsets) * c_map
         self.net = E.mlp(in_dim, d, d)
-        self.field_emb = nn.Parameter(torch.zeros(grid_size * grid_size, d))
-        nn.init.normal_(self.field_emb, std=0.02)
-
-    def anchors(self, b):
-        """[B, S, 2] continuous anchor positions across the map, in map units from
-        b['center']."""
-        G = self.grid_size
-        dev = b["mask"].device
-        c = (torch.arange(G, device=dev, dtype=torch.float32) + 0.5) - G / 2
-        grid_xy = torch.stack(torch.broadcast_tensors(c[None, :], c[:, None]), -1).view(
-            1, G * G, 2
-        )
-        if "side" in b:
-            side = b["side"][:, None, None].float()
-        elif "half" in b:
-            side = b["half"].max(dim=-1).values[:, None, None].float() * 2.0
-        else:
-            side = torch.full((b["mask"].shape[0], 1, 1), 200.0, device=dev)
-        return grid_xy * (side / G)
 
     def forward(self, b, f_idx, pos):
         """pos: [B, nf, K, 2] in map units relative to map center -> [B, nf, K, d]."""
         B, nf, K, _ = pos.shape
         dev = pos.device
-        dt = _compute_dtype(self.field_emb)
+        dt = _compute_dtype(self.net[0].weight)
 
         # Fourier-transformed physical map units (wavelengths 4 to 256 map units)
         ang = pos.float().unsqueeze(-1) * self.omega  # [B, nf, K, 2, n_freqs]
@@ -528,7 +510,7 @@ class Frames(nn.Module):
         self.rope_2d = RoPE2D(dh, lo=ROPE_SHORTEST, hi=256.0)
         self.rope_1d = RoPE1D(dh)
 
-        # 6 Spatiotemporal blocks across globals, entities, effects, and continuous field tokens
+        # 6 Spatiotemporal blocks across globals, entities, and active effects (zero discrete map tokens)
         self.blocks = nn.ModuleList(
             [
                 SpatioTemporalBlock(d, heads=heads, kv_heads=kv_heads, ff=ff)
@@ -537,7 +519,18 @@ class Frames(nn.Module):
         )
         self.z_norm = nn.LayerNorm(d)
         self.z_proj = nn.Linear(d, r)
-        E.small_init(self.z_proj, std=1e-2)
+        E.small_init(self.z_proj, std=2e-2)
+        with torch.no_grad():
+            self.z_proj.bias.fill_(-1.0)  # sigmoid(-1.0) ≈ 0.27 at init for non-negative modes
+        # Learned positive per-entity amplitude (mass/weight) m_u > 0 from static unit ruleset
+        # embedding + contextual token, avoiding equal-norm clamping across Probes and high-tier units
+        self.mass_type = nn.Linear(d, 1, bias=False)
+        self.mass_ctx = nn.Linear(d, 1, bias=True)
+        E.small_init(self.mass_type, std=1e-2)
+        E.small_init(self.mass_ctx, std=1e-2)
+        with torch.no_grad():
+            self.mass_ctx.bias.fill_(math.log(math.e - 1.0))  # softplus(0.5413) == 1.0 at init
+
         self.z_ply_norm = nn.LayerNorm(d)
         self.z_ply_proj = nn.Linear(d, r)
         E.small_init(self.z_ply_proj, std=1e-2)
@@ -588,45 +581,73 @@ class Frames(nn.Module):
         ord_u = F.embedding(a_idx, a_u, padding_idx=0)
         return unit_c, ord_c, prod_c, ord_u
 
+    def project_entities(self, c_ent_flat, rtype, mask):
+        """Projects contextualized entity tokens c_ent_flat [M, R, d] to amplitude-scaled
+        latent modes z_flat [M, R, r] = m_u * softsign(W_z LayerNorm(c_u)), where m_u > 0
+        is anchored to the unit's physical log-cost log(1 + value_u / 100) + 0.5 and
+        modulated by learned static ruleset + contextual factors."""
+        M, R, _ = c_ent_flat.shape
+        dt = c_ent_flat.dtype
+        m_flat = mask.reshape(M, R, 1).to(dt)
+        c_normed = self.z_norm(c_ent_flat) * m_flat
+
+        u_tab = self.unit_emb.weight.to(dt) + self.unit_mlp(self.unit_feat.to(dt))
+        m_type_tab = self.mass_type(u_tab)  # [N_RAW_TYPES, 1]
+        r_idx = rtype.reshape(M, R).clamp(0, len(m_type_tab) - 1)
+        m_type = F.embedding(r_idx, m_type_tab)  # [M, R, 1]
+
+        # Physical unit cost anchor from self.k_type[:, 0] (minerals + vespene)
+        cost_u = self.k_type[r_idx, 0:1].to(dt).clamp(min=0.0)
+        m_base = torch.log1p(cost_u / 100.0) + 0.5  # [M, R, 1] >= 0.5
+
+        m_u = m_base * F.softplus(m_type + self.mass_ctx(c_normed)) * m_flat  # [M, R, 1] > 0
+        z_dir = torch.sigmoid(self.z_proj(c_normed)) * m_flat  # [M, R, r] >= 0 (non-negative modes)
+        z_flat = m_u * z_dir
+        return z_flat, c_normed
+
     def coords(self, b, ff):
-        """[B, nf, R, K_Q] grounded per-unit coordinates:
-        (1, x_norm, y_norm, vx_norm, vy_norm, hp_frac, shield_frac, energy_frac)."""
-        x, y, num = b["x"][:, ff], b["y"][:, ff], b["num"][:, ff]
-        px, py = b["x"][:, ff - 1], b["y"][:, ff - 1]
-        both = (b["mask"][:, ff] & b["mask"][:, ff - 1]).to(x.dtype)
+        """[B, nf, R, K_Q] grounded per-unit coordinates in full fp32:
+        (1, x_norm, y_norm, vx_norm, vy_norm, hp_frac, shield_frac, energy_frac),
+        where (x_norm, y_norm) are normalized by the fixed physical MAP_SCALE = 100.0
+        map units so spatial wavelengths are isotropic and map-size independent."""
+        with torch.autocast(device_type=b["x"].device.type, enabled=False):
+            x = b["x"][:, ff].float()
+            y = b["y"][:, ff].float()
+            num = b["num"][:, ff].float()
+            px = b["x"][:, ff - 1].float()
+            py = b["y"][:, ff - 1].float()
+            both = (b["mask"][:, ff] & b["mask"][:, ff - 1]).float()
 
-        # Center and normalize (x, y) to [-1, 1] using map center and half-size
-        if "center" in b and "half" in b:
-            cx = b["center"][:, 0, None, None].to(x.dtype)
-            cy = b["center"][:, 1, None, None].to(x.dtype)
-            hx = b["half"][:, 0, None, None].clamp(min=1.0).to(x.dtype)
-            hy = b["half"][:, 1, None, None].clamp(min=1.0).to(x.dtype)
-        else:
-            cx, cy, hx, hy = 100.0, 100.0, 100.0, 100.0
+            if "center" in b:
+                cx = b["center"][:, 0, None, None].float()
+                cy = b["center"][:, 1, None, None].float()
+            else:
+                cx, cy = 100.0, 100.0
 
-        x_norm = ((x - cx) / hx).clamp(-2.0, 2.0)
-        y_norm = ((y - cy) / hy).clamp(-2.0, 2.0)
-        vx_norm = (((x - px) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
-        vy_norm = (((y - py) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
+            x_norm = ((x - cx) / E.MAP_SCALE).clamp(-2.0, 2.0)
+            y_norm = ((y - cy) / E.MAP_SCALE).clamp(-2.0, 2.0)
+            vx_norm = (((x - px) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
+            vy_norm = (((y - py) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
 
-        hp_max = num[..., I["hp_max"]]
-        sh_max = num[..., I["shield_max"]]
-        hp_frac = (num[..., I["hp"]] / hp_max.clamp(min=1.0)) * (hp_max > 0)
-        sh_frac = (num[..., I["shield"]] / sh_max.clamp(min=1.0)) * (sh_max > 0)
-        en_frac = (num[..., I["energy"]] / E.ENERGY_UNIT).clamp(0.0, 1.5)
-        ones = torch.ones_like(x_norm)
+            hp_max = num[..., I["hp_max"]]
+            sh_max = num[..., I["shield_max"]]
+            hp_frac = (num[..., I["hp"]] / hp_max.clamp(min=1.0)) * (hp_max > 0)
+            sh_frac = (num[..., I["shield"]] / sh_max.clamp(min=1.0)) * (sh_max > 0)
+            en_frac = (num[..., I["energy"]] / E.ENERGY_UNIT).clamp(0.0, 1.5)
+            ones = torch.ones_like(x_norm)
 
-        return torch.stack(
-            [ones, x_norm, y_norm, vx_norm, vy_norm, hp_frac, sh_frac, en_frac], dim=-1
-        )
+            return torch.stack(
+                [ones, x_norm, y_norm, vx_norm, vy_norm, hp_frac, sh_frac, en_frac], dim=-1
+            )
 
     def ledger(self, b, ff):
-        """[B, nf, 2, 2] per-player (minerals, vespene) / 1000 in fp32."""
-        pl = b["ply_num"].float()
-        v = torch.expm1(pl[:, ff, :, : len(PC_KEYS)] * 8.0)
-        mins = v[..., PC["minerals"]] / E.BANK_SCALE
-        vesp = v[..., PC["vespene"]] / E.BANK_SCALE
-        return torch.stack([mins, vesp], dim=-1)
+        """[B, nf, 2, 2] per-player (minerals, vespene) / 1000 in full fp32."""
+        with torch.autocast(device_type=b["ply_num"].device.type, enabled=False):
+            pl = b["ply_num"].float()
+            v = torch.expm1(pl[:, ff, :, : len(PC_KEYS)] * 8.0)
+            mins = v[..., PC["minerals"]] / E.BANK_SCALE
+            vesp = v[..., PC["vespene"]] / E.BANK_SCALE
+            return torch.stack([mins, vesp], dim=-1)
 
     def _embed_globals(self, b, f_idx):
         """[B, nf, 3, d] global tokens: [CLS, Player 1, Player 2]."""
@@ -742,24 +763,19 @@ class Frames(nn.Module):
             dim=-1,
         )
 
-        # Continuous localized potential field at entity coordinates + map anchor grid
+        # Continuous localized potential field evaluated strictly at entity coordinates (no discrete map tokens)
         dev = b["mask"].device
         if "center" in b:
             center = b["center"][:, None, None, :].float()
         else:
             center = torch.full((B, 1, 1, 2), 100.0, device=dev)
         pos_ent = xy_raw - center
-        S = self.field.grid_size * self.field.grid_size
-        pos_field = self.field.anchors(b)[:, None, :, :].expand(B, nf, S, 2)
-        pos_ef = torch.cat([pos_ent, pos_field], dim=2)  # [B, nf, R + S, 2]
         ckpt = self.grad_ckpt and torch.is_grad_enabled()
 
         def _embed_x():
             unit_c, ord_c, prod_c, _ = self.nodes(rtype, abil, prod_abil)
-            field_all = self.field(b, f_idx, pos_ef)
+            field_ent = self.field(b, f_idx, pos_ent)
             dt = _compute_dtype(self.cls_tok)
-            field_ent = field_all[:, :, :R]
-            field_tok = field_all[:, :, R:] + self.field.field_emb[None, None].to(dt)
             c_ent = (
                 unit_c
                 + ord_c
@@ -771,12 +787,12 @@ class Frames(nn.Module):
             ).to(dt)
             g_tok = self._embed_globals(b, f_idx).to(dt)
             return torch.cat(
-                [g_tok, c_ent, field_tok.to(dt), eff_tok.to(dt)], dim=2
+                [g_tok, c_ent, eff_tok.to(dt)], dim=2
             ).reshape(B * nf, T, -1)
 
         eff_tok, eff_mask, eff_xy = self._embed_effects(b, f_idx)  # [B, nf, X, d]
         g0, X = 3, eff_tok.shape[2]
-        T_t = g0 + R + S
+        T_t = g0 + R
         T = T_t + X
 
         if ckpt:
@@ -784,20 +800,19 @@ class Frames(nn.Module):
         else:
             x_tok = _embed_x()
         valid_g = torch.ones(B, nf, g0, dtype=torch.bool, device=dev)
-        valid_field = torch.ones(B, nf, S, dtype=torch.bool, device=dev)
-        valid_all = torch.cat([valid_g, mask, valid_field, eff_mask], dim=2)
+        valid_all = torch.cat([valid_g, mask, eff_mask], dim=2)
         valid_flat = valid_all.reshape(B * nf, 1, 1, T)
 
-        t_valid = torch.cat([valid_g, mask, valid_field], dim=2)
+        t_valid = torch.cat([valid_g, mask], dim=2)
         t_mask = t_valid.transpose(1, 2).reshape(B * T_t, nf)
         tri = torch.tril(torch.ones(nf, nf, dtype=torch.bool, device=dev))
         eye = torch.eye(nf, dtype=torch.bool, device=dev)
         allow_t = ((tri[None] & t_mask[:, None, :]) | eye[None])[:, None]
         t_mask_3d = t_mask.unsqueeze(-1)
 
-        # Global tokens sit at origin (0, 0) unrotated; entities, field, and effects at map-unit pos
+        # Global tokens sit at origin (0, 0) unrotated; entities and effects at map-unit pos
         pos_g = torch.zeros(B, nf, g0, 2, device=dev, dtype=torch.float32)
-        pos_all = torch.cat([pos_g, pos_ent, pos_field, eff_xy], dim=2)
+        pos_all = torch.cat([pos_g, pos_ent, eff_xy], dim=2)
 
         # 2D Spatial RoPE (map units) and 1D Temporal RoPE (game loops), shared across blocks
         cs_2d = cos_sin(self.rope_2d.angles(pos_all.reshape(B * nf, T, 2)))
@@ -846,31 +861,61 @@ class Frames(nn.Module):
 
         cls_out = x_tok[:, 0:1]  # [B * nf, 1, d]
         ply_out = x_tok[:, 1:3]  # [B * nf, 2, d]
-        z_ply_flat = torch.tanh(
+        z_ply_flat = F.softsign(
             self.z_ply_proj(self.z_ply_norm(ply_out + cls_out))
         )  # [B * nf, 2, r]
 
-        c_flat = x_tok[:, g0 : g0 + R] * mask.reshape(B * nf, R, 1).to(x_tok.dtype)
-        z_flat = torch.tanh(self.z_proj(self.z_norm(c_flat)))  # [M, R, r] in (-1, 1)
-
-        # Sum-pool per-player control vector u [B, nf, 2, u_dim]
-        # 1) Order queue changes on frames f < F_total - 1
-        f_clamped = f_idx.clamp(max=b["queue_changed"].shape[1] - 1)
-        q_changed = (
-            b["queue_changed"][:, f_clamped]
-            & (f_idx < b["queue_changed"].shape[1])[None, :, None]
-            & mask
+        z_flat, _ = self.project_entities(x_tok[:, g0 : g0 + R], rtype, mask)
+        u, u_active = self._encode_commands(
+            b, f_idx, abil, prod_abil, ord_reg, owner, mask
         )
+        return (
+            q,
+            z_flat.view(B, nf, R, self.r),
+            z_ply_flat.view(B, nf, 2, self.r),
+            owner,
+            mask,
+            p,
+            u,
+            u_active,
+        )
+
+    def _encode_commands(self, b, f_idx, abil, prod_abil, ord_reg, owner, mask):
+        """Encodes per-player control impulse u [B, nf, 2, u_dim] and u_active [B, nf, 2]
+        for the transition f_idx -> f_idx + 1.
+
+        Reads the newly issued order and production queue abilities at frame f_idx + 1
+        (excluding passive order completions where the ability slot returns to 0)."""
+        F_total = b["mask"].shape[1]
+        f_next = (f_idx + 1).clamp(max=F_total - 1)
+        has_next = (f_idx + 1 < F_total)[None, :, None]
+
+        abil_next = b["slot_abil"][:, f_next, :, 0]
+        prod_next = b["slot_abil"][:, f_next, :, QUEUE]
+        reg_next = b["slot_reg"][:, f_next, :, 0, :]
+
+        # Genuine newly issued / retargeted orders (excluding passive completion to 0)
+        reg_diff = (reg_next - ord_reg).abs().sum(dim=-1) > 1e-4
+        ord_started = ((abil_next != abil) | reg_diff) & (abil_next > 0) & has_next & mask
+        prod_started = (prod_next != prod_abil) & (prod_next > 0) & has_next & mask
+        q_changed = ord_started | prod_started
+
         dt_u = _compute_dtype(self.cls_tok)
         a_tab_u = self.abil_emb.weight.to(dt_u) + self.abil_mlp(self.abil_feat.to(dt_u))
         z_u = torch.zeros(1, self.u_dim, device=a_tab_u.device, dtype=dt_u)
         a_u = torch.cat([z_u, self.abil_u(a_tab_u[1:])], dim=0)
-        ord_u = F.embedding(abil.clamp(0, len(a_u) - 1), a_u, padding_idx=0)
-        row_u = ord_u + self.reg_u(ord_reg)  # [B, nf, R, u_dim]
+
+        ord_u = F.embedding(abil_next.clamp(0, len(a_u) - 1), a_u, padding_idx=0)
+        prod_u = F.embedding(prod_next.clamp(0, len(a_u) - 1), a_u, padding_idx=0)
+        row_u = (
+            (ord_u + self.reg_u(reg_next.to(dt_u))) * ord_started.unsqueeze(-1).to(dt_u)
+            + prod_u * prod_started.unsqueeze(-1).to(dt_u)
+        )
+
         u_list, act_list = [], []
         for pl in (E.P1, E.P2):
             pl_chg = q_changed & (owner == pl)
-            u_pl = (row_u * pl_chg.unsqueeze(-1).to(row_u.dtype)).sum(dim=2)
+            u_pl = (row_u * (owner == pl).unsqueeze(-1).to(row_u.dtype)).sum(dim=2)
             active_pl = pl_chg.any(dim=2)
             if "act_mask" in b and "act_kind" in b:
                 # Only physical command events (A_CMD=1, A_REISSUE=2, A_CANCEL=11),
@@ -895,16 +940,7 @@ class Frames(nn.Module):
 
         u = torch.stack(u_list, dim=2)  # [B, nf, 2, u_dim]
         u_active = torch.stack(act_list, dim=2)  # [B, nf, 2]
-        return (
-            q,
-            z_flat.view(B, nf, R, self.r),
-            z_ply_flat.view(B, nf, 2, self.r),
-            owner,
-            mask,
-            p,
-            u,
-            u_active,
-        )
+        return u, u_active
 
     def frames(self, b, ff):
         """Encodes transitions from frames ff to ff + 1 -> (State_t, State_next)."""
