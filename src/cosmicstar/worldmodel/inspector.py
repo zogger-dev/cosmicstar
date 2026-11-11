@@ -284,6 +284,7 @@ class WorldModelInspector:
 
         # Cache of last evaluated frame for <1ms interactive token/Gram drilldowns
         self._last_frame_cache: dict[str, Any] = {}
+        self._cst_cache: dict[str, Any] = {}
 
         self.active_l1_ckpt = ""
         self.active_l2_ckpt = ""
@@ -586,6 +587,9 @@ class WorldModelInspector:
             # Extract map grid, .s2ma overlays, and painted wave-packet fields at f_curr = nf
             map_payload = self._extract_map_payload(g, b, nf)
 
+            # Extract Match HUD (resources, supply, rates, upgrades), Production queue, and Forces
+            hud_payload = self._extract_hud_and_production(g, w, b, nf, int(loop_t), analysis.get("units", []), meta_info)
+
             elapsed_ms = round((time.time() - t_start) * 1000.0, 1)
             out = {
                 "gid": gid,
@@ -597,6 +601,9 @@ class WorldModelInspector:
                 "active_l2_ckpt": os.path.basename(self.active_l2_ckpt),
                 "meta": meta_info,
                 "map": map_payload,
+                "hud": hud_payload["hud"],
+                "production": hud_payload["production"],
+                "forces": hud_payload["forces"],
                 "base_scalars": base_scalars,
                 **analysis,
             }
@@ -915,13 +922,16 @@ class WorldModelInspector:
         _, cos1 = model._goal_loss(pieces["g1_goal_eff"], pieces["bu1"], act_t[:, 0])
         _, cos2 = model._goal_loss(pieces["g2_goal_eff"], pieces["bu2"], act_t[:, 1])
 
-        neg_A1_val = float(-pieces["A1"][0].item() * 1000.0)
-        H1_val = float(-pieces["H1"][0].item() * 1000.0)
-        H2_val = float(-pieces["H2"][0].item() * 1000.0)
-        V1_val = float(-pieces["V1"][0].item() * 1000.0)
-        V2_val = float(-pieces["V2"][0].item() * 1000.0)
+        H1_val = float(pieces["H1"][0].item() * 1000.0)
+        H2_val = float(pieces["H2"][0].item() * 1000.0)
+        V1_val = float(pieces["V1"][0].item() * 1000.0)
+        V2_val = float(pieces["V2"][0].item() * 1000.0)
         T1_val = float(pieces["T1"][0].item() * 1000.0)
         T2_val = float(pieces["T2"][0].item() * 1000.0)
+        A1_val = float(pieces["A1"][0].item() * 1000.0)
+        own1_val = float(pieces["own1"][0].item() * 1000.0)
+        own2_val = float(pieces["own2"][0].item() * 1000.0)
+        tug_val = float(pieces["tug"][0].item() * 1000.0)
 
         scalars = {
             "H1": round(H1_val, 4),
@@ -930,11 +940,11 @@ class WorldModelInspector:
             "V2": round(V2_val, 4),
             "T1": round(T1_val, 4),
             "T2": round(T2_val, 4),
-            "A1": round(neg_A1_val, 4),
-            "raw_A1": round(float(pieces["A1"][0].item() * 1000.0), 4),
-            "own1": round(float(-pieces["own1"][0].item() * 1000.0), 4),
-            "own2": round(float(-pieces["own2"][0].item() * 1000.0), 4),
-            "tug": round(float(-pieces["tug"][0].item() * 1000.0), 4),
+            "A1": round(A1_val, 4),
+            "raw_A1": round(A1_val, 4),
+            "own1": round(own1_val, 4),
+            "own2": round(own2_val, 4),
+            "tug": round(tug_val, 4),
             "kin1": round(float(pieces["kin1"][0].item() * 1000.0), 4),
             "kin2": round(float(pieces["kin2"][0].item() * 1000.0), 4),
             "diss1": round(float(pieces["diss1"][0].item() * 1000.0), 4),
@@ -2089,4 +2099,216 @@ class WorldModelInspector:
             "sae_features": sae_features,   # Top active L6 SAE features painted on 2D map
             "sae_layer_r2": sae_layer_r2,   # 7-layer SAE explained variance R^2
             "s2ma": s2ma_info,
+        }
+
+    def _get_game_cst_stats(self, gid: str) -> dict[str, Any] | None:
+        if gid in self._cst_cache:
+            return self._cst_cache[gid]
+        try:
+            g = self._get_game(gid)
+            cst_path = g.base + ".p1.cst"
+            if not os.path.exists(cst_path):
+                self._cst_cache[gid] = None
+                return None
+            with statefile.load(cst_path) as d:
+                stats = {
+                    "p_loop": d["p_loop"].copy() if "p_loop" in d.files else None,
+                    "p_player": d["p_player"].copy() if "p_player" in d.files else None,
+                    "p_mineral_rate": d["p_mineral_rate"].copy() if "p_mineral_rate" in d.files else None,
+                    "p_vespene_rate": d["p_vespene_rate"].copy() if "p_vespene_rate" in d.files else None,
+                    "up_loop": d["up_loop"].copy() if "up_loop" in d.files else None,
+                    "up_player": d["up_player"].copy() if "up_player" in d.files else None,
+                    "up_name": d["up_name"].copy() if "up_name" in d.files else None,
+                }
+            self._cst_cache[gid] = stats
+            return stats
+        except Exception:
+            self._cst_cache[gid] = None
+            return None
+
+    def _extract_hud_and_production(
+        self,
+        g: PD.Game,
+        w: dict[str, Any],
+        b: dict[str, torch.Tensor],
+        f_curr: int,
+        loop_t: int,
+        units_out: list[dict[str, Any]],
+        meta_info: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Extracts live match observer HUD (minerals, vespene, income rates, supply used/cap,
+        workers, army, completed upgrades), active production items (with progress bars and counts),
+        and forces grouped by type with unit row IDs."""
+        pl = b["ply_num"].float()
+        v = torch.expm1(pl * 8.0)
+
+        meta = meta_info or (g.meta if hasattr(g, "meta") else {})
+        p1_name = meta.get("p1_name", "Player 1")
+        p2_name = meta.get("p2_name", "Player 2")
+        p1_race = meta.get("p1_race", "Terran")
+        p2_race = meta.get("p2_race", "Zerg")
+
+        # 1. Load CST stats for income rates & upgrades (cached per game)
+        gid_str = meta.get("gid", os.path.basename(g.base))
+        cst_stats = self._get_game_cst_stats(gid_str)
+        min_rate = [0, 0]
+        vesp_rate = [0, 0]
+        p1_ups, p2_ups = [], []
+        if cst_stats is not None:
+            p_l = cst_stats.get("p_loop")
+            p_p = cst_stats.get("p_player")
+            mr = cst_stats.get("p_mineral_rate")
+            vr = cst_stats.get("p_vespene_rate")
+            if p_l is not None and p_p is not None and mr is not None and vr is not None:
+                m1 = (p_l <= loop_t) & (p_p == 1)
+                m2 = (p_l <= loop_t) & (p_p == 2)
+                if m1.any():
+                    idx1 = np.where(m1)[0][-1]
+                    min_rate[0] = int(mr[idx1])
+                    vesp_rate[0] = int(vr[idx1])
+                if m2.any():
+                    idx2 = np.where(m2)[0][-1]
+                    min_rate[1] = int(mr[idx2])
+                    vesp_rate[1] = int(vr[idx2])
+
+            u_l = cst_stats.get("up_loop")
+            u_p = cst_stats.get("up_player")
+            u_n = cst_stats.get("up_name")
+            if u_l is not None and u_p is not None and u_n is not None:
+                p1_ups = [str(n) for l, p, n in zip(u_l, u_p, u_n) if l <= loop_t and p == 1]
+                p2_ups = [str(n) for l, p, n in zip(u_l, u_p, u_n) if l <= loop_t and p == 2]
+
+        def _format_upgrades(raw_list):
+            cleaned = {}
+            for raw in raw_list:
+                name = raw
+                lvl = 1
+                if "Level1" in raw:
+                    name = raw.replace("Level1", ""); lvl = 1
+                elif "Level2" in raw:
+                    name = raw.replace("Level2", ""); lvl = 2
+                elif "Level3" in raw:
+                    name = raw.replace("Level3", ""); lvl = 3
+                if name not in cleaned or lvl > cleaned[name]["level"]:
+                    cleaned[name] = {"name": name, "raw": raw, "level": lvl}
+            return list(cleaned.values())
+
+        hud = {
+            "p1": {
+                "name": p1_name,
+                "race": p1_race,
+                "minerals": int(v[0, f_curr, 0, ED.PC["minerals"]].item()),
+                "vespene": int(v[0, f_curr, 0, ED.PC["vespene"]].item()),
+                "minerals_rate": min_rate[0],
+                "vespene_rate": vesp_rate[0],
+                "supply_used": int(v[0, f_curr, 0, ED.PC["food_used"]].item()),
+                "supply_cap": int(v[0, f_curr, 0, ED.PC["food_cap"]].item()),
+                "workers": int(v[0, f_curr, 0, ED.PC["food_workers"]].item()),
+                "idle_workers": int(v[0, f_curr, 0, ED.PC["idle_worker_count"]].item()),
+                "army_supply": int(v[0, f_curr, 0, ED.PC["food_army"]].item()),
+                "upgrades": _format_upgrades(p1_ups),
+            },
+            "p2": {
+                "name": p2_name,
+                "race": p2_race,
+                "minerals": int(v[0, f_curr, 1, ED.PC["minerals"]].item()),
+                "vespene": int(v[0, f_curr, 1, ED.PC["vespene"]].item()),
+                "minerals_rate": min_rate[1],
+                "vespene_rate": vesp_rate[1],
+                "supply_used": int(v[0, f_curr, 1, ED.PC["food_used"]].item()),
+                "supply_cap": int(v[0, f_curr, 1, ED.PC["food_cap"]].item()),
+                "workers": int(v[0, f_curr, 1, ED.PC["food_workers"]].item()),
+                "idle_workers": int(v[0, f_curr, 1, ED.PC["idle_worker_count"]].item()),
+                "army_supply": int(v[0, f_curr, 1, ED.PC["food_army"]].item()),
+                "upgrades": _format_upgrades(p2_ups),
+            },
+        }
+
+        # 2. Production queue (actively building slot 0 only!)
+        from collections import defaultdict
+        prod = {"p1": [], "p2": []}
+        pw_list = w.get("prod_where", [])
+        pv_list = w.get("prod_vals", [])
+        for p_idx in [0, 1]:
+            owner_id = p_idx + 1
+            p_key = f"p{owner_id}"
+            wh = pw_list[p_idx] if p_idx < len(pw_list) else None
+            vl = pv_list[p_idx] if p_idx < len(pv_list) else None
+            groups = defaultdict(lambda: {"count": 0, "max_prog": 0.0, "category": "unit"})
+            if wh is not None and len(wh):
+                mask = (wh[:, 0] == f_curr) & (wh[:, 2] == 0)
+                for i in np.where(mask)[0]:
+                    raw_abil = int(vl[i, 0])
+                    prog = float(vl[i, 1])
+                    tok = self.vocab._abil.get(raw_abil) if hasattr(self.vocab, "_abil") else None
+                    ab_str = self.vocab_abil_name.get(tok, "") if tok is not None else ""
+                    parts = ab_str.split("/")
+                    raw_name = parts[-1] if len(parts) > 1 else ab_str
+                    if not raw_name:
+                        continue
+                    is_up = "research" in ab_str.lower() or "upgrade" in ab_str.lower()
+                    cat = "upgrade" if is_up else "unit"
+                    mult = 2 if raw_name.lower() == "zergling" else 1
+                    groups[raw_name]["count"] += mult
+                    groups[raw_name]["max_prog"] = max(groups[raw_name]["max_prog"], prog)
+                    groups[raw_name]["category"] = cat
+
+            # Also check structures currently under construction
+            for u in units_out:
+                if u.get("owner") == owner_id and u.get("structure"):
+                    r = u.get("row")
+                    if r is not None and r < b["num"].shape[2]:
+                        bld = float(b["num"][0, f_curr, r, ED.I["build"]].item())
+                        if bld < 0.99:
+                            sname = u["name"]
+                            groups[sname]["count"] += 1
+                            groups[sname]["max_prog"] = max(groups[sname]["max_prog"], bld)
+                            groups[sname]["category"] = "structure"
+
+            items = []
+            for k, val in groups.items():
+                items.append({
+                    "name": k,
+                    "count": val["count"],
+                    "progress": round(val["max_prog"], 3),
+                    "category": val["category"],
+                })
+            prod[p_key] = sorted(items, key=lambda x: -x["progress"])
+
+        # 3. Forces & Structures breakdown
+        forces = {
+            "p1": {"army": [], "workers": [], "structures": []},
+            "p2": {"army": [], "workers": [], "structures": []},
+        }
+        f_groups = {
+            1: {"army": defaultdict(list), "workers": defaultdict(list), "structures": defaultdict(list)},
+            2: {"army": defaultdict(list), "workers": defaultdict(list), "structures": defaultdict(list)},
+        }
+        for u in units_out:
+            own = u.get("owner")
+            if own in (1, 2):
+                nm = u["name"]
+                if u.get("worker"):
+                    f_groups[own]["workers"][nm].append(u["row"])
+                elif u.get("structure"):
+                    f_groups[own]["structures"][nm].append(u["row"])
+                else:
+                    f_groups[own]["army"][nm].append(u["row"])
+
+        for own in (1, 2):
+            pk = f"p{own}"
+            for cat in ("army", "workers", "structures"):
+                items = []
+                for nm, rows in f_groups[own][cat].items():
+                    items.append({
+                        "name": nm,
+                        "count": len(rows),
+                        "rows": rows,
+                    })
+                forces[pk][cat] = sorted(items, key=lambda x: -x["count"])
+
+        return {
+            "hud": hud,
+            "production": prod,
+            "forces": forces,
         }
