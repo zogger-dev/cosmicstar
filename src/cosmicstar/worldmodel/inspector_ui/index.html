@@ -130,19 +130,74 @@
     background: rgba(15, 23, 42, 0.7);
     border: 1px solid var(--border-solid);
   }
-  /* Main Grid */
+  /* Main 3-Column Workbench Grid (Left: SAE & Units | Center: Hero Map & Timeline | Right: Deep Tabs) */
   .main-grid {
     display: grid;
-    grid-template-columns: 540px 1fr;
+    grid-template-columns: minmax(305px, 23%) minmax(460px, 43%) minmax(370px, 34%);
     gap: 8px;
     flex: 1;
     min-height: 0;
   }
-  .col-left, .col-right {
+  .col-left, .col-center, .col-right {
     display: flex;
     flex-direction: column;
     gap: 6px;
     min-height: 0;
+    min-width: 0;
+  }
+  .selection-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 5px;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid var(--border-solid);
+    border-radius: 7px;
+    padding: 4px 8px;
+    flex-wrap: wrap;
+  }
+  .sel-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(30, 41, 59, 0.85);
+    border: 1px solid #475569;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.12s ease;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sel-chip.active {
+    background: rgba(99, 102, 241, 0.25);
+    border-color: #818cf8;
+    color: #f8fafc;
+  }
+  .sel-chip.active:hover {
+    background: rgba(239, 68, 68, 0.25);
+    border-color: #f87171;
+  }
+  .bar-mini-wrap {
+    width: 46px;
+    height: 5px;
+    background: rgba(51, 65, 85, 0.65);
+    border-radius: 3px;
+    overflow: hidden;
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 4px;
+  }
+  .bar-mini-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #818cf8, #38bdf8);
+    border-radius: 3px;
   }
   .panel {
     background: var(--bg-panel);
@@ -208,7 +263,7 @@
     flex: 1;
     text-align: center;
     padding: 5px 8px;
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
     border: none;
     background: transparent;
@@ -234,7 +289,8 @@
   .map-wrap {
     position: relative;
     width: 100%;
-    height: 410px;
+    flex: 1;
+    min-height: 280px;
     background: #070b14;
     border: 1px solid var(--border-solid);
     border-radius: 6px;
@@ -300,15 +356,15 @@
   }
   .field-dim-pills {
     display: flex;
-    gap: 4px;
+    gap: 3px;
     align-items: center;
     flex-wrap: wrap;
   }
   .dim-pill {
     position: relative;
-    padding: 3px 8px 6px 8px;
+    padding: 2px 6px 5px 6px;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 600;
     border-radius: 4px;
     border: 1px solid #334155;
@@ -317,7 +373,7 @@
     cursor: pointer;
     user-select: none;
     transition: all 0.12s ease;
-    min-width: 34px;
+    min-width: 30px;
     text-align: center;
   }
   .dim-pill:hover {
@@ -350,26 +406,28 @@
     width: 100%;
     border-collapse: collapse;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: 11px;
   }
   table.data-table th, table.data-table td {
-    padding: 4px 6px;
+    padding: 3.5px 5px;
     border-bottom: 1px solid rgba(51, 65, 85, 0.45);
     text-align: left;
   }
   table.data-table th {
     color: var(--text-secondary);
     font-weight: 600;
-    background: rgba(15, 23, 42, 0.5);
+    background: rgba(15, 23, 42, 0.85);
     position: sticky;
     top: 0;
+    z-index: 2;
   }
   table.data-table tr:hover {
     background: rgba(99, 102, 241, 0.14);
     cursor: pointer;
   }
   table.data-table tr.selected-row {
-    background: rgba(99, 102, 241, 0.28);
+    background: rgba(99, 102, 241, 0.32);
+    outline: 1px solid #818cf8;
   }
   .sub-grid-2 {
     display: grid;
@@ -379,7 +437,7 @@
   }
   .gram-layout {
     display: grid;
-    grid-template-columns: minmax(520px, 1.35fr) minmax(300px, 0.85fr);
+    grid-template-columns: minmax(270px, 1.05fr) minmax(240px, 0.95fr);
     gap: 8px;
     flex: 1;
     min-height: 0;
@@ -436,131 +494,99 @@
     </div>
   </div>
 
-  <!-- MAIN 2-COLUMN WORKSPACE -->
+  <!-- MAIN 3-COLUMN WORKBENCH (LEFT: SAE & CONTRIBUTING UNITS | CENTER: HERO MAP & TIMELINE | RIGHT: DEEP TABS) -->
   <div class="main-grid">
-    <!-- LEFT COLUMN: 2D Map Canvas + Multi-Scale Timeline -->
+    <!-- ================================================================== -->
+    <!-- LEFT COLUMN: Active Selection Bar + SAE Features + Contributing Units -->
+    <!-- ================================================================== -->
     <div class="col-left">
-      <!-- PANEL 1: 2D Map & Battlefield Canvas -->
-      <div class="panel" style="flex:1;">
+      <!-- Active Selection & Quick Deselect Strip -->
+      <div class="selection-bar">
+        <div style="display:flex; gap:4px; align-items:center; flex-wrap:wrap; min-width:0; flex:1;">
+          <span id="selChipUnit" class="sel-chip" title="Click to deselect active unit">Unit: None</span>
+          <span id="selChipOverlay" class="sel-chip" title="Click to reset field/SAE overlay to All 16D">Field: All 16D</span>
+          <span id="selChipMode" class="sel-chip" style="display:none;" title="Click to clear active Gram cell / SVD mode">Mode: None</span>
+        </div>
+        <button id="btnResetAllSelections" style="padding:2px 6px; font-size:10.5px;" title="Deselect unit, SAE feature, soloed field layer, and Gram mode (Shortcut: Esc)">✕ Clear All (Esc)</button>
+      </div>
+
+      <!-- PANEL A: Active Layer-6 Top-K SAE Features on Current Frame -->
+      <div class="panel" style="height:41%; min-height:190px;">
         <div class="panel-header">
-          <span class="panel-title">1. 2D Map, Potential Field Overlay &amp; Attribution</span>
-          <div style="display:flex; gap:5px; align-items:center;">
-            <select id="unitColorMode" title="Unit Color &amp; Halo Attribution">
-              <option value="owner">Units: Owner + Marginal Halo</option>
-              <option value="field_dim">Units: Active Field Layer z_k / SAE Feature</option>
-              <option value="marginal">Units: Marginal d(-A₁)/dw_i</option>
-              <option value="mass">Units: Learned Mass m_u = ||z_u||₂</option>
-              <option value="gram_mode">Units: Active Field / SVD Mode</option>
-              <option value="pca_rgb">Units: Layer l 3D PCA → RGB</option>
-              <option value="cos_sim">Units: Cosine Sim to Selected</option>
-            </select>
+          <div style="display:flex; align-items:center; gap:5px; min-width:0;">
+            <span class="panel-title">SAE Features on Map (L6)</span>
+            <span id="saeFrameBadge" class="badge" style="font-size:10px;">—</span>
+          </div>
+          <div style="display:flex; gap:4px; align-items:center;">
+            <button id="btnClearSaeLeft" style="padding:1px 6px; font-size:10.5px; display:none;" class="danger" title="Deselect active SAE feature">✕ Deselect SAE</button>
           </div>
         </div>
-
-        <!-- Potential Field Overlay & Layer (Dimension / SAE) Inspector Bar -->
-        <div class="field-layer-bar">
-          <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; flex-wrap:wrap;">
-            <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
-              <span style="font-size:11px; font-weight:700; color:#a5b4fc; text-transform:uppercase; letter-spacing:0.04em;">Potential Field Overlay:</span>
-              <select id="mapBgMode" title="Select which 2D Spatial Field to overlay on top of the terrain">
-                <option value="diff" selected>P1 − P2 Field: F₁(x,y) − F₂(x,y)</option>
-                <option value="p1">Player 1 Field: F₁(x,y)</option>
-                <option value="p2">Player 2 Field: F₂(x,y)</option>
-                <option value="contest">Contest Overlap: F₁(x,y) · F₂(x,y)</option>
-                <option value="env">Neutral / Resource Field: F_env(x,y)</option>
-                <option value="kinetic">Kinetic Momentum Field: Π(x,y)</option>
-                <option value="terrain_v">Terrain CNN Field: V_loc(x,y)</option>
-                <option value="terrain">Off (Terrain + Fog + Creep Only)</option>
-              </select>
-              <select id="fieldCombineMode" title="How to combine multiple selected dimensions" style="font-size:11px; padding:2px 5px;">
-                <option value="l2" selected>Multi-Dim: L2 Norm ||F||_S</option>
-                <option value="signed">Multi-Dim: Sum Σ F_k</option>
-              </select>
-              <select id="saeMapSelect" title="Overlay a monosemantic Top-K Sparse Autoencoder (SAE) feature onto the 2D map instead of raw z0..z15 channels" style="font-size:11px; padding:2px 5px; max-width:250px; border-color:#818cf8; color:#e0e7ff;">
-                <option value="-1">SAE Feature Overlay: Off (Use z0..z15)</option>
-              </select>
-            </div>
-            <div style="display:flex; gap:7px; align-items:center; font-size:11px; color:var(--text-secondary);">
-              <label title="Blend opacity of the Potential Field overlay over the map terrain" style="display:flex;align-items:center;gap:4px;">
-                <span>Opacity</span>
-                <input type="range" id="fieldAlphaSlider" min="15" max="95" value="72" style="width:58px; accent-color:#6366f1; cursor:pointer;" />
-              </label>
-              <label title="Draw iso-potential contour lines on the 2D field overlay" style="display:flex;align-items:center;gap:3px;cursor:pointer;">
-                <input type="checkbox" id="chkFieldContours" checked />Contours
-              </label>
-            </div>
-          </div>
-
-          <div class="field-dim-pills" id="dimPillsWrap">
-            <span style="font-size:11px; color:var(--text-secondary); margin-right:2px;">Layers (z_k ≥ 0):</span>
-            <button class="dim-pill active" id="dimPillAll" data-dim="all" title="Inspect all non-negative field dimensions combined">
-              <span id="dimPillAllLabel">All 16D</span>
-              <div class="dim-pill-bar"><div class="dim-pill-fill" style="width:100%;"></div></div>
-            </button>
-            <button class="dim-pill" data-dim="0" title="Click to inspect non-negative field layer z0">z0<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill0"></div></div></button>
-            <button class="dim-pill" data-dim="1" title="Click to inspect non-negative field layer z1">z1<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill1"></div></div></button>
-            <button class="dim-pill" data-dim="2" title="Click to inspect non-negative field layer z2">z2<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill2"></div></div></button>
-            <button class="dim-pill" data-dim="3" title="Click to inspect non-negative field layer z3">z3<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill3"></div></div></button>
-            <button class="dim-pill" data-dim="4" title="Click to inspect non-negative field layer z4">z4<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill4"></div></div></button>
-            <button class="dim-pill" data-dim="5" title="Click to inspect non-negative field layer z5">z5<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill5"></div></div></button>
-            <button class="dim-pill" data-dim="6" title="Click to inspect non-negative field layer z6">z6<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill6"></div></div></button>
-            <button class="dim-pill" data-dim="7" title="Click to inspect non-negative field layer z7">z7<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill7"></div></div></button>
-            <button class="dim-pill" data-dim="8" title="Click to inspect non-negative field layer z8">z8<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill8"></div></div></button>
-            <button class="dim-pill" data-dim="9" title="Click to inspect non-negative field layer z9">z9<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill9"></div></div></button>
-            <button class="dim-pill" data-dim="10" title="Click to inspect non-negative field layer z10">z10<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill10"></div></div></button>
-            <button class="dim-pill" data-dim="11" title="Click to inspect non-negative field layer z11">z11<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill11"></div></div></button>
-            <button class="dim-pill" data-dim="12" title="Click to inspect non-negative field layer z12">z12<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill12"></div></div></button>
-            <button class="dim-pill" data-dim="13" title="Click to inspect non-negative field layer z13">z13<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill13"></div></div></button>
-            <button class="dim-pill" data-dim="14" title="Click to inspect non-negative field layer z14">z14<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill14"></div></div></button>
-            <button class="dim-pill" data-dim="15" title="Click to inspect non-negative field layer z15">z15<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill15"></div></div></button>
-            <label title="When checked, clicking z0..z15 toggles multiple dimensions on/off instead of soloing a single dimension" style="display:flex;align-items:center;gap:3px;font-size:11px;color:#c084fc;margin-left:auto;cursor:pointer;user-select:none;">
-              <input type="checkbox" id="chkMultiDim" />+Multi
-            </label>
-          </div>
-
-          <div id="fieldLayerSummary" style="font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; border-top:1px solid rgba(51,65,85,0.45); padding-top:4px;">
-            <span>Click any layer <b>z0..z15</b> or select an <b>SAE Feature</b> above to inspect its 2D potential field &amp; unit loadings</span>
-          </div>
+        <div style="font-size:10.5px; color:var(--text-secondary); display:flex; justify-content:space-between; align-items:center;">
+          <span>Click any feature to project its field &amp; see contributing units below (click again to deselect)</span>
         </div>
-
-        <div class="checkbox-row">
-          <label><input type="checkbox" id="chkAttnRays" checked />2D-RoPE Attn Rays</label>
-          <label><input type="checkbox" id="chkForceAdv" checked />Force -∇A₁</label>
-          <label><input type="checkbox" id="chkForceKin" />Force ∇T</label>
-          <label><input type="checkbox" id="chkS2MA" checked />.s2ma AirBlockers/Shrines</label>
-          <label style="display:none;"><input type="checkbox" id="chkAnchors" />Anchors</label>
-          <label style="color:#c084fc;font-weight:600;"><input type="checkbox" id="chkDragMove" />Drag Unit (What-If)</label>
-          <button id="btnResetView" style="padding:1px 6px;font-size:11px;">Reset Zoom</button>
-        </div>
-
-        <div class="map-wrap">
-          <canvas id="mapCanvas"></canvas>
-          <div id="mapOverlayTop" class="map-overlay-pill">Loading...</div>
-          <div id="mapOverlayBottom" class="map-legend-pill">
-            <span id="mapCursorInfo">Hover or click any unit / anchor</span>
-            <span id="mapModeLegend" style="font-family:var(--font-mono);color:var(--text-secondary);">P1: Blue | P2: Rose | NFZ: Magenta</span>
-          </div>
+        <div class="scroll-box" style="flex:1; max-height:none;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Feat</th>
+                <th>Live Map Units (Current Frame)</th>
+                <th>Units</th>
+                <th>Σ m·f</th>
+              </tr>
+            </thead>
+            <tbody id="saeFeatureTableBody"></tbody>
+          </table>
         </div>
       </div>
 
-      <!-- PANEL 2: Multi-Scale Timeline Scrubber -->
-      <div class="panel" style="height:215px;">
+      <!-- PANEL B: Contributing Units Inspector (Synced to Active SAE Feature / Field Layer / Map) -->
+      <div class="panel" style="flex:1; min-height:220px;">
         <div class="panel-header">
-          <span class="panel-title">2. Multi-Scale Hamiltonian Timeline (L1 0.6s + L2 5.0s)</span>
-          <div style="display:flex; gap:10px; font-size:11px; color:var(--text-secondary);">
-            <span><b style="color:#38bdf8;">━</b> -A₁(L1)</span>
-            <span><b style="color:#a78bfa;">━</b> -A₁(L2)</span>
-            <span><b style="color:#10b981;">━</b> -A₁(Total)</span>
-            <span>Click chart to seek</span>
+          <div style="display:flex; align-items:center; gap:5px; min-width:0;">
+            <span id="contribUnitsTitle" class="panel-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Contributing Units</span>
+            <span id="contribCountBadge" class="badge" style="font-size:10px;">0u</span>
+          </div>
+          <div style="display:flex; gap:4px; align-items:center;">
+            <select id="contribOwnerFilter" style="font-size:10.5px; padding:1px 4px;" title="Filter contributing units by owner">
+              <option value="all">All</option>
+              <option value="1">P1</option>
+              <option value="2">P2</option>
+              <option value="0">Neu</option>
+            </select>
+            <select id="contribSortMode" style="font-size:10.5px; padding:1px 4px;" title="Sort contributing units">
+              <option value="weight" selected>Sort: Field Wt m·f</option>
+              <option value="act">Sort: Activation f_u</option>
+              <option value="marginal">Sort: |d(-A₁)|</option>
+              <option value="mass">Sort: Mass m_u</option>
+            </select>
+            <button id="btnDeselectUnitLeft" style="padding:1px 6px; font-size:10.5px; display:none;" title="Deselect currently selected unit">✕ Unit</button>
           </div>
         </div>
-        <canvas id="timelineAdvCanvas" height="90" style="width:100%;display:block;cursor:pointer;"></canvas>
-        <canvas id="timelineHpCanvas" height="65" style="width:100%;display:block;cursor:pointer;"></canvas>
+        <div id="contribTypeSummary" style="font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); background:rgba(15,23,42,0.55); border:1px solid rgba(51,65,85,0.5); border-radius:4px; padding:3px 6px; line-height:1.35;">
+          Select an SAE feature above or a field layer z0..z15 on the map to inspect the units driving that activation.
+        </div>
+        <div class="scroll-box" style="flex:1; max-height:none;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Unit</th>
+                <th>Own</th>
+                <th id="contribColAct">Act f_u</th>
+                <th id="contribColWt">Field m·f</th>
+                <th>d(-A₁)</th>
+                <th>Order</th>
+              </tr>
+            </thead>
+            <tbody id="contribUnitsTableBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
-    <!-- RIGHT COLUMN: KPI Strip + 3 Deep Inspection Tabs (Panels 3, 4, 5) -->
-    <div class="col-right">
+    <!-- ================================================================== -->
+    <!-- CENTER COLUMN: KPI Strip + Hero 2D Battlefield Map + Timeline      -->
+    <!-- ================================================================== -->
+    <div class="col-center">
       <!-- KPI Strip -->
       <div class="kpi-strip">
         <div class="kpi-card">
@@ -589,18 +615,144 @@
         </div>
       </div>
 
+      <!-- PANEL 1: Hero 2D Map & Battlefield Canvas -->
+      <div class="panel" style="flex:1; min-height:0;">
+        <div class="panel-header">
+          <span class="panel-title">1. 2D Battlefield Map &amp; Potential Field Overlay</span>
+          <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+            <button id="btnDeselectUnitMap" style="padding:2px 6px; font-size:10.5px; display:none;" title="Deselect active unit (or click empty space on map)">✕ Deselect Unit</button>
+            <button id="btnClearOverlayMap" style="padding:2px 6px; font-size:10.5px; display:none;" title="Reset soloed SAE / Field Layer back to All 16D">✕ Reset Layer/SAE</button>
+            <select id="unitColorMode" title="Unit Color &amp; Halo Attribution">
+              <option value="owner">Units: Owner + Marginal Halo</option>
+              <option value="field_dim">Units: Active Field Layer z_k / SAE Feature</option>
+              <option value="marginal">Units: Marginal d(-A₁)/dw_i</option>
+              <option value="mass">Units: Learned Mass m_u = ||z_u||₂</option>
+              <option value="gram_mode">Units: Active Field / SVD Mode</option>
+              <option value="pca_rgb">Units: Layer l 3D PCA → RGB</option>
+              <option value="cos_sim">Units: Cosine Sim to Selected</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Potential Field Overlay & Layer (Dimension / SAE) Inspector Bar -->
+        <div class="field-layer-bar">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:5px; flex-wrap:wrap;">
+            <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+              <span style="font-size:10.5px; font-weight:700; color:#a5b4fc; text-transform:uppercase;">Field:</span>
+              <select id="mapBgMode" title="Select which 2D Spatial Field to overlay on top of the terrain" style="font-size:11px; padding:2px 5px;">
+                <option value="diff" selected>P1 − P2 Field: F₁(x,y) − F₂(x,y)</option>
+                <option value="p1">Player 1 Field: F₁(x,y)</option>
+                <option value="p2">Player 2 Field: F₂(x,y)</option>
+                <option value="contest">Contest Overlap: F₁(x,y) · F₂(x,y)</option>
+                <option value="env">Neutral / Resource Field: F_env(x,y)</option>
+                <option value="kinetic">Kinetic Momentum Field: Π(x,y)</option>
+                <option value="terrain_v">Terrain CNN Field: V_loc(x,y)</option>
+                <option value="terrain">Off (Terrain + Fog + Creep Only)</option>
+              </select>
+              <select id="fieldCombineMode" title="How to combine multiple selected dimensions" style="font-size:11px; padding:2px 5px;">
+                <option value="l2" selected>Multi: L2 ||F||</option>
+                <option value="signed">Multi: Sum ΣF</option>
+              </select>
+              <select id="saeMapSelect" title="Overlay a monosemantic Top-K Sparse Autoencoder (SAE) feature onto the 2D map instead of raw z0..z15 channels" style="font-size:11px; padding:2px 5px; max-width:215px; border-color:#818cf8; color:#e0e7ff;">
+                <option value="-1">SAE Overlay: Off (Use z0..z15)</option>
+              </select>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center; font-size:11px; color:var(--text-secondary);">
+              <label title="Blend opacity of the Potential Field overlay over the map terrain" style="display:flex;align-items:center;gap:3px;">
+                <span>Alpha</span>
+                <input type="range" id="fieldAlphaSlider" min="15" max="95" value="72" style="width:50px; accent-color:#6366f1; cursor:pointer;" />
+              </label>
+              <label title="Draw iso-potential contour lines on the 2D field overlay" style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                <input type="checkbox" id="chkFieldContours" checked />Contours
+              </label>
+            </div>
+          </div>
+
+          <div class="field-dim-pills" id="dimPillsWrap">
+            <span style="font-size:10.5px; color:var(--text-secondary); margin-right:1px;">Layers:</span>
+            <button class="dim-pill" id="dimPillOff" data-dim="off" title="Turn Potential Field Overlay Off (Terrain only)">✕ Off</button>
+            <button class="dim-pill active" id="dimPillAll" data-dim="all" title="Inspect all non-negative field dimensions combined">
+              <span id="dimPillAllLabel">All 16D</span>
+              <div class="dim-pill-bar"><div class="dim-pill-fill" style="width:100%;"></div></div>
+            </button>
+            <button class="dim-pill" data-dim="0" title="Click to isolate field layer z0 (click again to deselect)">z0<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill0"></div></div></button>
+            <button class="dim-pill" data-dim="1" title="Click to isolate field layer z1 (click again to deselect)">z1<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill1"></div></div></button>
+            <button class="dim-pill" data-dim="2" title="Click to isolate field layer z2 (click again to deselect)">z2<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill2"></div></div></button>
+            <button class="dim-pill" data-dim="3" title="Click to isolate field layer z3 (click again to deselect)">z3<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill3"></div></div></button>
+            <button class="dim-pill" data-dim="4" title="Click to isolate field layer z4 (click again to deselect)">z4<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill4"></div></div></button>
+            <button class="dim-pill" data-dim="5" title="Click to isolate field layer z5 (click again to deselect)">z5<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill5"></div></div></button>
+            <button class="dim-pill" data-dim="6" title="Click to isolate field layer z6 (click again to deselect)">z6<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill6"></div></div></button>
+            <button class="dim-pill" data-dim="7" title="Click to isolate field layer z7 (click again to deselect)">z7<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill7"></div></div></button>
+            <button class="dim-pill" data-dim="8" title="Click to isolate field layer z8 (click again to deselect)">z8<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill8"></div></div></button>
+            <button class="dim-pill" data-dim="9" title="Click to isolate field layer z9 (click again to deselect)">z9<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill9"></div></div></button>
+            <button class="dim-pill" data-dim="10" title="Click to isolate field layer z10 (click again to deselect)">z10<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill10"></div></div></button>
+            <button class="dim-pill" data-dim="11" title="Click to isolate field layer z11 (click again to deselect)">z11<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill11"></div></div></button>
+            <button class="dim-pill" data-dim="12" title="Click to isolate field layer z12 (click again to deselect)">z12<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill12"></div></div></button>
+            <button class="dim-pill" data-dim="13" title="Click to isolate field layer z13 (click again to deselect)">z13<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill13"></div></div></button>
+            <button class="dim-pill" data-dim="14" title="Click to isolate field layer z14 (click again to deselect)">z14<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill14"></div></div></button>
+            <button class="dim-pill" data-dim="15" title="Click to isolate field layer z15 (click again to deselect)">z15<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill15"></div></div></button>
+            <label title="When checked, clicking z0..z15 toggles multiple dimensions on/off instead of soloing a single dimension" style="display:flex;align-items:center;gap:3px;font-size:10.5px;color:#c084fc;margin-left:auto;cursor:pointer;user-select:none;">
+              <input type="checkbox" id="chkMultiDim" />+Multi
+            </label>
+          </div>
+
+          <div id="fieldLayerSummary" style="font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; border-top:1px solid rgba(51,65,85,0.45); padding-top:4px;">
+            <span>Click any layer <b>z0..z15</b> or select an <b>SAE Feature</b> on the left to inspect its 2D potential field &amp; unit loadings</span>
+          </div>
+        </div>
+
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="chkAttnRays" checked />2D-RoPE Attn Rays</label>
+          <label><input type="checkbox" id="chkForceAdv" checked />Force -∇A₁</label>
+          <label><input type="checkbox" id="chkForceKin" />Force ∇T</label>
+          <label><input type="checkbox" id="chkS2MA" checked />.s2ma AirBlockers/Shrines</label>
+          <label style="display:none;"><input type="checkbox" id="chkAnchors" />Anchors</label>
+          <label style="color:#c084fc;font-weight:600;"><input type="checkbox" id="chkDragMove" />Drag Unit (What-If)</label>
+          <button id="btnResetView" style="padding:1px 6px;font-size:11px;margin-left:auto;">Reset Zoom</button>
+        </div>
+
+        <div class="map-wrap">
+          <canvas id="mapCanvas"></canvas>
+          <div id="mapOverlayTop" class="map-overlay-pill">Loading...</div>
+          <div id="mapOverlayBottom" class="map-legend-pill">
+            <span id="mapCursorInfo">Click unit to select • Click empty space or selected unit to deselect</span>
+            <span id="mapModeLegend" style="font-family:var(--font-mono);color:var(--text-secondary);">P1: Blue | P2: Rose | NFZ: Magenta</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- PANEL 2: Multi-Scale Timeline Scrubber -->
+      <div class="panel" style="height:185px;">
+        <div class="panel-header">
+          <span class="panel-title">2. Multi-Scale Hamiltonian Timeline (L1 0.6s + L2 5.0s)</span>
+          <div style="display:flex; gap:10px; font-size:11px; color:var(--text-secondary);">
+            <span><b style="color:#38bdf8;">━</b> -A₁(L1)</span>
+            <span><b style="color:#a78bfa;">━</b> -A₁(L2)</span>
+            <span><b style="color:#10b981;">━</b> -A₁(Total)</span>
+            <span>Click chart to seek</span>
+          </div>
+        </div>
+        <canvas id="timelineAdvCanvas" height="76" style="width:100%;display:block;cursor:pointer;"></canvas>
+        <canvas id="timelineHpCanvas" height="54" style="width:100%;display:block;cursor:pointer;"></canvas>
+      </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <!-- RIGHT COLUMN: 3 Deep Inspection Tabs (Panels 3, 4, 5)              -->
+    <!-- ================================================================== -->
+    <div class="col-right">
       <!-- Navigation Tabs for Panels 3, 4, 5 -->
       <div class="tab-bar">
-        <button class="tab-btn active" data-tab="tabGram">3. Continuous Field Overlaps &amp; Mode Explorer</button>
-        <button class="tab-btn" data-tab="tabAttn">4. Transformer Layers (0..5) &amp; Attention</button>
-        <button class="tab-btn" data-tab="tabPhd">5. Port-Hamiltonian Flow &amp; Counterfactuals</button>
+        <button class="tab-btn active" data-tab="tabGram">3. Field Overlaps &amp; Modes</button>
+        <button class="tab-btn" data-tab="tabAttn">4. Transformer &amp; 7-Layer SAE</button>
+        <button class="tab-btn" data-tab="tabPhd">5. Port-Hamiltonian &amp; What-If</button>
       </div>
 
       <!-- TAB 3: CONTINUOUS FIELD OVERLAPS & SPECTRAL EXPLORER -->
       <div id="tabGram" class="tab-pane active panel">
         <div class="panel-header">
-          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-            <span class="panel-title">Continuous Field Overlaps &amp; Back-Projection</span>
+          <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+            <span class="panel-title">Field Overlaps &amp; Kernels</span>
             <select id="gramOwnerSelect">
               <option value="p1">Owner: Player 1</option>
               <option value="p2">Owner: Player 2</option>
@@ -633,13 +785,14 @@
             </select>
             <button id="btnGramResetZoom" style="padding:2px 7px;font-size:11px;" title="Reset matrix zoom &amp; pan (Scroll wheel to zoom in)">1× Zoom</button>
             <button id="btnGramExpand" style="padding:2px 7px;font-size:11px;" title="Toggle full-panel matrix view">⛶ Expand</button>
+            <button id="btnGramClearMode" style="padding:2px 6px;font-size:10.5px;display:none;" class="danger" title="Clear active Gram cell / SVD mode">✕ Mode</button>
           </div>
-          <span id="gramCellBadge" class="badge">Click any cell (a,b) or eigenmode k to project onto map</span>
+          <span id="gramCellBadge" class="badge">Click cell (a,b) or bar σ_k to project (click again to deselect)</span>
         </div>
 
         <div id="gramLayout" class="gram-layout">
           <!-- Left: Large Interactive Matrix Canvas (supports Scroll Zoom + Drag Pan + Loupe) -->
-          <div id="gramCard" class="card-box" style="align-items:center;justify-content:center;min-height:520px;min-width:0;position:relative;overflow:hidden;">
+          <div id="gramCard" class="card-box" style="align-items:center;justify-content:center;min-height:260px;min-width:0;position:relative;overflow:hidden;">
             <div id="gramCanvasWrap" style="width:100%;flex:1;min-height:0;min-width:0;overflow:hidden;display:flex;align-items:center;justify-content:center;">
               <canvas id="gramCanvas" style="cursor:crosshair;display:block;"></canvas>
             </div>
@@ -704,7 +857,8 @@
         <div class="panel-header">
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
             <span class="panel-title">Spatiotemporal Block Inspector</span>
-            <select id="tokenSelect" style="max-width:190px;" title="Selected Token"></select>
+            <select id="tokenSelect" style="max-width:170px;" title="Selected Token"></select>
+            <button id="btnTokDeselect" style="padding:2px 6px;font-size:11px;" title="Deselect active token / unit">✕ None</button>
             <button id="btnTokCLS" style="padding:2px 6px;font-size:11px;">[CLS]</button>
             <button id="btnTokP1" style="padding:2px 6px;font-size:11px;color:var(--p1);">[P1]</button>
             <button id="btnTokP2" style="padding:2px 6px;font-size:11px;color:var(--p2);">[P2]</button>
@@ -851,8 +1005,9 @@ let FRAME = null;
 let TOKEN_DETAILS = null;
 
 let SELECTED_UNIT_ROW = null;
-let SELECTED_TOK_IDX = 0; // default [CLS]
-let ACTIVE_GRAM_CELL = [0, 0]; // default (z0, z0) in r x r F_self
+let SELECTED_TOK_IDX = null; // null when deselected
+let USER_DESELECTED_UNIT = true; // default to no unit selected so map isn't cluttered until clicked
+let ACTIVE_GRAM_CELL = null; // null when deselected, or [i, j]
 let ACTIVE_GRAM256_CELL = [0, 0]; // default (0, 0) in 256x256 / NxN / 8x256
 let GRAM_256_DATA = null;
 let ACTIVE_SVD_MODE = null; // 0..7 if eigenmode selected
@@ -1008,18 +1163,12 @@ async function loadFrame(gid, loop_t) {
     badge.style.borderColor = "var(--border-solid)";
     badge.style.color = "#10b981";
 
-    // Keep selected unit row if still alive, else pick highest marginal value unit
+    // Keep selected unit row if still alive; if deselected or dead, leave deselected!
     const aliveRows = new Set(FRAME.units.map(u => u.row));
-    if (SELECTED_UNIT_ROW === null || !aliveRows.has(SELECTED_UNIT_ROW)) {
-      if (FRAME.units.length > 0) {
-        let bestU = FRAME.units[0];
-        FRAME.units.forEach(u => {
-          if (Math.abs(u.marginal_adv) > Math.abs(bestU.marginal_adv)) bestU = u;
-        });
-        SELECTED_UNIT_ROW = bestU.row;
-        SELECTED_TOK_IDX = bestU.tok_idx;
-      }
-    } else {
+    if (SELECTED_UNIT_ROW !== null && !aliveRows.has(SELECTED_UNIT_ROW)) {
+      SELECTED_UNIT_ROW = null;
+      SELECTED_TOK_IDX = null;
+    } else if (SELECTED_UNIT_ROW !== null) {
       const u = FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
       if (u) SELECTED_TOK_IDX = u.tok_idx;
     }
@@ -1042,6 +1191,10 @@ async function loadFrame(gid, loop_t) {
 }
 
 async function fetchTokenDetails(tokIdx) {
+  if (tokIdx === null || tokIdx === undefined || tokIdx < 0) {
+    TOKEN_DETAILS = null;
+    return;
+  }
   const layer = parseInt(document.getElementById("layerSelect").value, 10);
   const head = parseInt(document.getElementById("headSelect").value, 10);
   const res = await fetch(`/api/token/${tokIdx}?layer=${layer}&head=${head}`);
@@ -1084,6 +1237,11 @@ async function fetchGram256() {
 function populateTokenSelect() {
   const sel = document.getElementById("tokenSelect");
   sel.innerHTML = "";
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "-1";
+  noneOpt.textContent = "— None (Deselected) —";
+  if (SELECTED_TOK_IDX === null || SELECTED_TOK_IDX < 0) noneOpt.selected = true;
+  sel.appendChild(noneOpt);
   if (!FRAME) return;
   FRAME.tokens.forEach(t => {
     const opt = document.createElement("option");
@@ -1096,16 +1254,434 @@ function populateTokenSelect() {
 }
 
 // ============================================================================
+// DESELECTION & SELECTION HELPERS
+// ============================================================================
+async function selectUnitOrToken(unitRow, tokIdx) {
+  SELECTED_UNIT_ROW = unitRow;
+  SELECTED_TOK_IDX = tokIdx;
+  const tSel = document.getElementById("tokenSelect");
+  if (tSel) tSel.value = tokIdx !== null ? String(tokIdx) : "-1";
+  await fetchTokenDetails(SELECTED_TOK_IDX);
+  renderAll();
+}
+
+function deselectUnit() {
+  SELECTED_UNIT_ROW = null;
+  SELECTED_TOK_IDX = null;
+  TOKEN_DETAILS = null;
+  const tSel = document.getElementById("tokenSelect");
+  if (tSel) tSel.value = "-1";
+  const cMode = document.getElementById("unitColorMode");
+  if (cMode && cMode.value === "cos_sim") cMode.value = "owner";
+  renderAll();
+}
+
+function clearOverlaySelection() {
+  const rDim = getRDim();
+  ACTIVE_SAE_FID = -1;
+  const saeSel = document.getElementById("saeMapSelect");
+  if (saeSel) saeSel.value = "-1";
+  ACTIVE_FIELD_DIMS = new Set(Array.from({ length: rDim }, (_, i) => i));
+  const bgSel = document.getElementById("mapBgMode");
+  if (bgSel && bgSel.value === "terrain") bgSel.value = "diff";
+  renderAll();
+}
+
+function clearGramModeSelection() {
+  ACTIVE_GRAM_CELL = null;
+  ACTIVE_SVD_MODE = null;
+  ACTIVE_L2_BASIS = -1;
+  const l2Sel = document.getElementById("l2BasisSelect");
+  if (l2Sel) l2Sel.value = "-1";
+  const cMode = document.getElementById("unitColorMode");
+  if (cMode && cMode.value === "gram_mode") cMode.value = "owner";
+  const badge = document.getElementById("gramCellBadge");
+  if (badge) badge.textContent = "Click cell (a,b) or bar σ_k to project (click again to deselect)";
+  renderAll();
+}
+
+function resetAllSelections() {
+  SELECTED_UNIT_ROW = null;
+  SELECTED_TOK_IDX = null;
+  TOKEN_DETAILS = null;
+  const tSel = document.getElementById("tokenSelect");
+  if (tSel) tSel.value = "-1";
+  ACTIVE_SAE_FID = -1;
+  const saeSel = document.getElementById("saeMapSelect");
+  if (saeSel) saeSel.value = "-1";
+  const rDim = getRDim();
+  ACTIVE_FIELD_DIMS = new Set(Array.from({ length: rDim }, (_, i) => i));
+  ACTIVE_GRAM_CELL = null;
+  ACTIVE_SVD_MODE = null;
+  ACTIVE_L2_BASIS = -1;
+  const l2Sel = document.getElementById("l2BasisSelect");
+  if (l2Sel) l2Sel.value = "-1";
+  const cMode = document.getElementById("unitColorMode");
+  if (cMode && (cMode.value === "gram_mode" || cMode.value === "cos_sim")) cMode.value = "owner";
+  const bgSel = document.getElementById("mapBgMode");
+  if (bgSel && bgSel.value === "terrain") bgSel.value = "diff";
+  renderAll();
+}
+
+// ============================================================================
 // RENDER ORCHESTRATION
 // ============================================================================
 function renderAll() {
   if (!FRAME) return;
   renderKPIs();
+  renderSelectionBar();
+  renderSaeExplorerPanel();
+  renderContributingUnitsPanel();
   renderMap();
   renderTimeline();
   renderGramPanel();
   renderAttnPanel();
   renderPhdPanel();
+}
+
+function summarizeSaeFeatureOnFrame(f) {
+  if (!FRAME || !FRAME.units || !f || !f.unit_acts) {
+    return { liveShort: cleanSaeLabel(f ? f.label : ""), p1Str: "—", p2Str: "—", neuStr: "—", list: [] };
+  }
+  const byTypeAll = {};
+  const p1C = {}, p2C = {}, neuC = {};
+  const list = [];
+  let totalWt = 0.0;
+  FRAME.units.forEach(u => {
+    const act = f.unit_acts[u.row] || 0;
+    if (act > 1e-4) {
+      const wt = (f.unit_weights && f.unit_weights[u.row] !== undefined)
+        ? f.unit_weights[u.row]
+        : (u.mass || 1.0) * act;
+      totalWt += wt;
+      byTypeAll[u.name] = (byTypeAll[u.name] || 0) + 1;
+      if (u.owner === 1) p1C[u.name] = (p1C[u.name] || 0) + 1;
+      else if (u.owner === 2) p2C[u.name] = (p2C[u.name] || 0) + 1;
+      else neuC[u.name] = (neuC[u.name] || 0) + 1;
+      list.push({ u, act, wt });
+    }
+  });
+  const fmtMap = (obj, lim = 3) =>
+    Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, lim).map(([k, v]) => `${k}(${v})`).join(", ");
+  const liveShort = fmtMap(byTypeAll, 2) || cleanSaeLabel(f.label);
+  return {
+    liveShort,
+    p1Str: fmtMap(p1C, 3) || "—",
+    p2Str: fmtMap(p2C, 3) || "—",
+    neuStr: fmtMap(neuC, 2) || "—",
+    totalWt: Math.max(1e-6, totalWt),
+    list
+  };
+}
+
+function renderSelectionBar() {
+  if (!FRAME) return;
+  const rDim = getRDim();
+  const dims = getSortedActiveDims();
+  const isAllDims = dims.length === rDim;
+  const saeFeat = getActiveSAEFeature();
+  const bgMode = document.getElementById("mapBgMode").value;
+
+  // 1. Unit / Token chip
+  const chipUnit = document.getElementById("selChipUnit");
+  const btnULeft = document.getElementById("btnDeselectUnitLeft");
+  const btnUMap = document.getElementById("btnDeselectUnitMap");
+  if (SELECTED_UNIT_ROW !== null) {
+    const u = FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
+    chipUnit.textContent = u ? `Unit: P${u.owner} ${u.name} #${u.row} ✕` : `Unit: #${SELECTED_UNIT_ROW} ✕`;
+    chipUnit.classList.add("active");
+    if (btnULeft) btnULeft.style.display = "";
+    if (btnUMap) btnUMap.style.display = "";
+  } else if (SELECTED_TOK_IDX !== null && SELECTED_TOK_IDX >= 0) {
+    const t = FRAME.tokens.find(x => x.tok_idx === SELECTED_TOK_IDX);
+    chipUnit.textContent = t ? `Token: ${t.label} ✕` : `Token #${SELECTED_TOK_IDX} ✕`;
+    chipUnit.classList.add("active");
+    if (btnULeft) btnULeft.style.display = "";
+    if (btnUMap) btnUMap.style.display = "";
+  } else {
+    chipUnit.textContent = "Unit: None";
+    chipUnit.classList.remove("active");
+    if (btnULeft) btnULeft.style.display = "none";
+    if (btnUMap) btnUMap.style.display = "none";
+  }
+
+  // 2. Overlay chip (SAE or Field Layer or Off)
+  const chipOvl = document.getElementById("selChipOverlay");
+  const btnSaeLeft = document.getElementById("btnClearSaeLeft");
+  const btnOvlMap = document.getElementById("btnClearOverlayMap");
+  if (bgMode === "terrain") {
+    chipOvl.textContent = "Field: Off ✕";
+    chipOvl.classList.add("active");
+    if (btnSaeLeft) btnSaeLeft.style.display = "none";
+    if (btnOvlMap) btnOvlMap.style.display = "";
+  } else if (saeFeat) {
+    const fCode = `F${String(saeFeat.fid).padStart(3, "0")}`;
+    chipOvl.textContent = `SAE: ${fCode} [${saeFeat.n_units}u] ✕`;
+    chipOvl.classList.add("active");
+    if (btnSaeLeft) btnSaeLeft.style.display = "";
+    if (btnOvlMap) btnOvlMap.style.display = "";
+  } else if (!isAllDims) {
+    chipOvl.textContent = `Layer: ${dims.map(d => "z" + d).join("+")} ✕`;
+    chipOvl.classList.add("active");
+    if (btnSaeLeft) btnSaeLeft.style.display = "none";
+    if (btnOvlMap) btnOvlMap.style.display = "";
+  } else {
+    chipOvl.textContent = `Field: All ${rDim}D`;
+    chipOvl.classList.remove("active");
+    if (btnSaeLeft) btnSaeLeft.style.display = "none";
+    if (btnOvlMap) btnOvlMap.style.display = "none";
+  }
+
+  // 3. Gram / SVD Mode chip
+  const chipMode = document.getElementById("selChipMode");
+  const btnGramClr = document.getElementById("btnGramClearMode");
+  if (ACTIVE_SVD_MODE !== null) {
+    chipMode.style.display = "inline-flex";
+    chipMode.textContent = `SVD: σ${ACTIVE_SVD_MODE} ✕`;
+    chipMode.classList.add("active");
+    if (btnGramClr) btnGramClr.style.display = "";
+  } else if (ACTIVE_L2_BASIS >= 0) {
+    chipMode.style.display = "inline-flex";
+    chipMode.textContent = `L2: W_c[${ACTIVE_L2_BASIS}] ✕`;
+    chipMode.classList.add("active");
+    if (btnGramClr) btnGramClr.style.display = "";
+  } else if (ACTIVE_GRAM_CELL !== null) {
+    const lbls = is8x8FieldMode() ? (FRAME.gram.labels_8 || []) : FRAME.gram.labels_16;
+    const [ia, ib] = ACTIVE_GRAM_CELL;
+    chipMode.style.display = "inline-flex";
+    chipMode.textContent = `Cell: (${lbls[ia] || ia},${lbls[ib] || ib}) ✕`;
+    chipMode.classList.add("active");
+    if (btnGramClr) btnGramClr.style.display = "";
+  } else {
+    chipMode.style.display = "none";
+    chipMode.classList.remove("active");
+    if (btnGramClr) btnGramClr.style.display = "none";
+  }
+}
+
+function renderSaeExplorerPanel() {
+  const tbody = document.getElementById("saeFeatureTableBody");
+  const badge = document.getElementById("saeFrameBadge");
+  if (!tbody || !FRAME || !FRAME.map) return;
+  const feats = FRAME.map.sae_features || [];
+  const r2Arr = FRAME.map.sae_layer_r2 || [];
+  const l6R2 = r2Arr.length > 0 ? ` • R²=${(r2Arr[r2Arr.length - 1] * 100).toFixed(0)}%` : "";
+  if (badge) badge.textContent = `${feats.length} active${l6R2}`;
+
+  tbody.innerHTML = "";
+  if (feats.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" style="color:var(--text-secondary);text-align:center;padding:12px;">No SAE features active on this frame.</td></tr>`;
+    return;
+  }
+
+  let maxTotW = 1e-6;
+  feats.forEach(f => {
+    const w = f.total_weight !== undefined ? f.total_weight : f.total_act;
+    if (w > maxTotW) maxTotW = w;
+  });
+
+  feats.forEach(f => {
+    const isSel = f.fid === ACTIVE_SAE_FID;
+    const tr = document.createElement("tr");
+    if (isSel) tr.classList.add("selected-row");
+    const fCode = `F${String(f.fid).padStart(3, "0")}`;
+    const info = summarizeSaeFeatureOnFrame(f);
+    const corpusLbl = cleanSaeLabel(f.label);
+    const wVal = f.total_weight !== undefined ? f.total_weight : f.total_act;
+    const wPct = Math.round(Math.min(100, (wVal / maxTotW) * 100));
+
+    tr.innerHTML = `
+      <td style="font-weight:700; color:${isSel ? '#c084fc' : '#a5b4fc'}; white-space:nowrap;">
+        ${fCode}${isSel ? ' <span style="color:#f87171;">✕</span>' : ''}
+      </td>
+      <td>
+        <div style="font-weight:600; color:#f1f5f9;">${info.liveShort}</div>
+        <div style="font-size:9.5px; color:var(--text-muted);">Corpus: ${corpusLbl}</div>
+      </td>
+      <td style="white-space:nowrap;">${f.n_units}u</td>
+      <td style="white-space:nowrap;">
+        <span>${wVal.toFixed(1)}</span>
+        <div class="bar-mini-wrap"><div class="bar-mini-fill" style="width:${wPct}%;"></div></div>
+      </td>
+    `;
+    tr.addEventListener("click", () => {
+      if (ACTIVE_SAE_FID === f.fid) {
+        // Toggle off (deselect)
+        ACTIVE_SAE_FID = -1;
+        const sel = document.getElementById("saeMapSelect");
+        if (sel) sel.value = "-1";
+      } else {
+        ACTIVE_SAE_FID = f.fid;
+        const sel = document.getElementById("saeMapSelect");
+        if (sel) sel.value = String(f.fid);
+        const bgSel = document.getElementById("mapBgMode");
+        if (bgSel && bgSel.value === "terrain") bgSel.value = "diff";
+      }
+      renderAll();
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function renderContributingUnitsPanel() {
+  const tbody = document.getElementById("contribUnitsTableBody");
+  const titleEl = document.getElementById("contribUnitsTitle");
+  const badgeEl = document.getElementById("contribCountBadge");
+  const sumEl = document.getElementById("contribTypeSummary");
+  const colActEl = document.getElementById("contribColAct");
+  const colWtEl = document.getElementById("contribColWt");
+  if (!tbody || !FRAME) return;
+
+  const ownFilterVal = document.getElementById("contribOwnerFilter").value;
+  const sortMode = document.getElementById("contribSortMode").value;
+  const ownFilter = ownFilterVal === "all" ? null : parseInt(ownFilterVal, 10);
+
+  const saeFeat = getActiveSAEFeature();
+  const rDim = getRDim();
+  const dims = getSortedActiveDims();
+  const isAllDims = dims.length === rDim;
+  const bgMode = document.getElementById("mapBgMode").value;
+
+  let rows = [];
+  let maxAct = 1e-6;
+  let totalWt = 1e-6;
+
+  if (saeFeat) {
+    // Mode 1: Units contributing to selected Layer-6 SAE Feature
+    const fCode = `F${String(saeFeat.fid).padStart(3, "0")}`;
+    const info = summarizeSaeFeatureOnFrame(saeFeat);
+    if (titleEl) titleEl.textContent = `Units in SAE ${fCode}`;
+    if (colActEl) colActEl.textContent = "SAE Act f_u";
+    if (colWtEl) colWtEl.textContent = "Field m·f (%)";
+
+    totalWt = info.totalWt;
+    info.list.forEach(({ u, act, wt }) => {
+      if (ownFilter !== null && u.owner !== ownFilter) return;
+      if (act > maxAct) maxAct = act;
+      rows.push({ u, act, wt, pct: (wt / totalWt) * 100.0, tag: "" });
+    });
+
+    if (badgeEl) badgeEl.textContent = `${rows.length} / ${saeFeat.n_units}u`;
+    if (sumEl) {
+      sumEl.innerHTML =
+        `<div><b style="color:#c084fc;">SAE ${fCode} Live Contributors</b> <span style="color:var(--text-muted)">(Corpus prototype: ${cleanSaeLabel(saeFeat.label)})</span></div>` +
+        `<div style="margin-top:2px;"><b style="color:#38bdf8;">P1:</b> ${info.p1Str} &nbsp;•&nbsp; <b style="color:#fb7185;">P2:</b> ${info.p2Str}` +
+        (info.neuStr !== "—" ? ` &nbsp;•&nbsp; <b style="color:#fbbf24;">Neu:</b> ${info.neuStr}` : "") +
+        `</div>`;
+    }
+  } else if (!isAllDims && bgMode !== "terrain") {
+    // Mode 2: Units contributing to isolated Field Layer(s) z_k
+    const dimTag = dims.map(d => `z${d}`).join("+");
+    if (titleEl) titleEl.textContent = `Units in Layer ${dimTag}`;
+    if (colActEl) colActEl.textContent = `Load ${dimTag}`;
+    if (colWtEl) colWtEl.textContent = "Field m·z (%)";
+
+    const p1C = {}, p2C = {};
+    FRAME.units.forEach(u => {
+      if (!u.z) return;
+      let zMean = 0.0;
+      dims.forEach(k => { zMean += u.z[k] || 0; });
+      zMean /= dims.length;
+      if (zMean > 0.02) {
+        const wt = (u.mass || 1.0) * zMean;
+        totalWt += wt;
+        if (u.owner === 1) p1C[u.name] = (p1C[u.name] || 0) + 1;
+        else if (u.owner === 2) p2C[u.name] = (p2C[u.name] || 0) + 1;
+        if (ownFilter === null || u.owner === ownFilter) {
+          if (zMean > maxAct) maxAct = zMean;
+          rows.push({ u, act: zMean, wt, pct: 0, tag: "" });
+        }
+      }
+    });
+    rows.forEach(r => { r.pct = (r.wt / totalWt) * 100.0; });
+    const fmtM = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v})`).join(", ") || "—";
+    if (badgeEl) badgeEl.textContent = `${rows.length}u`;
+    if (sumEl) {
+      sumEl.innerHTML =
+        `<div><b style="color:#a5b4fc;">Field Layer [${dimTag}] Contributors</b> (z_k &gt; 0.02)</div>` +
+        `<div style="margin-top:2px;"><b style="color:#38bdf8;">P1:</b> ${fmtM(p1C)} &nbsp;•&nbsp; <b style="color:#fb7185;">P2:</b> ${fmtM(p2C)}</div>`;
+    }
+  } else {
+    // Mode 3: All live units on map (with their top Layer-6 SAE feature badge!)
+    if (titleEl) titleEl.textContent = `Live Units on Map`;
+    if (colActEl) colActEl.textContent = "Top L6 SAE";
+    if (colWtEl) colWtEl.textContent = "Mass m_u";
+
+    FRAME.units.forEach(u => {
+      if (ownFilter !== null && u.owner !== ownFilter) return;
+      const topL6 = (u.sae_layers && u.sae_layers[6] && u.sae_layers[6][0]) || null;
+      const act = topL6 ? topL6.act : 0.0;
+      const wt = u.mass || 0.0;
+      totalWt += wt;
+      if (act > maxAct) maxAct = act;
+      rows.push({ u, act, wt, pct: 0, topL6 });
+    });
+    rows.forEach(r => { r.pct = (r.wt / totalWt) * 100.0; });
+    if (badgeEl) badgeEl.textContent = `${rows.length}u`;
+    if (sumEl) {
+      sumEl.innerHTML =
+        `Showing all <b>${rows.length}</b> live units on map. Click any SAE feature above or field layer <b>z0..z${rDim - 1}</b> to filter to its contributing units, or click a unit row to select/deselect it.`;
+    }
+  }
+
+  // Sort rows
+  rows.sort((a, b) => {
+    if (sortMode === "act") return b.act - a.act;
+    if (sortMode === "marginal") return Math.abs(b.u.marginal_adv) - Math.abs(a.u.marginal_adv);
+    if (sortMode === "mass") return (b.u.mass || 0) - (a.u.mass || 0);
+    return b.wt - a.wt;
+  });
+
+  tbody.innerHTML = "";
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" style="color:var(--text-secondary);text-align:center;padding:12px;">No matching units on this frame.</td></tr>`;
+    return;
+  }
+
+  rows.slice(0, 80).forEach(r => {
+    const { u, act, wt, pct, topL6 } = r;
+    const isSel = u.row === SELECTED_UNIT_ROW;
+    const tr = document.createElement("tr");
+    if (isSel) tr.classList.add("selected-row");
+    const ownCol = u.owner === 1 ? "#38bdf8" : (u.owner === 2 ? "#fb7185" : "#fbbf24");
+    const ownTxt = u.owner === 1 ? "P1" : (u.owner === 2 ? "P2" : "Neu");
+    const barPct = Math.round(Math.min(100, (act / maxAct) * 100));
+
+    let actCellHtml = "";
+    if (!saeFeat && (isAllDims || bgMode === "terrain") && topL6) {
+      const fCode = `F${String(topL6.fid).padStart(3, "0")}`;
+      actCellHtml = `<span onclick="event.stopPropagation(); window.selectSaeFeatureOnMap(${topL6.fid});" title="Click to isolate SAE ${fCode} on map" style="cursor:pointer; color:#c084fc; font-weight:600; text-decoration:underline dotted;">${fCode} (${act.toFixed(1)})</span>`;
+    } else {
+      actCellHtml = `<span>${act.toFixed(2)}</span><div class="bar-mini-wrap"><div class="bar-mini-fill" style="width:${barPct}%;"></div></div>`;
+    }
+
+    const wtCellHtml = (!saeFeat && (isAllDims || bgMode === "terrain"))
+      ? `${wt.toFixed(2)}`
+      : `${wt.toFixed(2)} <span style="color:var(--text-muted);font-size:10px;">(${pct.toFixed(0)}%)</span>`;
+
+    tr.innerHTML = `
+      <td style="white-space:nowrap; font-weight:${isSel ? '700' : '400'};">
+        ${u.name} <span style="color:var(--text-muted)">#${u.row}</span>${isSel ? ' <span style="color:#f87171;">✕</span>' : ''}
+      </td>
+      <td style="color:${ownCol}; font-weight:600;">${ownTxt}</td>
+      <td style="white-space:nowrap;">${actCellHtml}</td>
+      <td style="white-space:nowrap;">${wtCellHtml}</td>
+      <td style="color:${u.marginal_adv >= 0 ? '#38bdf8' : '#fb7185'}; white-space:nowrap;">
+        ${u.marginal_adv >= 0 ? "+" : ""}${u.marginal_adv.toFixed(2)}
+      </td>
+      <td style="color:var(--text-secondary); max-width:75px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+        ${u.order_abil.split("/").pop()}
+      </td>
+    `;
+    tr.addEventListener("click", async () => {
+      if (SELECTED_UNIT_ROW === u.row) {
+        deselectUnit();
+      } else {
+        await selectUnitOrToken(u.row, u.tok_idx);
+      }
+    });
+    tbody.appendChild(tr);
+  });
 }
 
 function renderKPIs() {
@@ -1459,15 +2035,23 @@ function updateFieldLayerBar() {
   const allLbl = document.getElementById("dimPillAllLabel");
   if (allLbl) allLbl.textContent = `All ${rDim}D`;
 
+  const bgMode = document.getElementById("mapBgMode") ? document.getElementById("mapBgMode").value : "diff";
+  const isTerrain = bgMode === "terrain";
+
+  const offBtn = document.getElementById("dimPillOff");
+  if (offBtn) {
+    offBtn.classList.toggle("active", isTerrain);
+  }
+
   // Update active button classes and hide z8..z15 if rDim === 8
   const allBtn = document.getElementById("dimPillAll");
-  if (allBtn) allBtn.classList.toggle("active", !saeFeat && isAll);
+  if (allBtn) allBtn.classList.toggle("active", !isTerrain && !saeFeat && isAll);
   document.querySelectorAll(".dim-pill[data-dim]").forEach(btn => {
     const dAttr = btn.getAttribute("data-dim");
-    if (dAttr === "all") return;
+    if (dAttr === "all" || dAttr === "off") return;
     const dIdx = parseInt(dAttr, 10);
     btn.style.display = dIdx < rDim ? "" : "none";
-    btn.classList.toggle("active", !saeFeat && !isAll && ACTIVE_FIELD_DIMS.has(dIdx));
+    btn.classList.toggle("active", !isTerrain && !saeFeat && !isAll && ACTIVE_FIELD_DIMS.has(dIdx));
   });
 
   // Update mini energy bars on z0..z_{r-1} pills using F_self[k,k] (P1 + P2)
@@ -1815,11 +2399,34 @@ function renderMap() {
 
   const showForceAdv = document.getElementById("chkForceAdv").checked;
   const showForceKin = document.getElementById("chkForceKin").checked;
+  const saeFeat = getActiveSAEFeature();
 
   FRAME.units.forEach(u => {
     const [sx, sy, sc] = worldToCanvas(u.x, u.y, w, h);
     const rad = Math.max(3.2, Math.min(13.0, u.radius * sc * (u.structure ? 1.15 : 1.35)));
-    const isSel = u.row === SELECTED_UNIT_ROW || u.tok_idx === SELECTED_TOK_IDX;
+    const isSel = u.row === SELECTED_UNIT_ROW || (SELECTED_TOK_IDX !== null && u.tok_idx === SELECTED_TOK_IDX);
+
+    // SAE contributing unit activation
+    const saeAct = (saeFeat && saeFeat.unit_acts) ? (saeFeat.unit_acts[u.row] || 0) : 0;
+    const isSaeContributor = saeFeat && saeAct > 0.05;
+
+    ctx.save();
+    // Dim non-contributing units when an SAE feature is isolated so contributing units stand out!
+    if (saeFeat && !isSaeContributor && !isSel) {
+      ctx.globalAlpha = 0.32;
+    }
+
+    // Prominent glowing ring for units contributing to the active SAE feature
+    if (isSaeContributor) {
+      const actNorm = Math.min(1.0, saeAct / Math.max(0.1, saeFeat.max_act || 1.0));
+      ctx.strokeStyle = "#c084fc";
+      ctx.fillStyle = `rgba(192, 132, 252, ${0.15 + 0.30 * actNorm})`;
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rad + 3 + 6 * actNorm, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
 
     // Marginal advantage or mass halo
     if (colorMode === "owner" || colorMode === "marginal") {
@@ -1847,7 +2454,6 @@ function renderMap() {
     if (colorMode === "owner") {
       fillCol = u.owner === 1 ? "#38bdf8" : (u.owner === 2 ? "#fb7185" : "#fbbf24");
     } else if (colorMode === "field_dim") {
-      const saeFeat = getActiveSAEFeature();
       let zScore = 0;
       if (saeFeat && saeFeat.unit_acts) {
         zScore = (saeFeat.unit_acts[u.row] || 0) / Math.max(0.25, saeFeat.max_act || 1.0);
@@ -1893,8 +2499,8 @@ function renderMap() {
     }
 
     ctx.fillStyle = fillCol;
-    ctx.strokeStyle = isSel ? "#ffffff" : (u.flying ? "#e879f9" : "rgba(15, 23, 42, 0.85)");
-    ctx.lineWidth = isSel ? 2.5 : (u.flying ? 1.5 : 1.0);
+    ctx.strokeStyle = isSel ? "#ffffff" : (isSaeContributor ? "#c084fc" : (u.flying ? "#e879f9" : "rgba(15, 23, 42, 0.85)"));
+    ctx.lineWidth = isSel ? 2.8 : (isSaeContributor ? 2.0 : (u.flying ? 1.5 : 1.0));
 
     ctx.beginPath();
     if (u.structure) {
@@ -1941,6 +2547,7 @@ function renderMap() {
         ctx.stroke();
       }
     }
+    ctx.restore();
   });
 
   const s2maBadge = mp.s2ma && mp.s2ma.found_s2ma
@@ -2914,6 +3521,17 @@ document.querySelectorAll(".dim-pill[data-dim]").forEach(btn => {
     const dAttr = btn.getAttribute("data-dim");
     const isMulti = e.shiftKey || e.ctrlKey || e.metaKey || (document.getElementById("chkMultiDim") && document.getElementById("chkMultiDim").checked);
 
+    if (dAttr === "off") {
+      const bgSel = document.getElementById("mapBgMode");
+      if (bgSel) bgSel.value = "terrain";
+      ACTIVE_FIELD_DIMS = new Set();
+      ACTIVE_SAE_FID = -1;
+      const saeSel = document.getElementById("saeMapSelect");
+      if (saeSel) saeSel.value = "-1";
+      renderAll();
+      return;
+    }
+
     // Turn off SAE overlay when clicking a z_k layer pill
     ACTIVE_SAE_FID = -1;
     const saeSel = document.getElementById("saeMapSelect");
@@ -2933,7 +3551,12 @@ document.querySelectorAll(".dim-pill[data-dim]").forEach(btn => {
           ACTIVE_FIELD_DIMS.add(k);
         }
       } else {
-        ACTIVE_FIELD_DIMS = new Set([k]);
+        // If clicking a pill k that is already the ONLY active solo pill, toggle back to "All"
+        if (ACTIVE_FIELD_DIMS.size === 1 && ACTIVE_FIELD_DIMS.has(k)) {
+          ACTIVE_FIELD_DIMS = new Set(Array.from({ length: rDim }, (_, i) => i));
+        } else {
+          ACTIVE_FIELD_DIMS = new Set([k]);
+        }
       }
       // Sync Tab 3 active cell to (z_k, z_k) so the right-hand panel also reflects this layer
       ACTIVE_GRAM_CELL = [k, k];
@@ -2947,8 +3570,7 @@ document.querySelectorAll(".dim-pill[data-dim]").forEach(btn => {
       bgSel.value = "diff";
     }
 
-    renderMap();
-    renderGramPanel();
+    renderAll();
   });
 });
 
@@ -2957,8 +3579,12 @@ document.getElementById("btnResetView").addEventListener("click", () => {
   renderMap();
 });
 
-// Map Canvas Click / Drag / Zoom
+// Map Canvas Click / Drag / Zoom & Unit Deselection
 const mapCanvas = document.getElementById("mapCanvas");
+let mapMouseDownPos = [0, 0];
+let mapDragMoved = false;
+let mapPendingTarget = null;
+
 mapCanvas.addEventListener("wheel", e => {
   e.preventDefault();
   const factor = e.deltaY < 0 ? 1.15 : 0.87;
@@ -2972,6 +3598,9 @@ mapCanvas.addEventListener("mousedown", async e => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   dragStartMouse = [mx, my];
+  mapMouseDownPos = [mx, my];
+  mapDragMoved = false;
+  mapPendingTarget = null;
 
   // Find closest unit or field anchor within 14px
   let bestDist = 14.0;
@@ -3000,21 +3629,20 @@ mapCanvas.addEventListener("mousedown", async e => {
   }
 
   if (clickedUnit) {
-    SELECTED_UNIT_ROW = clickedUnit.row;
-    SELECTED_TOK_IDX = clickedUnit.tok_idx;
-    document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
     if (document.getElementById("chkDragMove").checked) {
+      SELECTED_UNIT_ROW = clickedUnit.row;
+      SELECTED_TOK_IDX = clickedUnit.tok_idx;
       isDraggingUnit = true;
+      await fetchTokenDetails(SELECTED_TOK_IDX);
+      renderAll();
+    } else {
+      mapPendingTarget = { type: "unit", unit: clickedUnit };
     }
-    await fetchTokenDetails(SELECTED_TOK_IDX);
-    renderAll();
   } else if (clickedTok !== null) {
-    SELECTED_TOK_IDX = clickedTok;
-    document.getElementById("tokenSelect").value = SELECTED_TOK_IDX;
-    await fetchTokenDetails(SELECTED_TOK_IDX);
-    renderAll();
+    mapPendingTarget = { type: "tok", tokIdx: clickedTok };
   } else {
     isDraggingMap = true;
+    mapPendingTarget = { type: "empty" };
   }
 });
 
@@ -3024,6 +3652,10 @@ mapCanvas.addEventListener("mousemove", e => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   const [wx, wy] = canvasToWorld(mx, my, rect.width, rect.height);
+
+  if (Math.hypot(mx - mapMouseDownPos[0], my - mapMouseDownPos[1]) > 4) {
+    mapDragMoved = true;
+  }
 
   if (isDraggingUnit && SELECTED_UNIT_ROW !== null) {
     const u = FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
@@ -3081,6 +3713,60 @@ window.addEventListener("mouseup", async e => {
     }
   }
   isDraggingMap = false;
+
+  // Click interaction (only when mouse didn't drag)
+  if (!mapDragMoved && mapPendingTarget) {
+    if (mapPendingTarget.type === "unit") {
+      const u = mapPendingTarget.unit;
+      if (SELECTED_UNIT_ROW === u.row) {
+        deselectUnit();
+      } else {
+        await selectUnitOrToken(u.row, u.tok_idx);
+      }
+    } else if (mapPendingTarget.type === "tok") {
+      const tok = mapPendingTarget.tokIdx;
+      if (SELECTED_TOK_IDX === tok) {
+        deselectUnit();
+      } else {
+        await selectUnitOrToken(null, tok);
+      }
+    } else if (mapPendingTarget.type === "empty") {
+      // Clicked on empty terrain without dragging -> deselect unit
+      if (SELECTED_UNIT_ROW !== null || SELECTED_TOK_IDX !== null) {
+        deselectUnit();
+      }
+    }
+  }
+  mapPendingTarget = null;
+});
+
+// Deselection Chip and Button Bindings
+const bindClick = (id, fn) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("click", fn);
+};
+
+bindClick("btnResetAllSelections", resetAllSelections);
+bindClick("selChipUnit", deselectUnit);
+bindClick("selChipOverlay", clearOverlaySelection);
+bindClick("selChipMode", clearGramModeSelection);
+bindClick("btnDeselectUnitLeft", deselectUnit);
+bindClick("btnDeselectUnitMap", deselectUnit);
+bindClick("btnClearSaeLeft", () => {
+  ACTIVE_SAE_FID = -1;
+  const s = document.getElementById("saeMapSelect");
+  if (s) s.value = "-1";
+  renderAll();
+});
+bindClick("btnClearOverlayMap", clearOverlaySelection);
+bindClick("btnGramClearMode", clearGramModeSelection);
+bindClick("btnTokDeselect", deselectUnit);
+
+// Escape key to reset all selections
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    resetAllSelections();
+  }
 });
 
 // Timeline Click-to-Seek
@@ -3167,6 +3853,11 @@ gramCanvas.addEventListener("click", async e => {
     const j = Math.floor(u * cols);
     const i = Math.floor(v * rows);
     if (i >= 0 && i < rows && j >= 0 && j < cols) {
+      if (ACTIVE_GRAM256_CELL && ACTIVE_GRAM256_CELL[0] === i && ACTIVE_GRAM256_CELL[1] === j) {
+        ACTIVE_GRAM256_CELL = null;
+        clearGramModeSelection();
+        return;
+      }
       ACTIVE_GRAM256_CELL = [i, j];
       ACTIVE_SVD_MODE = null;
       ACTIVE_L2_BASIS = -1;
@@ -3206,6 +3897,10 @@ gramCanvas.addEventListener("click", async e => {
   const j = Math.floor(u * dim);
   const i = Math.floor(v * dim);
   if (i >= 0 && i < dim && j >= 0 && j < dim) {
+    if (ACTIVE_GRAM_CELL && ACTIVE_GRAM_CELL[0] === i && ACTIVE_GRAM_CELL[1] === j) {
+      clearGramModeSelection();
+      return;
+    }
     ACTIVE_GRAM_CELL = [i, j];
     ACTIVE_SVD_MODE = null;
     ACTIVE_L2_BASIS = -1;
@@ -3280,6 +3975,10 @@ document.getElementById("svdCanvas").addEventListener("click", e => {
   const rect = e.currentTarget.getBoundingClientRect();
   const k = Math.floor(((e.clientX - rect.left - 10) / (rect.width - 20)) * 16);
   if (k >= 0 && k < 8) {
+    if (ACTIVE_SVD_MODE === k) {
+      clearGramModeSelection();
+      return;
+    }
     ACTIVE_SVD_MODE = k;
     ACTIVE_L2_BASIS = -1;
     document.getElementById("l2BasisSelect").value = "-1";
