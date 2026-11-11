@@ -2266,14 +2266,14 @@ class WorldModelInspector:
                                     base_c = self.ZERG_BUILD_COSTS.get(u_lower) or self._unit_costs.get(u_lower, (0, 0))
                                     mc = math.ceil(base_c[0] * 0.25)
                                     vc = math.ceil(base_c[1] * 0.25)
-                                    kills_list.append((loop_k, u_own, u_type, mc, vc))
+                                    kills_list.append((loop_k, u_own, u_type, mc, vc, True))
                                 elif u_lower == "baneling":
                                     # Baneling self-detonation in combat is a 100% combat loss
                                     c = self._unit_costs.get(u_lower, (50, 25))
-                                    kills_list.append((loop_k, u_own, u_type, c[0], c[1]))
+                                    kills_list.append((loop_k, u_own, u_type, c[0], c[1], False))
                             else:
                                 costs = self._unit_costs.get(u_type.lower(), (0, 0))
-                                kills_list.append((loop_k, u_own, u_type, costs[0], costs[1]))
+                                kills_list.append((loop_k, u_own, u_type, costs[0], costs[1], False))
                     kills_list.sort(key=lambda x: x[0])
                     kills = kills_list
                 except Exception as ex:
@@ -2410,11 +2410,17 @@ class WorldModelInspector:
 
             kills = cst_stats.get("kills")
             if kills is not None:
-                for loop_k, own, nm, mc, vc in kills:
+                for entry in kills:
+                    if len(entry) == 6:
+                        loop_k, own, nm, mc, vc, is_cancel = entry
+                    else:
+                        loop_k, own, nm, mc, vc = entry
+                        is_cancel = False
                     if loop_k <= loop_t:
-                        dead_groups[own][nm] += 1
                         min_lost[own - 1] += mc
                         vesp_lost[own - 1] += vc
+                        if not is_cancel:
+                            dead_groups[own][nm] += 1
             else:
                 # Fallback to CST stats if tracker events unavailable
                 mla = cst_stats.get("p_minerals_lost_army")

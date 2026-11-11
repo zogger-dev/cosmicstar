@@ -1130,7 +1130,7 @@
             <span>PLAYER</span>
           </div>
           <div class="esl-col-stat" style="color:#cbd5e1;" title="Supply (Used / Cap)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </div>
           <div class="esl-col-stat" style="color:#fde047;" title="Workers">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
@@ -1262,8 +1262,8 @@
           <div class="unit-row-bar p1" title="Player 1 Losses" style="height:48px;"></div>
           <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:0;">
             <div style="font-size:10px; font-weight:600; color:#fca5a5; display:flex; align-items:center; gap:8px;" id="p1LostHeader">
-              <span>⛏️ 0</span>
-              <span>🧪 0</span>
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-mineral-nobg.png" style="width:11px; height:11px;" alt="Minerals"/> 0</span>
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-gas-terran-nobg.png" style="width:11px; height:11px;" alt="Gas"/> 0</span>
               <span style="color:var(--text-muted); font-weight:400;">(Total: 0)</span>
             </div>
             <div class="cards-scroll-wrap" id="lostP1Cards">
@@ -1275,8 +1275,8 @@
           <div class="unit-row-bar p2" title="Player 2 Losses" style="height:48px;"></div>
           <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:0;">
             <div style="font-size:10px; font-weight:600; color:#93c5fd; display:flex; align-items:center; gap:8px;" id="p2LostHeader">
-              <span>⛏️ 0</span>
-              <span>🧪 0</span>
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-mineral-nobg.png" style="width:11px; height:11px;" alt="Minerals"/> 0</span>
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-gas-terran-nobg.png" style="width:11px; height:11px;" alt="Gas"/> 0</span>
               <span style="color:var(--text-muted); font-weight:400;">(Total: 0)</span>
             </div>
             <div class="cards-scroll-wrap" id="lostP2Cards">
@@ -2627,8 +2627,8 @@ function renderHUDAndForces() {
       const vespLost = (d.vespene_lost || 0).toLocaleString();
       const totLost = (d.resources_lost || 0).toLocaleString();
       hdr.innerHTML = `
-        <span title="Minerals Lost">⛏️ ${minLost}</span>
-        <span title="Vespene Gas Lost">🧪 ${vespLost}</span>
+        <span style="display:inline-flex; align-items:center; gap:3px;" title="Minerals Lost"><img src="/assets/icons/icon-mineral-nobg.png" style="width:11px; height:11px;" alt="Minerals"/> ${minLost}</span>
+        <span style="display:inline-flex; align-items:center; gap:3px;" title="Vespene Gas Lost"><img src="/assets/icons/icon-gas-terran-nobg.png" style="width:11px; height:11px;" alt="Gas"/> ${vespLost}</span>
         <span style="color:var(--text-muted); font-weight:400;" title="Total Resources Lost">(Total: ${totLost})</span>
       `;
     }
