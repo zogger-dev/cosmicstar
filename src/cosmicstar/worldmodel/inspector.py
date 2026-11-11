@@ -275,7 +275,35 @@ class WorldModelInspector:
             "interceptor", "pointdefensedrone", "autoturret", "broodling",
             "broodlingescort", "locustmp", "locustmpflying", "disruptorphased",
             "parasiticbombdummy", "mule", "creeptumor", "creeptumorburrowed",
-            "creeptumorqueen",
+            "creeptumorqueen", "changeling", "changelingzealot", "changelingmarine",
+            "changelingmarineshield", "changelingzergling", "changelingzerglingwings",
+        }
+
+        # Structure names lookup
+        self._structure_names: set[str] = {
+            u["name"].lower()
+            for u in self.unit_meta.values()
+            if u.get("structure") and "name" in u
+        }
+
+        # Base building costs for Zerg structure cancellations (excluding the morphing drone)
+        self.ZERG_BUILD_COSTS: dict[str, tuple[int, int]] = {
+            "extractor": (25, 0),
+            "spawningpool": (200, 0),
+            "hatchery": (300, 0),
+            "evolutionchamber": (75, 0),
+            "roachwarren": (150, 0),
+            "banelingnest": (100, 50),
+            "hydraliskden": (100, 100),
+            "spire": (200, 200),
+            "greaterspire": (100, 150),
+            "ultraliskcavern": (150, 200),
+            "infestationpit": (100, 100),
+            "spinecrawler": (100, 0),
+            "sporecrawler": (75, 0),
+            "nydusnetwork": (150, 150),
+            "nyduscanal": (0, 0),
+            "lurkerdenmp": (100, 100),
         }
 
         # Ability name lookup (indexed by vocab ability index and raw ability id)
@@ -2224,14 +2252,28 @@ class WorldModelInspector:
                             k_pid = e.get("m_killerPlayerId")
                             k_idx = e.get("m_killerUnitTagIndex")
                             k_rec = e.get("m_killerUnitTagRecycle")
-                            # Exclude morphs (k_pid is None) and self-cancellations (k_idx == idx and k_rec == rec)
+                            # Exclude morphs (k_pid is None: Drone morphing to building, Larva to egg, HT to Archon, etc.)
                             if k_pid is None:
                                 continue
-                            if k_idx == idx and k_rec == rec:
-                                continue
+
                             loop_k = e["_gameloop"]
-                            costs = self._unit_costs.get(u_type.lower(), (0, 0))
-                            kills_list.append((loop_k, u_own, u_type, costs[0], costs[1]))
+                            is_cancel = (k_idx == idx and k_rec == rec)
+
+                            if is_cancel:
+                                # When a building is cancelled, 75% is refunded, losing 25% of building cost
+                                u_lower = u_type.lower()
+                                if u_lower in self._structure_names or u_lower in self.ZERG_BUILD_COSTS:
+                                    base_c = self.ZERG_BUILD_COSTS.get(u_lower) or self._unit_costs.get(u_lower, (0, 0))
+                                    mc = math.ceil(base_c[0] * 0.25)
+                                    vc = math.ceil(base_c[1] * 0.25)
+                                    kills_list.append((loop_k, u_own, u_type, mc, vc))
+                                elif u_lower == "baneling":
+                                    # Baneling self-detonation in combat is a 100% combat loss
+                                    c = self._unit_costs.get(u_lower, (50, 25))
+                                    kills_list.append((loop_k, u_own, u_type, c[0], c[1]))
+                            else:
+                                costs = self._unit_costs.get(u_type.lower(), (0, 0))
+                                kills_list.append((loop_k, u_own, u_type, costs[0], costs[1]))
                     kills_list.sort(key=lambda x: x[0])
                     kills = kills_list
                 except Exception as ex:
