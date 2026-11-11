@@ -518,6 +518,11 @@
             <span id="saeFrameBadge" class="badge" style="font-size:10px;">—</span>
           </div>
           <div style="display:flex; gap:4px; align-items:center;">
+            <select id="saeFeatFilter" style="font-size:10.5px; padding:1px 4px;" title="Filter SAE features list">
+              <option value="players" selected>Players (P1+P2)</option>
+              <option value="all">All Features</option>
+              <option value="resources">Resources Only</option>
+            </select>
             <button id="btnClearSaeLeft" style="padding:1px 6px; font-size:10.5px; display:none;" class="danger" title="Deselect active SAE feature">✕ Deselect SAE</button>
           </div>
         </div>
@@ -531,7 +536,7 @@
                 <th>Feat</th>
                 <th>Live Map Units (Current Frame)</th>
                 <th>Units</th>
-                <th>Σ m·f</th>
+                <th>P1+P2 Wt</th>
               </tr>
             </thead>
             <tbody id="saeFeatureTableBody"></tbody>
@@ -548,10 +553,11 @@
           </div>
           <div style="display:flex; gap:4px; align-items:center;">
             <select id="contribOwnerFilter" style="font-size:10.5px; padding:1px 4px;" title="Filter contributing units by owner">
-              <option value="all">All</option>
-              <option value="1">P1</option>
-              <option value="2">P2</option>
-              <option value="0">Neu</option>
+              <option value="players" selected>Players (P1+P2)</option>
+              <option value="all">All Units</option>
+              <option value="1">P1 Only</option>
+              <option value="2">P2 Only</option>
+              <option value="0">Neutrals / Minerals Only</option>
             </select>
             <select id="contribSortMode" style="font-size:10.5px; padding:1px 4px;" title="Sort contributing units">
               <option value="weight" selected>Sort: Field Wt m·f</option>
@@ -705,6 +711,8 @@
           <label><input type="checkbox" id="chkAttnRays" checked />2D-RoPE Attn Rays</label>
           <label><input type="checkbox" id="chkForceAdv" checked />Force -∇A₁</label>
           <label><input type="checkbox" id="chkForceKin" />Force ∇T</label>
+          <label title="Show or hide neutral mineral fields and geysers"><input type="checkbox" id="chkShowNeutrals" checked />Minerals</label>
+          <label title="Subtly dim neutral minerals so player army &amp; bases pop out"><input type="checkbox" id="chkDimNeutrals" checked />Dim Minerals</label>
           <label><input type="checkbox" id="chkS2MA" checked />.s2ma AirBlockers/Shrines</label>
           <label style="display:none;"><input type="checkbox" id="chkAnchors" />Anchors</label>
           <label style="color:#c084fc;font-weight:600;"><input type="checkbox" id="chkDragMove" />Drag Unit (What-If)</label>
@@ -1466,36 +1474,53 @@ function renderSaeExplorerPanel() {
   const feats = FRAME.map.sae_features || [];
   const r2Arr = FRAME.map.sae_layer_r2 || [];
   const l6R2 = r2Arr.length > 0 ? ` • R²=${(r2Arr[r2Arr.length - 1] * 100).toFixed(0)}%` : "";
-  if (badge) badge.textContent = `${feats.length} active${l6R2}`;
+
+  const featFilter = document.getElementById("saeFeatFilter") ? document.getElementById("saeFeatFilter").value : "players";
+  let displayFeats = feats;
+  if (featFilter === "players") {
+    displayFeats = feats.filter(f => (f.player_act !== undefined ? f.player_act >= 0.5 : (f.is_player !== false)));
+    if (displayFeats.length === 0) displayFeats = feats;
+  } else if (featFilter === "resources") {
+    displayFeats = feats.filter(f => (f.player_act !== undefined ? f.player_act < 0.5 : (f.is_player === false)));
+  }
+
+  if (badge) badge.textContent = `${displayFeats.length} / ${feats.length} active${l6R2}`;
 
   tbody.innerHTML = "";
-  if (feats.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" style="color:var(--text-secondary);text-align:center;padding:12px;">No SAE features active on this frame.</td></tr>`;
+  if (displayFeats.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" style="color:var(--text-secondary);text-align:center;padding:12px;">No matching SAE features on this frame.</td></tr>`;
     return;
   }
 
   let maxTotW = 1e-6;
-  feats.forEach(f => {
-    const w = f.total_weight !== undefined ? f.total_weight : f.total_act;
+  displayFeats.forEach(f => {
+    const w = (f.player_act !== undefined && f.player_act > 0) ? f.player_act : (f.total_weight !== undefined ? f.total_weight : f.total_act);
     if (w > maxTotW) maxTotW = w;
   });
 
-  feats.forEach(f => {
+  displayFeats.forEach(f => {
     const isSel = f.fid === ACTIVE_SAE_FID;
     const tr = document.createElement("tr");
     if (isSel) tr.classList.add("selected-row");
     const fCode = `F${String(f.fid).padStart(3, "0")}`;
     const info = summarizeSaeFeatureOnFrame(f);
     const corpusLbl = cleanSaeLabel(f.label);
-    const wVal = f.total_weight !== undefined ? f.total_weight : f.total_act;
+    const isPly = f.is_player !== false && (f.player_act === undefined || f.player_act >= 0.5);
+    const wVal = (f.player_act !== undefined && f.player_act > 0) ? f.player_act : (f.total_weight !== undefined ? f.total_weight : f.total_act);
     const wPct = Math.round(Math.min(100, (wVal / maxTotW) * 100));
+    const tagBadge = isPly
+      ? `<span style="font-size:9px; background:rgba(56,189,248,0.18); border:1px solid #38bdf8; border-radius:3px; padding:0 3px; color:#bae6fd;">Player</span>`
+      : `<span style="font-size:9px; background:rgba(251,191,36,0.14); border:1px solid #d97706; border-radius:3px; padding:0 3px; color:#fde68a;">Resource</span>`;
 
     tr.innerHTML = `
       <td style="font-weight:700; color:${isSel ? '#c084fc' : '#a5b4fc'}; white-space:nowrap;">
         ${fCode}${isSel ? ' <span style="color:#f87171;">✕</span>' : ''}
       </td>
       <td>
-        <div style="font-weight:600; color:#f1f5f9;">${info.liveShort}</div>
+        <div style="font-weight:600; color:#f1f5f9; display:flex; align-items:center; gap:4px;">
+          <span>${info.liveShort}</span>
+          ${tagBadge}
+        </div>
         <div style="font-size:9.5px; color:var(--text-muted);">Corpus: ${corpusLbl}</div>
       </td>
       <td style="white-space:nowrap;">${f.n_units}u</td>
@@ -1534,7 +1559,8 @@ function renderContributingUnitsPanel() {
 
   const ownFilterVal = document.getElementById("contribOwnerFilter").value;
   const sortMode = document.getElementById("contribSortMode").value;
-  const ownFilter = ownFilterVal === "all" ? null : parseInt(ownFilterVal, 10);
+  const isPlayerFilter = ownFilterVal === "players";
+  const ownFilter = (ownFilterVal === "all" || ownFilterVal === "players") ? null : parseInt(ownFilterVal, 10);
 
   const saeFeat = getActiveSAEFeature();
   const rDim = getRDim();
@@ -1556,6 +1582,7 @@ function renderContributingUnitsPanel() {
 
     totalWt = info.totalWt;
     info.list.forEach(({ u, act, wt }) => {
+      if (isPlayerFilter && u.owner !== 1 && u.owner !== 2) return;
       if (ownFilter !== null && u.owner !== ownFilter) return;
       if (act > maxAct) maxAct = act;
       rows.push({ u, act, wt, pct: (wt / totalWt) * 100.0, tag: "" });
@@ -1587,10 +1614,10 @@ function renderContributingUnitsPanel() {
         totalWt += wt;
         if (u.owner === 1) p1C[u.name] = (p1C[u.name] || 0) + 1;
         else if (u.owner === 2) p2C[u.name] = (p2C[u.name] || 0) + 1;
-        if (ownFilter === null || u.owner === ownFilter) {
-          if (zMean > maxAct) maxAct = zMean;
-          rows.push({ u, act: zMean, wt, pct: 0, tag: "" });
-        }
+        if (isPlayerFilter && u.owner !== 1 && u.owner !== 2) return;
+        if (ownFilter !== null && u.owner !== ownFilter) return;
+        if (zMean > maxAct) maxAct = zMean;
+        rows.push({ u, act: zMean, wt, pct: 0, tag: "" });
       }
     });
     rows.forEach(r => { r.pct = (r.wt / totalWt) * 100.0; });
@@ -1603,11 +1630,12 @@ function renderContributingUnitsPanel() {
     }
   } else {
     // Mode 3: All live units on map (with their top Layer-6 SAE feature badge!)
-    if (titleEl) titleEl.textContent = `Live Units on Map`;
+    if (titleEl) titleEl.textContent = isPlayerFilter ? `Player Units on Map (P1+P2)` : `Live Units on Map`;
     if (colActEl) colActEl.textContent = "Top L6 SAE";
     if (colWtEl) colWtEl.textContent = "Mass m_u";
 
     FRAME.units.forEach(u => {
+      if (isPlayerFilter && u.owner !== 1 && u.owner !== 2) return;
       if (ownFilter !== null && u.owner !== ownFilter) return;
       const topL6 = (u.sae_layers && u.sae_layers[6] && u.sae_layers[6][0]) || null;
       const act = topL6 ? topL6.act : 0.0;
@@ -1619,8 +1647,9 @@ function renderContributingUnitsPanel() {
     rows.forEach(r => { r.pct = (r.wt / totalWt) * 100.0; });
     if (badgeEl) badgeEl.textContent = `${rows.length}u`;
     if (sumEl) {
-      sumEl.innerHTML =
-        `Showing all <b>${rows.length}</b> live units on map. Click any SAE feature above or field layer <b>z0..z${rDim - 1}</b> to filter to its contributing units, or click a unit row to select/deselect it.`;
+      sumEl.innerHTML = isPlayerFilter
+        ? `Showing <b>${rows.length}</b> player army &amp; economy units. Switch filter to "All Units" to inspect neutral resources.`
+        : `Showing all <b>${rows.length}</b> live units on map. Click any SAE feature above or field layer <b>z0..z${rDim - 1}</b> to filter, or click a unit to inspect.`;
     }
   }
 
@@ -2393,27 +2422,46 @@ function renderMap() {
   let maxMargAbs = 1e-5;
   let maxMass = 1e-5;
   FRAME.units.forEach(u => {
-    if (Math.abs(u.marginal_adv) > maxMargAbs) maxMargAbs = Math.abs(u.marginal_adv);
-    if ((u.mass || 0) > maxMass) maxMass = u.mass;
+    if ((u.owner === 1 || u.owner === 2) && Math.abs(u.marginal_adv) > maxMargAbs) maxMargAbs = Math.abs(u.marginal_adv);
+    if ((u.owner === 1 || u.owner === 2) && (u.mass || 0) > maxMass) maxMass = u.mass;
   });
+  if (maxMargAbs <= 1e-5) {
+    FRAME.units.forEach(u => { if (Math.abs(u.marginal_adv) > maxMargAbs) maxMargAbs = Math.abs(u.marginal_adv); });
+  }
+  if (maxMass <= 1e-5) {
+    FRAME.units.forEach(u => { if ((u.mass || 0) > maxMass) maxMass = u.mass; });
+  }
 
   const showForceAdv = document.getElementById("chkForceAdv").checked;
   const showForceKin = document.getElementById("chkForceKin").checked;
+  const showNeutrals = document.getElementById("chkShowNeutrals") ? document.getElementById("chkShowNeutrals").checked : true;
+  const dimNeutrals = document.getElementById("chkDimNeutrals") ? document.getElementById("chkDimNeutrals").checked : true;
   const saeFeat = getActiveSAEFeature();
 
   FRAME.units.forEach(u => {
-    const [sx, sy, sc] = worldToCanvas(u.x, u.y, w, h);
-    const rad = Math.max(3.2, Math.min(13.0, u.radius * sc * (u.structure ? 1.15 : 1.35)));
+    const isNeutral = u.owner !== 1 && u.owner !== 2;
     const isSel = u.row === SELECTED_UNIT_ROW || (SELECTED_TOK_IDX !== null && u.tok_idx === SELECTED_TOK_IDX);
 
     // SAE contributing unit activation
     const saeAct = (saeFeat && saeFeat.unit_acts) ? (saeFeat.unit_acts[u.row] || 0) : 0;
     const isSaeContributor = saeFeat && saeAct > 0.05;
 
+    // Filter out neutral minerals if user unchecked "Minerals"
+    if (isNeutral && !showNeutrals && !isSel && !isSaeContributor) {
+      return;
+    }
+
+    const [sx, sy, sc] = worldToCanvas(u.x, u.y, w, h);
+    const baseRad = u.radius * sc * (u.structure ? 1.15 : (isNeutral ? 1.05 : 1.35));
+    const rad = Math.max(2.6, Math.min(13.0, baseRad));
+
     ctx.save();
     // Dim non-contributing units when an SAE feature is isolated so contributing units stand out!
     if (saeFeat && !isSaeContributor && !isSel) {
-      ctx.globalAlpha = 0.32;
+      ctx.globalAlpha = 0.30;
+    } else if (isNeutral && dimNeutrals && !isSel && !isSaeContributor) {
+      // Subtly dim background neutral mineral fields and rocks so player armies pop out
+      ctx.globalAlpha = 0.38;
     }
 
     // Prominent glowing ring for units contributing to the active SAE feature
@@ -2451,7 +2499,11 @@ function renderMap() {
 
     // Unit fill color based on selected mode
     let fillCol = "#fbbf24";
-    if (colorMode === "owner") {
+    const isMutedNeutral = isNeutral && dimNeutrals && !isSel && !isSaeContributor;
+
+    if (isMutedNeutral && colorMode === "owner") {
+      fillCol = "rgba(217, 119, 6, 0.35)";
+    } else if (colorMode === "owner") {
       fillCol = u.owner === 1 ? "#38bdf8" : (u.owner === 2 ? "#fb7185" : "#fbbf24");
     } else if (colorMode === "field_dim") {
       let zScore = 0;
@@ -2477,7 +2529,7 @@ function renderMap() {
       const t = Math.min(1.0, (u.mass || 0) / maxMass);
       fillCol = u.owner === 1
         ? `rgb(${Math.round(30 + 60*t)}, ${Math.round(120 + 115*t)}, 252)`
-        : (u.owner === 2 ? `rgb(252, ${Math.round(70 + 90*t)}, ${Math.round(100 + 80*t)})` : "#fbbf24");
+        : (u.owner === 2 ? `rgb(252, ${Math.round(70 + 90*t)}, ${Math.round(100 + 80*t)})` : "rgba(217, 119, 6, 0.4)");
     } else if (colorMode === "marginal") {
       const t = Math.max(-1, Math.min(1, u.marginal_adv / maxMargAbs));
       fillCol = t >= 0
@@ -2499,8 +2551,14 @@ function renderMap() {
     }
 
     ctx.fillStyle = fillCol;
-    ctx.strokeStyle = isSel ? "#ffffff" : (isSaeContributor ? "#c084fc" : (u.flying ? "#e879f9" : "rgba(15, 23, 42, 0.85)"));
-    ctx.lineWidth = isSel ? 2.8 : (isSaeContributor ? 2.0 : (u.flying ? 1.5 : 1.0));
+    ctx.strokeStyle = isSel
+      ? "#ffffff"
+      : (isSaeContributor
+        ? "#c084fc"
+        : (isMutedNeutral
+          ? "rgba(180, 83, 9, 0.35)"
+          : (u.flying ? "#e879f9" : "rgba(15, 23, 42, 0.85)")));
+    ctx.lineWidth = isSel ? 2.8 : (isSaeContributor ? 2.0 : (isMutedNeutral ? 0.7 : (u.flying ? 1.5 : 1.0)));
 
     ctx.beginPath();
     if (u.structure) {
@@ -3996,6 +4054,21 @@ document.getElementById("l2BasisSelect").addEventListener("change", e => {
     document.getElementById("gramCellBadge").textContent = `Active Layer 2 Learned Basis: W_c[:, ${ACTIVE_L2_BASIS}]`;
   }
   renderAll();
+});
+
+["saeFeatFilter"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", () => renderSaeExplorerPanel());
+});
+
+["contribOwnerFilter", "contribSortMode"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", () => renderContributingUnitsPanel());
+});
+
+["chkShowNeutrals", "chkDimNeutrals"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", () => renderMap());
 });
 
 ["gramOwnerSelect", "gramMatType"].forEach(id => {

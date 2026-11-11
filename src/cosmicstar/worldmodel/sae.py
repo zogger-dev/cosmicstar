@@ -235,13 +235,36 @@ class MultiLayerSAEStack(nn.Module):
             # and prioritize Player 1 & Player 2 owned units when ranking map features
             mass_u = z.float().norm(dim=-1, keepdim=True).clamp(min=0.2)  # [R, 1]
             f_weighted = f_full * mass_u  # [R, d_sae]
-            ply_w = torch.where((owner == 1) | (owner == 2), 1.0, 0.08).unsqueeze(-1)
-            rank_score = (f_weighted * ply_w).sum(dim=0)  # [d_sae]
-            tot_act = f_weighted.sum(dim=0)               # [d_sae]
+            ply_mask = ((owner == 1) | (owner == 2)).unsqueeze(-1).float()
+            neu_mask = (~((owner == 1) | (owner == 2))).unsqueeze(-1).float()
+            ply_act_vec = (f_weighted * ply_mask).sum(dim=0)  # [d_sae]
+            neu_act_vec = (f_weighted * neu_mask).sum(dim=0)  # [d_sae]
+            tot_act = f_weighted.sum(dim=0)                    # [d_sae]
 
-            n_pick = min(top_n_map_features, int((rank_score > 1e-3).sum().item()))
+            # Prioritize Player features: allocate top slots primarily to features driven by P1/P2,
+            # while still keeping active neutral resource features at the end
+            active_ply = torch.nonzero(ply_act_vec > 0.5).squeeze(-1)
+            k_ply = min(max(1, top_n_map_features - 3), len(active_ply))
+            top_fids_list = []
+            if k_ply > 0:
+                _, ply_top = torch.topk(ply_act_vec, k=k_ply)
+                top_fids_list.extend(ply_top.tolist())
+
+            # Fill remaining slots with top remaining features by total activation
+            rem_slots = top_n_map_features - len(top_fids_list)
+            if rem_slots > 0:
+                n_avail = min(top_n_map_features, int((tot_act > 1e-3).sum().item()))
+                if n_avail > 0:
+                    _, all_top = torch.topk(tot_act, k=n_avail)
+                    for f_cand in all_top.tolist():
+                        if f_cand not in top_fids_list:
+                            top_fids_list.append(f_cand)
+                        if len(top_fids_list) >= top_n_map_features:
+                            break
+
+            n_pick = len(top_fids_list)
             if n_pick > 0:
-                _, top_fids = torch.topk(rank_score, k=n_pick)
+                top_fids = torch.tensor(top_fids_list, dtype=torch.long, device=dev)
                 f_sub = f_weighted[:, top_fids]  # [R, n_pick]
 
                 # Evaluate 2D Polar Gauss-Rayleigh wave-packet fields for these n_pick SAE features
@@ -266,6 +289,8 @@ class MultiLayerSAEStack(nn.Module):
                         for r in live_rows
                         if f_full_np[r, fid] > 1e-3
                     }
+                    p_act_val = round(float(ply_act_vec[fid].item()), 2)
+                    neu_act_val = round(float(neu_act_vec[fid].item()), 2)
                     active_map_features.append(
                         {
                             "fid": fid,
@@ -274,6 +299,10 @@ class MultiLayerSAEStack(nn.Module):
                             "top_units": m_info.get("top_units", "—"),
                             "top_orders": m_info.get("top_orders", "—"),
                             "total_act": round(float(tot_act[fid].item()), 2),
+                            "player_act": p_act_val,
+                            "neu_act": neu_act_val,
+                            "is_player": bool(p_act_val >= 1.0 or p_act_val >= 0.25 * (p_act_val + neu_act_val)),
+                            "total_weight": p_act_val,
                             "max_act": round(max(u_acts.values(), default=0.0), 3),
                             "n_units": len(u_acts),
                             "n_active_units": len(u_acts),
