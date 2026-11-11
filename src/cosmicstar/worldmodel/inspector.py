@@ -2297,7 +2297,6 @@ class WorldModelInspector:
 
         # 2. Production queue (actively building slot 0 only!)
         from collections import defaultdict
-        prod = {"p1": [], "p2": []}
         pw_list = w.get("prod_where", [])
         pv_list = w.get("prod_vals", [])
         EXCLUDE_FROM_FORCES = {
@@ -2306,64 +2305,78 @@ class WorldModelInspector:
             "lurkeregg", "lurkermpcocoon",
             "broodlordcocoon", "overlordcocoon", "transportoverlordcocoon",
         }
-        for p_idx in [0, 1]:
-            owner_id = p_idx + 1
-            p_key = f"p{owner_id}"
-            wh = pw_list[p_idx] if p_idx < len(pw_list) else None
-            vl = pv_list[p_idx] if p_idx < len(pv_list) else None
-            groups = defaultdict(lambda: {"count": 0, "max_prog": 0.0, "category": "unit"})
-            if wh is not None and len(wh):
-                mask = (wh[:, 0] == f_curr) & (wh[:, 2] == 0)
-                for i in np.where(mask)[0]:
-                    raw_abil = int(vl[i, 0])
-                    prog = float(vl[i, 1])
-                    tok = self.vocab._abil.get(raw_abil) if hasattr(self.vocab, "_abil") else None
-                    ab_str = self.vocab_abil_name.get(tok, "") if tok is not None else ""
-                    raw_name, cat = self._parse_prod_abil_name(ab_str)
-                    if not raw_name:
-                        continue
-                    mult = 2 if raw_name.lower() == "zergling" else 1
-                    groups[raw_name]["count"] += mult
-                    groups[raw_name]["max_prog"] = max(groups[raw_name]["max_prog"], prog)
-                    groups[raw_name]["category"] = cat
+        unit_by_row = {u["row"]: u for u in units_out if "row" in u}
+        prod_groups = {
+            1: defaultdict(lambda: {"count": 0, "max_prog": 0.0, "category": "unit"}),
+            2: defaultdict(lambda: {"count": 0, "max_prog": 0.0, "category": "unit"}),
+        }
 
-            # Also check structures currently under construction
-            for u in units_out:
-                if u.get("owner") == owner_id and u.get("structure"):
-                    r = u.get("row")
-                    if r is not None and r < b["num"].shape[2]:
-                        bld = float(b["num"][0, f_curr, r, ED.I["build"]].item())
-                        if bld < 0.99:
-                            sname = u["name"]
-                            groups[sname]["count"] += 1
-                            groups[sname]["max_prog"] = max(groups[sname]["max_prog"], bld)
-                            groups[sname]["category"] = "structure"
+        # Iterate all production chunks and assign each order to its producer's true owner
+        for wh, vl in zip(pw_list, pv_list):
+            if wh is None or vl is None or len(wh) == 0:
+                continue
+            mask = (wh[:, 0] == f_curr) & (wh[:, 2] == 0)
+            for i in np.where(mask)[0]:
+                r = int(wh[i, 1])
+                owner = unit_by_row.get(r, {}).get("owner")
+                if owner is None and "owner" in b and r < b["owner"].shape[1]:
+                    raw_own = int(b["owner"][0, r].item())
+                    owner = 1 if raw_own == 0 else (2 if raw_own == 1 else 0)
+                if owner not in (1, 2):
+                    continue
+                raw_abil = int(vl[i, 0])
+                prog = float(vl[i, 1])
+                tok = self.vocab._abil.get(raw_abil) if hasattr(self.vocab, "_abil") else None
+                ab_str = self.vocab_abil_name.get(tok, "") if tok is not None else ""
+                raw_name, cat = self._parse_prod_abil_name(ab_str)
+                if not raw_name:
+                    continue
+                mult = 2 if raw_name.lower() == "zergling" else 1
+                prod_groups[owner][raw_name]["count"] += mult
+                prod_groups[owner][raw_name]["max_prog"] = max(prod_groups[owner][raw_name]["max_prog"], prog)
+                prod_groups[owner][raw_name]["category"] = cat
 
-            # Check eggs or cocoons currently morphing if not already captured
-            for u in units_out:
-                if u.get("owner") == owner_id and u.get("name", "").lower() in EXCLUDE_FROM_FORCES:
-                    target_abil = u.get("prod_abil") or u.get("order_abil")
-                    if target_abil and target_abil not in ("None", "Unknown"):
-                        t_name, t_cat = self._parse_prod_abil_name(target_abil)
-                        if t_name and t_name not in groups:
-                            r = u.get("row")
-                            bld = 0.0
-                            if r is not None and r < b["num"].shape[2]:
-                                bld = float(b["num"][0, f_curr, r, ED.I["build"]].item())
-                            mult = 2 if t_name.lower() == "zergling" else 1
-                            groups[t_name]["count"] += mult
-                            groups[t_name]["max_prog"] = max(groups[t_name]["max_prog"], bld)
-                            groups[t_name]["category"] = t_cat
+        # Also check structures currently under construction and morphing cocoons/eggs
+        for u in units_out:
+            own = u.get("owner")
+            if own not in (1, 2):
+                continue
+            if u.get("structure"):
+                r = u.get("row")
+                if r is not None and r < b["num"].shape[2]:
+                    bld = float(b["num"][0, f_curr, r, ED.I["build"]].item())
+                    if bld < 0.99:
+                        sname = u["name"]
+                        prod_groups[own][sname]["count"] += 1
+                        prod_groups[own][sname]["max_prog"] = max(prod_groups[own][sname]["max_prog"], bld)
+                        prod_groups[own][sname]["category"] = "structure"
 
+            if u.get("name", "").lower() in EXCLUDE_FROM_FORCES:
+                target_abil = u.get("prod_abil") or u.get("order_abil")
+                if target_abil and target_abil not in ("None", "Unknown"):
+                    t_name, t_cat = self._parse_prod_abil_name(target_abil)
+                    if t_name and t_name not in prod_groups[own]:
+                        r = u.get("row")
+                        bld = 0.0
+                        if r is not None and r < b["num"].shape[2]:
+                            bld = float(b["num"][0, f_curr, r, ED.I["build"]].item())
+                        mult = 2 if t_name.lower() == "zergling" else 1
+                        prod_groups[own][t_name]["count"] += mult
+                        prod_groups[own][t_name]["max_prog"] = max(prod_groups[own][t_name]["max_prog"], bld)
+                        prod_groups[own][t_name]["category"] = t_cat
+
+        prod = {"p1": [], "p2": []}
+        for own in (1, 2):
+            pk = f"p{own}"
             items = []
-            for k, val in groups.items():
+            for k, val in prod_groups[own].items():
                 items.append({
                     "name": k,
                     "count": val["count"],
                     "progress": round(val["max_prog"], 3),
                     "category": val["category"],
                 })
-            prod[p_key] = sorted(items, key=lambda x: -x["progress"])
+            prod[pk] = sorted(items, key=lambda x: -x["progress"])
 
         # 3. Forces & Structures breakdown
         forces = {
