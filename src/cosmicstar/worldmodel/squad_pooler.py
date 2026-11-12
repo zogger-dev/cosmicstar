@@ -271,7 +271,7 @@ class SquadPooler(nn.Module):
         role_flags = torch.stack([u_struct, u_worker, u_air, torch.log1p(u_cost * 10.0)], dim=-1)
 
         ent_in = torch.cat([c_end, c_delta, grp_in, role_flags], dim=-1)
-        k_all = F.normalize(self.ent_k(ent_in), dim=-1)  # [B, R, d_l1]
+        k_all = F.normalize(self.ent_k(ent_in), dim=-1, eps=1e-4)  # [B, R, d_l1]
         v_onmap = self.ent_v(ent_in)                     # [B, R, d_squad]
         v_cargo = self.cargo_type_emb(rtype)             # [B, R, d_squad]
         v_all = torch.where((inside == 0).unsqueeze(-1), v_onmap, v_cargo)
@@ -320,7 +320,7 @@ class SquadPooler(nn.Module):
                     seeded_q = q_vec + self.prev_to_query(torch.cat([prev_z, prev_q], dim=-1))
                     q_vec = torch.where(prev_act.unsqueeze(-1), seeded_q, q_vec)
 
-                q_vec = F.normalize(self.query_norm(q_vec), dim=-1)
+                q_vec = F.normalize(self.query_norm(q_vec), dim=-1, eps=1e-4)
                 q_rot = _apply_rope_2d(q_vec, q_pos, self.rope_2d)  # [B, M, d_l1]
 
                 # Cross-attention scores [B, M, R]
@@ -589,7 +589,7 @@ class HindsightIntentPosterior(nn.Module):
                         torch.log1p(n_cam) / 3.0,
                         torch.log1p(cam_jumps[:, p_i]) / 2.5,
                         cam_dist[:, p_i].clamp(max=5.0) / 5.0,
-                        cmd_disp.sqrt().clamp(max=2.0),
+                        (cmd_disp + 1e-6).sqrt().clamp(max=2.0),
                         unique_grps / 10.0,
                         (n_cmd > 0).float(),
                         (n_grp > 0).float(),
@@ -662,6 +662,7 @@ class HindsightIntentPosterior(nn.Module):
         b: dict[str, torch.Tensor],
         ctx: dict[str, torch.Tensor],
         f_indices: list[int],
+        ctx_indices: list[int] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Computes Hindsight Posterior `(intent_pos, intent_gate, intent_z, intent_macro, xi)`,
         packed flat innovation vector `u_flat` for Flow Matching, causal `tempo_feat`, and
@@ -674,34 +675,50 @@ class HindsightIntentPosterior(nn.Module):
                 b, f_indices
             )
 
-            # Compute which squads in s_tau received newly issued orders during f_indices
-            q_chg_seq = ctx["q_changed"][:, : len(f_indices)]  # [B, nf, R] bool
+            # Detach SquadPooler states entering HindsightIntentPosterior so u_post does not
+            # create a target-to-input shortcut from s_next back into SquadPooler routing.
+            q_sq_t = s_tau["q_squad"].detach().float()
+            z_sq_t = s_tau["z_squad"].detach().float()
+            act_t = s_tau["active"].detach()
+            assign_w = s_tau["assign_w"].detach().float()      # [B, 2, M, R]
+            q_mac_t = s_tau["q_macro"].detach().float()
+            z_mac_t = s_tau["z_macro"].detach().float()
+
+            q_sq_n = s_next["q_squad"].detach().float()
+            z_sq_n = s_next["z_squad"].detach().float()
+            q_mac_n = s_next["q_macro"].detach().float()
+            z_mac_n = s_next["z_macro"].detach().float()
+
+            # Compute which squads in s_tau received newly issued orders during ctx_indices
+            if ctx_indices is None:
+                q_chg_seq = ctx["q_changed"][:, : len(f_indices)]  # [B, nf, R] bool
+            else:
+                c_idx = torch.as_tensor(ctx_indices, device=dev, dtype=torch.long)
+                q_chg_seq = ctx["q_changed"][:, c_idx]
             unit_ordered = q_chg_seq.any(dim=1).float()        # [B, R]
-            assign_w = s_tau["assign_w"].float()               # [B, 2, M, R]
             mass = assign_w.sum(dim=-1).clamp(min=1e-6)        # [B, 2, M]
             squad_ordered_frac = (
                 torch.matmul(assign_w, unit_ordered.unsqueeze(1).unsqueeze(-1)).squeeze(-1) / mass
-            ) * s_tau["active"].float()  # [B, 2, M] in [0, 1]
+            ) * act_t.float()  # [B, 2, M] in [0, 1]
 
             # Encode squad start + end state tokens [B, 2, M, hidden]
-            sq_t = torch.cat([s_tau["q_squad"].float(), s_tau["z_squad"].float()], dim=-1)
-            sq_n = torch.cat([s_next["q_squad"].float(), s_next["z_squad"].float()], dim=-1)
+            sq_t = torch.cat([q_sq_t, z_sq_t], dim=-1)
+            sq_n = torch.cat([q_sq_n, z_sq_n], dim=-1)
             sq_tok = self.sq_enc(
                 torch.cat([sq_t, sq_n - sq_t, squad_ordered_frac.unsqueeze(-1)], dim=-1)
             )
-            sq_pos = s_tau["q_squad"][..., 0:2].float()  # [B, 2, M, 2]
-            sq_val = s_tau["active"]                     # [B, 2, M]
+            sq_pos = q_sq_t[..., 0:2]  # [B, 2, M, 2]
+            sq_val = act_t             # [B, 2, M]
 
             # Combine squad tokens + spatialized action/camera tokens as KV memory per player
             kv_tok = torch.cat([sq_tok, act_tok.float()], dim=2).reshape(B * 2, M + act_tok.shape[2], -1)
             kv_pos = torch.cat([sq_pos, act_pos.float()], dim=2).reshape(B * 2, M + act_pos.shape[2], 2)
             kv_val = torch.cat([sq_val, act_val], dim=2).reshape(B * 2, M + act_val.shape[2])
 
-            # Ensure at least column 0 is valid so MultiheadAttention never sees an all-masked row
-            safe_mask = ~kv_val.clone()
-            all_masked = safe_mask.all(dim=-1)
-            if all_masked.any():
-                safe_mask[all_masked, 0] = False
+            # Ensure at least column 0 is valid (branchless, zero host-device sync)
+            safe_mask = ~kv_val
+            all_masked = safe_mask.all(dim=-1, keepdim=True)
+            safe_mask = torch.cat([safe_mask[:, :1] & (~all_masked), safe_mask[:, 1:]], dim=-1)
 
             q_in = self.intent_queries[None, :, :].expand(B * 2, self.k_intent, -1)
             attn_out, attn_w = self.intent_attn(
@@ -720,8 +737,8 @@ class HindsightIntentPosterior(nn.Module):
             intent_z = intent_z.view(B, 2, self.k_intent, self.d_intent)
 
             # Macro intent & micro-execution residual xi
-            mac_t = torch.cat([s_tau["q_macro"].float(), s_tau["z_macro"].float()], dim=-1)
-            mac_n = torch.cat([s_next["q_macro"].float(), s_next["z_macro"].float()], dim=-1)
+            mac_t = torch.cat([q_mac_t, z_mac_t], dim=-1)
+            mac_n = torch.cat([q_mac_n, z_mac_n], dim=-1)
             h_pool = h_int.mean(dim=1).view(B, 2, -1)
             mac_in = torch.cat([mac_t, mac_n - mac_t, h_pool, tempo_feat.float()], dim=-1)
 
@@ -729,8 +746,8 @@ class HindsightIntentPosterior(nn.Module):
             xi = torch.tanh(self.xi_head(mac_in)) * 1.5                      # [B, 2, d_xi]
 
             # Auxiliary 2D-RoPE pointer grounding loss: intents -> ordered squads
-            pq = F.normalize(self.ptr_q(intent_z), dim=-1).reshape(B * 2, self.k_intent, 64)
-            pk = F.normalize(self.ptr_k(sq_t), dim=-1).reshape(B * 2, M, 64)
+            pq = F.normalize(self.ptr_q(intent_z), dim=-1, eps=1e-4).reshape(B * 2, self.k_intent, 64)
+            pk = F.normalize(self.ptr_k(sq_t), dim=-1, eps=1e-4).reshape(B * 2, M, 64)
             pq_rot = _apply_rope_2d(pq, intent_pos.reshape(B * 2, self.k_intent, 2) * E.MAP_SCALE, self.ptr_rope)
             pk_rot = _apply_rope_2d(pk, sq_pos.reshape(B * 2, M, 2) * E.MAP_SCALE, self.ptr_rope)
 
@@ -740,7 +757,7 @@ class HindsightIntentPosterior(nn.Module):
             squad_pred_logit = torch.logsumexp(gated_scores, dim=1).view(B, 2, M)
 
             target_ord = (squad_ordered_frac > 0.05).float()
-            valid_sq = s_tau["active"].float()
+            valid_sq = act_t.float()
             bce = F.binary_cross_entropy_with_logits(squad_pred_logit, target_ord, reduction="none")
             aux_ptr_loss = (bce * valid_sq).sum() / valid_sq.sum().clamp(min=1.0)
 
