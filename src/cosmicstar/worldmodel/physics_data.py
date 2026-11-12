@@ -353,21 +353,23 @@ class Game:
             out_l.append((keep, l))
         return out_u, out_l
 
-    def window(self, t0, L, swap=False):
-        """L consecutive frames from frame t0, as one dict of numpy arrays: see the
-        module docstring. One window at a time per game: a window keeps its row map and
-        batches on the game, and two threads reading the same game would map one
-        window's targets with the other's rows.
+    def window(self, t0, L, swap=False, step=1):
+        """L frames from frame t0 spaced by `step` game loops, as one dict of numpy
+        arrays: see the module docstring. One window at a time per game: a window keeps
+        its row map and batches on the game, and two threads reading the same game would
+        map one window's targets with the other's rows.
         """
         with self._window_lock:
-            return self._window(t0, L, swap)
+            return self._window(t0, L, swap, step=step)
 
-    def _window(self, t0, L, swap):
+    def _window(self, t0, L, swap, step=1):
+        step = max(1, int(step))
+        t_end = t0 + (L - 1) * step
         rows, row_of = [], {}
         self._batches = {}  # own rows and neutrals share a view's batches
         for s in SOURCES:
             ix = self.index[s]
-            live = (ix["first"] < t0 + L) & (ix["last"] >= t0)
+            live = (ix["first"] <= t_end) & (ix["last"] >= t0)
             for k in np.nonzero(live)[0].tolist():
                 row_of[(s, int(ix["id"][k]))] = len(rows)
                 rows.append((s, k))
@@ -380,8 +382,8 @@ class Game:
         for r_, (s, k) in enumerate(rows):
             self.flat_row[self.flat_off[s] + k] = r_
         for s in SOURCES:
-            self._fill(out, s, t0, L, row_of)
-        self._dead_rows(out, rows, t0, L)
+            self._fill(out, s, t0, L, row_of, step=step)
+        self._dead_rows(out, rows, t0, L, step=step)
         self._batches = {}
         sw = (lambda o: 1 - o if o < 2 else o) if swap else (lambda o: o)
         out["owner"] = np.array(
@@ -390,22 +392,24 @@ class Game:
         births, parents = [], []
         for r_, (s, k) in enumerate(rows):
             ix = self.index[s]
-            f = int(ix["first"][k]) - t0
-            if 0 < f < L:
-                births.append((f, r_))
-                p = (
-                    row_of.get((s, int(ix["parent"][k])), -1)
-                    if ix["parent"][k] >= 0
-                    else -1
-                )
-                parents.append(p)
+            raw_first = int(ix["first"][k])
+            if t0 < raw_first <= t_end:
+                f = (raw_first - t0 + step - 1) // step
+                if 0 < f < L:
+                    births.append((f, r_))
+                    p = (
+                        row_of.get((s, int(ix["parent"][k])), -1)
+                        if ix["parent"][k] >= 0
+                        else -1
+                    )
+                    parents.append(p)
         out["birth_frame"] = np.array([b[0] for b in births], np.int64)
         out["birth_row"] = np.array([b[1] for b in births], np.int64)
         out["birth_parent"] = np.array(parents, np.int64)
         out["death_frame"] = np.array(
-            [self._death(s, k, t0, L) for s, k in rows], np.int64
+            [self._death(s, k, t0, L, step=step) for s, k in rows], np.int64
         )
-        out["map"], out["grid"] = self._map_frames(t0, L, swap)
+        out["map"], out["grid"] = self._map_frames(t0, L, swap, step=step)
         out["static_grid"], out["origin"], out["map_id"] = (
             self.static_grid,
             np.array(self.playable[:2], np.float32),
@@ -416,29 +420,30 @@ class Game:
             self.half,
             np.float32(self.side),
         )
-        out["loops"] = t0 + 1 + np.arange(L)
+        out["loops"] = t0 + 1 + np.arange(L) * step
         out["players"] = np.array(
             [self.vocab.race.get(p["race"], 3) for p in self.meta["players"]], np.int64
         )[:: -1 if swap else 1]
-        out["ply_num"] = self._players(t0, L, swap)
-        out["actions"] = self._actions(t0, L, row_of, swap)
-        out["effects"] = self._effects(t0, L, swap)
-        out["autocast"] = self._autocast(t0, L)
+        out["ply_num"] = self._players(t0, L, swap, step=step)
+        out["actions"] = self._actions(t0, L, row_of, swap, step=step)
+        out["effects"] = self._effects(t0, L, swap, step=step)
+        out["autocast"] = self._autocast(t0, L, step=step)
         return out
 
-    def _autocast(self, t0, L):
+    def _autocast(self, t0, L, step=1):
         """Each row's remembered autocast toggles per frame: [(frame, row, family,
         button, on)]. A toggle at loop l first shows in the frame after l's, like any
         other action's effect. A unit never toggled has no entry: its default isn't
         known.
         """
+        t_end = t0 + (L - 1) * step
         out = []
         for s, events in getattr(self, "autocast", {}).items():
             state = {}
             for loop, on, fam, but, units in events:
-                if loop >= t0 + 1 + L:
+                if loop >= t_end + 2:
                     break
-                f0 = max(0, loop - t0)  # frame index of the loop after the toggle's
+                f0 = max(0, (loop - t0 + step - 1) // step)
                 rows = self._row_of_id(s, units)
                 for r_ in rows[rows >= 0].tolist():
                     key = (r_, fam, but)
@@ -452,21 +457,35 @@ class Game:
             rows += [(f, r_, fam, but, int(on)) for f in range(a, min(b, L))]
         return np.array(rows, np.int64).reshape(-1, 5)
 
-    def _effects(self, t0, L, swap):
+    def _effects(self, t0, L, swap, step=1):
         """Both player views' effects, side by side with no merging, since each view has
         only some: (frame, type, owner index, x, y, radius, age in loops)."""
         rows = []
         for s in (1, 2):
             d = self.rest[s]
             st = d["e_frame_start"]
-            a, b = st[t0], st[t0 + L]
-            if a == b:
-                continue
-            fr = np.searchsorted(st, np.arange(a, b), side="right") - 1 - t0
+            if step == 1:
+                a, b = st[t0], st[t0 + L]
+                if a == b:
+                    continue
+                fr = np.searchsorted(st, np.arange(a, b), side="right") - 1 - t0
+                sel_idx = slice(a, b)
+            else:
+                chunks, fr_chunks = [], []
+                for f in range(L):
+                    rf = t0 + f * step
+                    if rf + 1 < len(st) and st[rf + 1] > st[rf]:
+                        c_idx = np.arange(st[rf], st[rf + 1])
+                        chunks.append(c_idx)
+                        fr_chunks.append(np.full(len(c_idx), f, dtype=np.int64))
+                if not chunks:
+                    continue
+                sel_idx = np.concatenate(chunks)
+                fr = np.concatenate(fr_chunks)
             if s not in self._eff_age:
                 self._eff_age[s] = effect_ages(d)
-            age = self._eff_age[s][a:b]
-            own = d["e_owner"][a:b].astype(np.int64)
+            age = self._eff_age[s][sel_idx]
+            own = d["e_owner"][sel_idx].astype(np.int64)
             own = np.where(
                 own == 1,
                 1 if swap else 0,
@@ -476,11 +495,11 @@ class Game:
                 np.stack(
                     [
                         fr,
-                        np.clip(d["e_type"][a:b], 0, N_EFFECT_IDS - 1),
+                        np.clip(d["e_type"][sel_idx], 0, N_EFFECT_IDS - 1),
                         own,
-                        d["e_x"][a:b] - self.center[0],
-                        d["e_y"][a:b] - self.center[1],
-                        d["e_radius"][a:b],
+                        d["e_x"][sel_idx] - self.center[0],
+                        d["e_y"][sel_idx] - self.center[1],
+                        d["e_radius"][sel_idx],
                         age,
                     ],
                     1,
@@ -492,42 +511,76 @@ class Game:
             else np.zeros((0, 7), np.float32)
         )
 
-    def _players(self, t0, L, swap):
+    def _players(self, t0, L, swap, step=1):
         """[L, 2, C_PLY]: each player's PC_KEYS numbers, camera, and supply left (cap -
         used, / 16, below 0 when over the cap): bfloat16 resolves it finely near 0, where
         being blocked is, and the log of supply used resolves only 1.5 at 150. From
         their own view."""
         out = np.zeros((L, 2, len(PC_KEYS) + 4), np.float32)
+        t_end = t0 + (L - 1) * step
         for pi, s in enumerate((1, 2)):
             at = 1 - pi if swap else pi
             _, fr = self.views[s]
-            for i in range(t0 // BATCH, (t0 + L - 1) // BATCH + 1):
-                b = fr.get_batch(i)
-                base = i * BATCH
-                lo, hi = max(t0, base), min(t0 + L, base + b.num_rows)
-                sl = np.arange(lo - base, hi - base)
-                for j, k in enumerate(PC_KEYS):
-                    v = (
-                        b.column(f"pc_{k}")
-                        .to_numpy(zero_copy_only=False)[sl]
-                        .astype(np.float32)
-                    )
-                    out[lo - t0 : hi - t0, at, j] = np.log1p(np.maximum(v, 0)) / 8
-                    if k == "food_cap":
-                        cap = v
-                    if k == "food_used":
-                        out[lo - t0 : hi - t0, at, len(PC_KEYS) + 3] = (cap - v) / 16
-                for j, k in enumerate(("cam_x", "cam_y")):
-                    v = (
-                        b.column(k)
-                        .to_numpy(zero_copy_only=False)[sl]
-                        .astype(np.float32)
-                    )
-                    ok = np.isfinite(v)
-                    out[lo - t0 : hi - t0, at, len(PC_KEYS) + j] = np.where(
-                        ok, (np.nan_to_num(v) - self.center[j]) / self.half[j], 0
-                    )
-                    out[lo - t0 : hi - t0, at, len(PC_KEYS) + 2] = ok
+            if step == 1:
+                for i in range(t0 // BATCH, (t0 + L - 1) // BATCH + 1):
+                    b = fr.get_batch(i)
+                    base = i * BATCH
+                    lo, hi = max(t0, base), min(t0 + L, base + b.num_rows)
+                    sl = np.arange(lo - base, hi - base)
+                    for j, k in enumerate(PC_KEYS):
+                        v = (
+                            b.column(f"pc_{k}")
+                            .to_numpy(zero_copy_only=False)[sl]
+                            .astype(np.float32)
+                        )
+                        out[lo - t0 : hi - t0, at, j] = np.log1p(np.maximum(v, 0)) / 8
+                        if k == "food_cap":
+                            cap = v
+                        if k == "food_used":
+                            out[lo - t0 : hi - t0, at, len(PC_KEYS) + 3] = (cap - v) / 16
+                    for j, k in enumerate(("cam_x", "cam_y")):
+                        v = (
+                            b.column(k)
+                            .to_numpy(zero_copy_only=False)[sl]
+                            .astype(np.float32)
+                        )
+                        ok = np.isfinite(v)
+                        out[lo - t0 : hi - t0, at, len(PC_KEYS) + j] = np.where(
+                            ok, (np.nan_to_num(v) - self.center[j]) / self.half[j], 0
+                        )
+                        out[lo - t0 : hi - t0, at, len(PC_KEYS) + 2] = ok
+            else:
+                raw_frames = t0 + np.arange(L) * step
+                for i in range(t0 // BATCH, t_end // BATCH + 1):
+                    b = fr.get_batch(i)
+                    base = i * BATCH
+                    in_b = (raw_frames >= base) & (raw_frames < base + b.num_rows)
+                    if not in_b.any():
+                        continue
+                    f_idx = np.nonzero(in_b)[0]
+                    sl = raw_frames[f_idx] - base
+                    for j, k in enumerate(PC_KEYS):
+                        v = (
+                            b.column(f"pc_{k}")
+                            .to_numpy(zero_copy_only=False)[sl]
+                            .astype(np.float32)
+                        )
+                        out[f_idx, at, j] = np.log1p(np.maximum(v, 0)) / 8
+                        if k == "food_cap":
+                            cap = v
+                        if k == "food_used":
+                            out[f_idx, at, len(PC_KEYS) + 3] = (cap - v) / 16
+                    for j, k in enumerate(("cam_x", "cam_y")):
+                        v = (
+                            b.column(k)
+                            .to_numpy(zero_copy_only=False)[sl]
+                            .astype(np.float32)
+                        )
+                        ok = np.isfinite(v)
+                        out[f_idx, at, len(PC_KEYS) + j] = np.where(
+                            ok, (np.nan_to_num(v) - self.center[j]) / self.half[j], 0
+                        )
+                        out[f_idx, at, len(PC_KEYS) + 2] = ok
         return out
 
     def _load_actions(self, avocab):
@@ -585,11 +638,12 @@ class Game:
                     )
             self.autocast[s] = ev
 
-    def _actions(self, t0, L, row_of, swap):
-        """Tokens in frames [t0, t0 + L): an action at loop l is in the frame of that
-        loop, so it reads the state it was given on and affects the next frame."""
+    def _actions(self, t0, L, row_of, swap, step=1):
+        """Tokens in frames [t0, t0 + L * step): an action at loop l is binned into the
+        strided frame `(l - (t0 + 1)) // step` so it reads the state at `t0 + f * step`
+        and drives the transition to `t0 + (f + 1) * step`."""
         tk = self.acts.tok
-        lo, hi = t0 + 1, t0 + 1 + L
+        lo, hi = t0 + 1, t0 + 1 + L * step
         idx = np.nonzero((tk["loop"] >= lo) & (tk["loop"] < hi) & (tk["kind"] > 0))[0]
         n = len(idx)
         xy = np.stack([tk["x"][idx], tk["y"][idx]], 1)
@@ -631,7 +685,7 @@ class Game:
             1,
         ).astype(np.float32)
         return dict(
-            frame=(tk["loop"][idx] - lo).astype(np.int64),
+            frame=np.clip((tk["loop"][idx] - lo) // step, 0, L - 1).astype(np.int64),
             player=flip(tk["player"][idx].astype(np.int64)).clip(0, 1),
             kind=tk["kind"][idx].astype(np.int64),
             family=tk["family"][idx].astype(np.int64),
@@ -649,23 +703,29 @@ class Game:
             recip=np.array(recip, np.int64).reshape(-1, 2),
         )  # no place: the center, like the globals
 
-    def _death(self, s, k, t0, L):
+    def _death(self, s, k, t0, L, step=1):
         d = int(self.index[s]["death"][k])
-        return d - t0 if t0 <= d < t0 + L else -1
+        t_end = t0 + (L - 1) * step
+        if step == 1:
+            return d - t0 if t0 <= d < t0 + L else -1
+        return (d - t0 + step - 1) // step if t0 <= d <= t_end else -1
 
-    def _fill(self, out, s, t0, L, row_of):
+    def _fill(self, out, s, t0, L, row_of, step=1):
         """Writes view s's rows of the window into the grid, then bridges passengers and
         gas workers."""
         if s == 0:
-            return self._fill_neutrals(out, t0, L, row_of)
-        lo, hi = max(0, t0 - MARGIN), min(self.F, t0 + L + MARGIN)
+            return self._fill_neutrals(out, t0, L, row_of, step=step)
+        t_end = t0 + (L - 1) * step
+        lo, hi = max(0, t0 - MARGIN), min(self.F, t_end + 1 + MARGIN)
         U, Ls = self._read(s, lo, hi)
         if not U:
             return
         u = {k: np.concatenate([x[k] for x in U]) for k in U[0]}
         frame, ids = u["frame"], u["u_id"]
-        inw = (frame >= t0) & (frame < t0 + L)
-        fo = frame[inw] - t0
+        inw = (frame >= t0) & (frame <= t_end)
+        if step > 1:
+            inw = inw & (((frame - t0) % step) == 0)
+        fo = (frame[inw] - t0) // step
         ro = np.array(
             [row_of.get((s, int(i)), -1) for i in ids[inw].tolist()], np.int64
         )
@@ -681,12 +741,13 @@ class Game:
             off += len(idx)
         self._bags(out, bags, src, fo, ro, s)
         if s:
-            self._groups(out, s, t0, L, ids, frame, row_of)
-            self._contained(out, s, t0, L, row_of, u, bags)
+            self._groups(out, s, t0, L, ids, frame, row_of, step=step)
+            self._contained(out, s, t0, L, row_of, u, bags, step=step)
 
-    def _fill_neutrals(self, out, t0, L, row_of):
+    def _fill_neutrals(self, out, t0, L, row_of, step=1):
         """Neutrals from both views: a snapshot first, then what a player sees over it,
         once. Contents as last seen."""
+        t_end = t0 + (L - 1) * step
         ix = self.index[0]
         nid_row = np.full(len(ix["id"]), -1, np.int64)
         for (s, k), r_ in row_of.items():
@@ -695,18 +756,25 @@ class Game:
         seen = np.zeros(out["mask"].shape, bool)
         for visible in (False, True):
             for s in VIEWS:
-                U, Ls = self._read(s, t0, t0 + L, neutral=True)
+                U, Ls = self._read(s, t0, t_end + 1, neutral=True)
+                if not U:
+                    continue
                 u = {k: np.concatenate([x[k] for x in U]) for k in U[0]}
                 n = self.nid[s][u["u_id"]]
-                fo, ro = u["frame"] - t0, nid_row[n]
+                on_stride = (((u["frame"] - t0) % step) == 0) if step > 1 else True
+                fo = np.clip((u["frame"] - t0) // step, 0, L - 1)
+                ro = nid_row[n]
                 d = ix["death"][n]
                 ok = (
-                    (ro >= 0)
+                    on_stride
+                    & (ro >= 0)
                     & ((d < 0) | (u["frame"] <= d))
                     & ((u["u_display"] != SNAPSHOT) == visible)
-                    & ~seen[fo, ro]
+                    & ~seen[fo, np.maximum(ro, 0)]
                 )
                 src = np.nonzero(ok)[0]
+                if not len(src):
+                    continue
                 _set(out, u, src, fo[src], ro[src], self)
                 if not visible:
                     continue
@@ -722,7 +790,7 @@ class Game:
                 self._bags(out, bags, src, fo[src], ro[src], s)
         start, log_f, log_c = self.nlog
         at = RAW_NUMS.index("contents")
-        frames = t0 + np.arange(L)
+        frames = t0 + np.arange(L) * step
         for k in np.nonzero(nid_row >= 0)[0].tolist():
             a, b = int(start[k]), int(start[k + 1])
             if a == b:
@@ -742,14 +810,17 @@ class Game:
         flat[flat < 0] = self.n_flat
         return self.flat_row[flat]
 
-    def _groups(self, out, s, t0, L, ids, frame, row_of):
+    def _groups(self, out, s, t0, L, ids, frame, row_of, step=1):
         g = self.grp.get(s)
         if g is None:
             return
         start, gid = g
         P = len(self.rest[s]["grp_player"])
         for f in range(L):
-            base = ((t0 + f) * P) * C_GROUPS
+            rf = t0 + f * step
+            base = (rf * P) * C_GROUPS
+            if base + C_GROUPS >= len(start):
+                break
             for k in range(C_GROUPS):
                 members = gid[start[base + k] : start[base + k + 1]]
                 for m in members.tolist():
@@ -793,7 +864,7 @@ class Game:
                 out[f"{name}_where"].append(np.stack([fo[rep], ro[rep], seq], 1))
                 out[f"{name}_vals"].append(np.stack(st, 1))
 
-    def _contained(self, out, s, t0, L, row_of, u, bags):
+    def _contained(self, out, s, t0, L, row_of, u, bags, step=1):
         """Rows missing from their frame: passengers from their transport's list, gas
         workers from the order they vanished under."""
         order = np.lexsort((u["frame"], u["u_id"]))
@@ -815,8 +886,13 @@ class Game:
             g = row_of.get((s, tgt), -1)
             if g < 0:
                 continue
-            for f in range(max(a + 1, t0), min(b, t0 + L)):
-                ff = f - t0
+            if step == 1:
+                ff_iter = [f - t0 for f in range(max(a + 1, t0), min(b, t0 + L))]
+            else:
+                ff_iter = [
+                    ff for ff in range(L) if a < (t0 + ff * step) < b
+                ]
+            for ff in ff_iter:
                 if out["mask"][ff, g] and int(out["type"][ff, g]) in GAS_TYPES:
                     (
                         out["mask"][ff, r_],
@@ -838,10 +914,13 @@ class Game:
                 for k in ("pass_id", "pass_type", "pass_hp")
             )
             for local, i in enumerate(idx.tolist()):
+                raw_f = int(u["frame"][off + local])
+                if raw_f < t0 or (step > 1 and ((raw_f - t0) % step) != 0):
+                    continue
+                f = (raw_f - t0) // step
+                if not 0 <= f < L:
+                    continue
                 for it in range(offsets[i], offsets[i + 1]):
-                    f = int(u["frame"][off + local]) - t0
-                    if not 0 <= f < L:
-                        continue
                     r_, c = row_of.get((s, int(vid[it])), -1), row_of.get(
                         (s, int(u["u_id"][off + local])), -1
                     )
@@ -874,13 +953,13 @@ class Game:
                 return None
         return None
 
-    def _dead_rows(self, out, rows, t0, L):
+    def _dead_rows(self, out, rows, t0, L, step=1):
         """From its death frame, the first it is gone in, a row keeps its last values with
         hit points and shields 0, and isn't alive. A row still present at its death
         frame is dead from the next. Frames it was out of sight in before stay absent.
         """
         for r_, (s, k) in enumerate(rows):
-            d = self._death(s, k, t0, L)
+            d = self._death(s, k, t0, L, step=step)
             died_before = 0 <= self.index[s]["death"][k] < t0
             if died_before or d < 0:
                 continue
@@ -909,7 +988,7 @@ class Game:
             out["mask"][d0:, r_] = True
             out["alive"][d0:, r_] = False
 
-    def _map_frames(self, t0, L, swap):
+    def _map_frames(self, t0, L, swap, step=1):
         """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen
         and creep, the next-frame targets; and [L, h, w, C_LIVE], the playable area at
         its own size with each player's pathable and buildable too, the input."""
@@ -924,8 +1003,9 @@ class Game:
             at = (1 - pi if swap else pi) * 3 * PATCH * PATCH
             _, fr = self.views[s]
             for f in range(L):
-                b = fr.get_batch((t0 + f) // BATCH)
-                j = (t0 + f) % BATCH
+                rf = t0 + f * step
+                b = fr.get_batch(rf // BATCH)
+                j = rf % BATCH
                 vis = np.frombuffer(b.column("vis")[j].as_py(), np.uint8).reshape(
                     self.H, self.W
                 )

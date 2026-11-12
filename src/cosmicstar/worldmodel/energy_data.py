@@ -494,6 +494,9 @@ class Frames(nn.Module):
         self.owner_emb = nn.Embedding(E.OWNERS, d)
         self.kin_c = nn.Linear(E.K_Q + 4 * MAP_WAVES + 2 + 4, d)
         self.extras = E.mlp(len(EXTRAS) + 7, d, d)
+        # Control-group membership (0..9 + active selection 10) + F2_ONSCREEN bit (zero-init for exact warm-start)
+        self.grp_c = nn.Linear(12, d, bias=False)
+        nn.init.zeros_(self.grp_c.weight)
 
         # Effect token encoders (matching entity_encoder.EffectEncoder)
         self.eff_type = nn.Embedding(N_EFFECT_IDS, d)
@@ -624,10 +627,22 @@ class Frames(nn.Module):
             else:
                 cx, cy = 100.0, 100.0
 
+            if "loops" in b:
+                f_t = torch.as_tensor(ff, device=x.device)
+                f_p = (f_t - 1).clamp(min=0)
+                dt_loops = (
+                    (b["loops"][:, f_t] - b["loops"][:, f_p])
+                    .clamp(min=1)
+                    .float()
+                    .unsqueeze(-1)
+                )
+            else:
+                dt_loops = 1.0
+
             x_norm = ((x - cx) / E.MAP_SCALE).clamp(-2.0, 2.0)
             y_norm = ((y - cy) / E.MAP_SCALE).clamp(-2.0, 2.0)
-            vx_norm = (((x - px) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
-            vy_norm = (((y - py) * both) / E.SPEED_SCALE).clamp(-4.0, 4.0)
+            vx_norm = (((x - px) * both) / (E.SPEED_SCALE * dt_loops)).clamp(-4.0, 4.0)
+            vy_norm = (((y - py) * both) / (E.SPEED_SCALE * dt_loops)).clamp(-4.0, 4.0)
 
             hp_max = num[..., I["hp_max"]]
             sh_max = num[..., I["shield_max"]]
@@ -763,6 +778,16 @@ class Frames(nn.Module):
             dim=-1,
         )
 
+        # Control groups [B, nf, R, 11] + F2_ONSCREEN (bit 4 of flags2)
+        onscreen = ((num[..., I["flags2"]].long() & 4) != 0).to(q.dtype).unsqueeze(-1)
+        if "groups" in b:
+            grp_in = torch.cat([b["groups"][:, f_idx].to(q.dtype), onscreen], dim=-1)
+        else:
+            grp_in = torch.cat(
+                [torch.zeros(B, nf, R, 11, device=q.device, dtype=q.dtype), onscreen],
+                dim=-1,
+            )
+
         # Continuous localized potential field evaluated strictly at entity coordinates (no discrete map tokens)
         dev = b["mask"].device
         if "center" in b:
@@ -783,6 +808,7 @@ class Frames(nn.Module):
                 + self.owner_emb(owner).to(dt)
                 + self.kin_c(kin_in)
                 + self.extras(ext_in)
+                + self.grp_c(grp_in.to(dt))
                 + field_ent
             ).to(dt)
             g_tok = self._embed_globals(b, f_idx).to(dt)
@@ -865,10 +891,29 @@ class Frames(nn.Module):
             self.z_ply_proj(self.z_ply_norm(ply_out + cls_out))
         )  # [B * nf, 2, r]
 
-        z_flat, _ = self.project_entities(x_tok[:, g0 : g0 + R], rtype, mask)
-        u, u_active = self._encode_commands(
-            b, f_idx, abil, prod_abil, ord_reg, owner, mask
+        c_ent_raw = x_tok[:, g0 : g0 + R]
+        z_flat, c_ent_normed = self.project_entities(c_ent_raw, rtype, mask)
+        u, u_active, q_changed = self._encode_commands(
+            b, f_idx, abil, prod_abil, ord_reg, owner, mask, return_changed=True
         )
+        if getattr(self, "_return_ctx", False):
+            return dict(
+                q=q,
+                z=z_flat.view(B, nf, R, self.r),
+                z_ply=z_ply_flat.view(B, nf, 2, self.r),
+                c_ent=c_ent_normed.view(B, nf, R, -1),
+                ply_out=ply_out.view(B, nf, 2, -1),
+                cls_out=cls_out.view(B, nf, -1),
+                pos_ent=pos_ent,
+                rtype=rtype,
+                num=num,
+                owner=owner,
+                mask=mask,
+                p=p,
+                u=u,
+                u_active=u_active,
+                q_changed=q_changed,
+            )
         return (
             q,
             z_flat.view(B, nf, R, self.r),
@@ -880,7 +925,19 @@ class Frames(nn.Module):
             u_active,
         )
 
-    def _encode_commands(self, b, f_idx, abil, prod_abil, ord_reg, owner, mask):
+    def encode_window_context(self, b, f_idx):
+        """Encodes frame indices f_idx and returns full unprojected contextualized
+        entity, player, and scene representations alongside grounded coordinates."""
+        prev = getattr(self, "_return_ctx", False)
+        self._return_ctx = True
+        try:
+            return self._encode_sequence(b, f_idx)
+        finally:
+            self._return_ctx = prev
+
+    def _encode_commands(
+        self, b, f_idx, abil, prod_abil, ord_reg, owner, mask, return_changed=False
+    ):
         """Encodes per-player control impulse u [B, nf, 2, u_dim] and u_active [B, nf, 2]
         for the transition f_idx -> f_idx + 1.
 
@@ -940,6 +997,8 @@ class Frames(nn.Module):
 
         u = torch.stack(u_list, dim=2)  # [B, nf, 2, u_dim]
         u_active = torch.stack(act_list, dim=2)  # [B, nf, 2]
+        if return_changed:
+            return u, u_active, q_changed
         return u, u_active
 
     def frames(self, b, ff):
@@ -1004,6 +1063,7 @@ BATCH_KEYS = (
     "x",
     "y",
     "num",
+    "groups",
     "rtype",
     "owner",
     "players",
@@ -1028,8 +1088,12 @@ BATCH_KEYS = (
     "act_mask",
     "act_player",
     "act_kind",
+    "act_group",
+    "act_gop",
     "act_num",
     "act_xy",
+    "act_placed",
+    "act_target",
 )
 
 
