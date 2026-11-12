@@ -563,6 +563,88 @@
     box-shadow: 0 0 4px rgba(255, 255, 255, 0.95);
   }
 
+  /* Multi-Horizon Stochastic Observer Panel */
+  .obs-panel {
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.96) 0%, rgba(11, 17, 32, 0.96) 100%);
+    border: 1px solid #4f46e5;
+    border-radius: 6px;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    box-shadow: 0 2px 10px rgba(79, 70, 229, 0.14);
+  }
+  .obs-stronger-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .obs-stronger-labels {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+  .obs-stronger-track {
+    position: relative;
+    height: 9px;
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    background: rgba(30, 41, 59, 0.9);
+    border: 1px solid rgba(71, 85, 105, 0.7);
+  }
+  .obs-stronger-p1 {
+    height: 100%;
+    background: linear-gradient(90deg, #dc2626 0%, #ef4444 100%);
+    transition: width 0.2s ease;
+  }
+  .obs-stronger-p2 {
+    height: 100%;
+    flex: 1;
+    background: linear-gradient(90deg, #3b82f6 0%, #1d4ed8 100%);
+  }
+  .obs-stronger-mid {
+    position: absolute;
+    left: 50%;
+    top: -1px;
+    bottom: -1px;
+    width: 1.5px;
+    background: #f8fafc;
+    opacity: 0.85;
+  }
+  .obs-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+  }
+  .obs-kpi-cell {
+    background: rgba(30, 41, 59, 0.55);
+    border: 1px solid rgba(51, 65, 85, 0.7);
+    border-radius: 4px;
+    padding: 3px 5px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+  .obs-kpi-lbl {
+    font-size: 9px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+  .obs-kpi-val {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 800;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
   /* Reverse SAE Attribution Panel */
   .sae-attr-box {
     background: rgba(15, 23, 42, 0.92);
@@ -997,6 +1079,9 @@
                 <option value="env">Neutral / Resource Field: F_env(x,y)</option>
                 <option value="kinetic">Kinetic Momentum Field: Π(x,y)</option>
                 <option value="terrain_v">Terrain CNN Field: V_loc(x,y)</option>
+                <option value="threat_net">Rollout Threat (+40s): P1 vs P2 Pressure</option>
+                <option value="threat_p1_risk">Rollout Risk to P1 Units &amp; Bases (+40s)</option>
+                <option value="threat_p2_risk">Rollout Risk to P2 Units &amp; Bases (+40s)</option>
                 <option value="terrain">Off (Terrain + Fog + Creep Only)</option>
               </select>
               <select id="fieldCombineMode" title="How to combine multiple selected dimensions" style="font-size:11px; padding:2px 5px;">
@@ -1061,6 +1146,7 @@
           <label title="Show or hide neutral mineral fields and geysers"><input type="checkbox" id="chkShowNeutrals" checked />Minerals</label>
           <label title="Subtly dim neutral minerals so player army &amp; bases pop out"><input type="checkbox" id="chkDimNeutrals" checked />Dim Minerals</label>
           <label><input type="checkbox" id="chkS2MA" checked />.s2ma AirBlockers/Shrines</label>
+          <label title="Overlay L1->L2 Top-2 conserved Squad Token centroids, spread ellipses, and +40s attrition risk" style="color:#a5b4fc;font-weight:600;"><input type="checkbox" id="chkSquadTokens" />Squads (M=64)</label>
           <label style="display:none;"><input type="checkbox" id="chkAnchors" />Anchors</label>
           <label style="color:#c084fc;font-weight:600;"><input type="checkbox" id="chkDragMove" />Drag Unit (What-If)</label>
           <button id="btnResetView" style="padding:1px 6px;font-size:11px;margin-left:auto;">Reset Zoom</button>
@@ -1181,6 +1267,56 @@
             <span class="esl-val-lg" id="hudP2Lost" style="color:#f87171;">0</span>
           </div>
         </div>
+      </div>
+
+      <!-- 1b. MULTI-HORIZON STOCHASTIC OBSERVER (+40s Fog-of-War Rollout) -->
+      <div class="obs-panel" id="observerPanel">
+        <div class="row-group-title">
+          <div style="display:flex; align-items:center; gap:5px;">
+            <span style="color:#a5b4fc;">STOCHASTIC OBSERVER (+40s)</span>
+            <span id="obsStatusBadge" class="badge" style="font-size:9.5px; padding:0 4px;">32 branches</span>
+          </div>
+          <button id="btnToggleThreatMap" style="padding:1px 6px; font-size:10px; border-color:#6366f1; color:#e0e7ff;" title="Overlay emergent +40s rollout threat heatmap &amp; M=64 Squad Tokens on the 2D battlefield map">
+            Project Threat Map
+          </button>
+        </div>
+
+        <!-- Stronger Hand Probability Bar: P(A(tau + 40s) > 0) -->
+        <div class="obs-stronger-wrap" title="Fraction of fog-of-war rollout futures where each player holds a positive resource+positional lead at +40s (no arbitrary calibration constant)">
+          <div class="obs-stronger-labels">
+            <span id="obsStrongP1" style="color:#f87171;">P1 Stronger Hand: 50%</span>
+            <span style="font-size:9px; color:var(--text-muted); font-weight:500;">P(Lead @ +40s)</span>
+            <span id="obsStrongP2" style="color:#60a5fa;">50% :P2 Stronger Hand</span>
+          </div>
+          <div class="obs-stronger-track">
+            <div id="obsStrongBarP1" class="obs-stronger-p1" style="width:50%;"></div>
+            <div class="obs-stronger-p2"></div>
+            <div class="obs-stronger-mid"></div>
+          </div>
+        </div>
+
+        <!-- 4 KPI Cells: Static A0, Drift E[dA], Initiative P(dA>0), Volatility Std[dA] -->
+        <div class="obs-kpi-grid">
+          <div class="obs-kpi-cell" title="Static Hamiltonian Advantage A(τ₀) at current frame (mineral+gas equivalent)">
+            <span class="obs-kpi-lbl">Static A(τ₀)</span>
+            <span id="obsKpiA0" class="obs-kpi-val">—</span>
+          </div>
+          <div class="obs-kpi-cell" title="Expected 40s Advantage Drift E[A(τ₀+40s) − A(τ₀)] across 32 fog-of-war futures">
+            <span class="obs-kpi-lbl">Drift E[ΔA]</span>
+            <span id="obsKpiDrift" class="obs-kpi-val">—</span>
+          </div>
+          <div class="obs-kpi-cell" title="Initiative: Probability that P1 / P2 improves their net position over the next 40s">
+            <span class="obs-kpi-lbl">Initiative</span>
+            <span id="obsKpiInit" class="obs-kpi-val">—</span>
+          </div>
+          <div class="obs-kpi-cell" id="obsKpiVolCell" title="Tactical Volatility Std[ΔA] across rollout branches (high = volatile clash/drop)">
+            <span class="obs-kpi-lbl">Volatility σ</span>
+            <span id="obsKpiVol" class="obs-kpi-val" style="color:#fbbf24;">—</span>
+          </div>
+        </div>
+
+        <!-- Multi-Horizon Advantage Fan Chart (Now .. +40s) -->
+        <canvas id="observerFanCanvas" height="88" style="width:100%; display:block; border-radius:4px; background:rgba(9,13,22,0.7);"></canvas>
       </div>
 
       <!-- 2. PRODUCTION QUEUE (Image 1 style) -->
@@ -1487,6 +1623,48 @@ function hasCounterfactuals() {
 
 let isLoadingFrame = false;
 let pendingFrameReq = null;
+let OBSERVER_DATA = null;
+let isLoadingObserver = false;
+let pendingObserverReq = null;
+
+async function loadObserverRollout(gid, loop_t) {
+  if (isLoadingObserver) {
+    pendingObserverReq = [gid, loop_t];
+    return;
+  }
+  isLoadingObserver = true;
+  const badge = document.getElementById("obsStatusBadge");
+  if (badge) {
+    badge.textContent = "rolling +40s…";
+    badge.style.color = "#fbbf24";
+  }
+  try {
+    const res = await fetch(`/api/game/${gid}/observer/${loop_t}?branches=32&horizon=8`);
+    const data = await res.json();
+    if (data && data.available) {
+      OBSERVER_DATA = data;
+      if (badge) {
+        badge.textContent = `${data.n_branches}b • ${Math.round(data.elapsed_ms)}ms`;
+        badge.style.color = "#a5b4fc";
+      }
+      renderObserverPanel();
+      const bgSel = document.getElementById("mapBgMode");
+      const sqChk = document.getElementById("chkSquadTokens");
+      if ((bgSel && bgSel.value.startsWith("threat_")) || (sqChk && sqChk.checked)) {
+        renderMap();
+      }
+    }
+  } catch (err) {
+    console.warn("Observer rollout fetch failed:", err);
+  } finally {
+    isLoadingObserver = false;
+    if (pendingObserverReq) {
+      const [nGid, nLoop] = pendingObserverReq;
+      pendingObserverReq = null;
+      loadObserverRollout(nGid, nLoop);
+    }
+  }
+}
 
 async function loadFrame(gid, loop_t) {
   if (isLoadingFrame) {
@@ -1534,6 +1712,7 @@ async function loadFrame(gid, loop_t) {
       await fetchGram256();
     }
     renderAll();
+    loadObserverRollout(gid, CURRENT_LOOP);
   } finally {
     isLoadingFrame = false;
     if (pendingFrameReq) {
@@ -1699,6 +1878,7 @@ function renderAll() {
   renderMap();
   renderTimeline();
   renderHUDAndForces();
+  renderObserverPanel();
   if (SELECTED_GROUP_KEY && SELECTED_GROUP_ROWS.size > 0) {
     const parts = SELECTED_GROUP_KEY.split("_");
     const pKey = parts[0];
@@ -2484,6 +2664,185 @@ function getFallbackSvg(rawName, category, raceHint) {
   </svg>`;
 }
 
+function renderObserverPanel() {
+  const canvas = document.getElementById("observerFanCanvas");
+  const btnMap = document.getElementById("btnToggleThreatMap");
+  const bgSel = document.getElementById("mapBgMode");
+  if (btnMap && bgSel) {
+    const isThreat = bgSel.value.startsWith("threat_");
+    btnMap.textContent = isThreat ? "✓ Threat Map Active" : "Project Threat Map";
+    btnMap.style.background = isThreat ? "#4f46e5" : "";
+    btnMap.style.color = isThreat ? "#ffffff" : "#e0e7ff";
+  }
+  if (!canvas) return;
+  const { ctx, w, h } = setupHiDPICanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+
+  if (!OBSERVER_DATA || !OBSERVER_DATA.quantiles) {
+    ctx.fillStyle = "#64748b";
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Computing 32-branch +40s fog-of-war rollout…", w * 0.5, h * 0.52);
+    return;
+  }
+
+  const d = OBSERVER_DATA;
+  const p1StrongPct = Math.round(d.prob_stronger_hand_p1 * 100);
+  const p2StrongPct = 100 - p1StrongPct;
+  const p1InitPct = Math.round(d.prob_improve_p1 * 100);
+  const p2InitPct = 100 - p1InitPct;
+
+  const p1NameShort = (FRAME && FRAME.hud && FRAME.hud.p1 && FRAME.hud.p1.name)
+    ? unescapeHtml(FRAME.hud.p1.name).slice(0, 10)
+    : "P1";
+  const p2NameShort = (FRAME && FRAME.hud && FRAME.hud.p2 && FRAME.hud.p2.name)
+    ? unescapeHtml(FRAME.hud.p2.name).slice(0, 10)
+    : "P2";
+
+  const elSP1 = document.getElementById("obsStrongP1");
+  const elSP2 = document.getElementById("obsStrongP2");
+  const elSBar = document.getElementById("obsStrongBarP1");
+  if (elSP1) elSP1.textContent = `${p1NameShort}: ${p1StrongPct}%`;
+  if (elSP2) elSP2.textContent = `${p2StrongPct}% :${p2NameShort}`;
+  if (elSBar) elSBar.style.width = `${Math.max(2, Math.min(98, p1StrongPct))}%`;
+
+  const fmtRes = v => `${v >= 0 ? "+" : ""}${Math.round(v)}`;
+  const elA0 = document.getElementById("obsKpiA0");
+  if (elA0) {
+    elA0.textContent = fmtRes(d.A0);
+    elA0.style.color = d.A0 >= 0 ? "var(--p1)" : "var(--p2)";
+  }
+  const elDr = document.getElementById("obsKpiDrift");
+  if (elDr) {
+    elDr.textContent = fmtRes(d.expected_drift);
+    elDr.style.color = d.expected_drift >= 0 ? "var(--p1)" : "var(--p2)";
+  }
+  const elIn = document.getElementById("obsKpiInit");
+  if (elIn) {
+    if (p1InitPct >= 50) {
+      elIn.textContent = `P1 ${p1InitPct}%`;
+      elIn.style.color = "var(--p1)";
+    } else {
+      elIn.textContent = `P2 ${p2InitPct}%`;
+      elIn.style.color = "var(--p2)";
+    }
+  }
+  const elVol = document.getElementById("obsKpiVol");
+  const elVolCell = document.getElementById("obsKpiVolCell");
+  if (elVol) {
+    elVol.textContent = `±${Math.round(d.std_drift)}`;
+  }
+  if (elVolCell) {
+    elVolCell.title = `Tactical Volatility σ(ΔA)=±${Math.round(d.std_drift)} • Tail Risk CVaR₁₀%: P1 ${fmtRes(d.cvar10_p1)} | P2 ${fmtRes(-d.cvar10_p2)}`;
+  }
+
+  // Draw Multi-Horizon Advantage Fan Chart (Now .. +40s)
+  const q = d.quantiles;
+  const secs = d.step_secs || [0, 5, 10, 15, 20, 25, 30, 35, 40];
+  const K = secs.length;
+  const padL = 38, padR = 10, padT = 8, padB = 16;
+  const cw = Math.max(20, w - padL - padR);
+  const ch = Math.max(20, h - padT - padB);
+
+  let yMin = Math.min(0, ...q.p10);
+  let yMax = Math.max(0, ...q.p90);
+  (d.branches || []).forEach(br => {
+    br.forEach(v => {
+      if (v < yMin) yMin = v;
+      if (v > yMax) yMax = v;
+    });
+  });
+  const span = Math.max(250.0, yMax - yMin);
+  yMin -= span * 0.08;
+  yMax += span * 0.08;
+
+  const xOf = i => padL + (i / Math.max(1, K - 1)) * cw;
+  const yOf = v => padT + (1.0 - (v - yMin) / Math.max(1e-6, yMax - yMin)) * ch;
+
+  // Background zero line (A = 0) & static A(tau_0) reference line
+  const yZero = yOf(0);
+  if (yZero >= padT && yZero <= padT + ch) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(padL, yZero);
+    ctx.lineTo(padL + cw, yZero);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Shaded p10..p90 outer fan
+  const leadEnd = q.p50[K - 1] >= 0;
+  const bandOuter = leadEnd ? "rgba(239, 68, 68, 0.16)" : "rgba(59, 130, 246, 0.16)";
+  const bandInner = leadEnd ? "rgba(239, 68, 68, 0.30)" : "rgba(59, 130, 246, 0.30)";
+  const lineCol = leadEnd ? "#f87171" : "#60a5fa";
+
+  const drawBand = (loArr, hiArr, fillStyle) => {
+    ctx.fillStyle = fillStyle;
+    ctx.beginPath();
+    for (let i = 0; i < K; i++) {
+      const x = xOf(i), y = yOf(hiArr[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    for (let i = K - 1; i >= 0; i--) {
+      ctx.lineTo(xOf(i), yOf(loArr[i]));
+    }
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  drawBand(q.p10, q.p90, bandOuter);
+  drawBand(q.p25, q.p75, bandInner);
+
+  // Individual stochastic branch trajectories (spaghetti lines)
+  (d.branches || []).slice(0, 14).forEach(br => {
+    ctx.strokeStyle = br[K - 1] >= 0 ? "rgba(248, 113, 113, 0.22)" : "rgba(96, 165, 250, 0.22)";
+    ctx.lineWidth = 0.85;
+    ctx.beginPath();
+    for (let i = 0; i < K; i++) {
+      const x = xOf(i), y = yOf(br[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  });
+
+  // Median trajectory p50
+  ctx.strokeStyle = lineCol;
+  ctx.lineWidth = 2.0;
+  ctx.beginPath();
+  for (let i = 0; i < K; i++) {
+    const x = xOf(i), y = yOf(q.p50[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Origin dot at tau_0
+  ctx.fillStyle = "#f8fafc";
+  ctx.beginPath();
+  ctx.arc(xOf(0), yOf(q.p50[0]), 2.8, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Y-axis ticks & X-axis time horizon labels
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "9px ui-monospace, monospace";
+  ctx.textAlign = "right";
+  ctx.fillText(fmtRes(yMax), padL - 4, padT + 7);
+  if (yZero >= padT + 9 && yZero <= padT + ch - 7) {
+    ctx.fillText("0", padL - 4, yZero + 3);
+  }
+  ctx.fillText(fmtRes(yMin), padL - 4, padT + ch);
+
+  ctx.textAlign = "center";
+  [0, 2, 4, 6, K - 1].forEach(idx => {
+    if (idx < K) {
+      const lbl = idx === 0 ? "Now" : `+${Math.round(secs[idx])}s`;
+      ctx.fillText(lbl, xOf(idx), h - 3);
+    }
+  });
+}
+
 function renderHUDAndForces() {
   if (!FRAME || !FRAME.hud) return;
   const h = FRAME.hud;
@@ -2990,6 +3349,34 @@ function computeFieldOverlayGrid() {
   const grid = Array.from({ length: G }, () => new Float32Array(G));
   let isDiverging = true;
   let label = "";
+
+  // Case 0: Multi-Horizon Stochastic Observer Threat Projection (+40s Rollout)
+  if (bgMode.startsWith("threat_")) {
+    if (!OBSERVER_DATA || !OBSERVER_DATA.threat_grid_net) {
+      LAST_FIELD_EVAL = null;
+      return null;
+    }
+    const src = bgMode === "threat_p1_risk"
+      ? OBSERVER_DATA.threat_grid_p1
+      : (bgMode === "threat_p2_risk" ? OBSERVER_DATA.threat_grid_p2 : OBSERVER_DATA.threat_grid_net);
+    isDiverging = (bgMode === "threat_net");
+    label = bgMode === "threat_p1_risk"
+      ? "Rollout Risk to P1 (+40s)"
+      : (bgMode === "threat_p2_risk" ? "Rollout Risk to P2 (+40s)" : "Net Threat: P1 vs P2 Pressure (+40s)");
+    let lo = 1e9, hi = -1e9, maxAbs = 1e-6;
+    for (let iy = 0; iy < G; iy++) {
+      const row = src[iy] || [];
+      for (let ix = 0; ix < G; ix++) {
+        const v = row[ix] || 0;
+        grid[iy][ix] = v;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        if (Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
+      }
+    }
+    LAST_FIELD_EVAL = { grid, G, isDiverging, lo, hi, maxAbs, label, dims: [], bgMode };
+    return LAST_FIELD_EVAL;
+  }
 
   // Case A: Monosemantic Layer-6 Top-K SAE Feature Overlay is selected!
   const saeFeat = getActiveSAEFeature();
@@ -3645,6 +4032,55 @@ function renderMap() {
     });
   }
 
+  // 3b. Dynamic Squad Tokens (1 + M=64 Top-2 Conserved Squads & +40s Attrition Risk)
+  const chkSquads = document.getElementById("chkSquadTokens");
+  if (((chkSquads && chkSquads.checked) || bgMode.startsWith("threat_")) && OBSERVER_DATA && OBSERVER_DATA.squads) {
+    ctx.save();
+    OBSERVER_DATA.squads.forEach(sq => {
+      const [sx, sy, sc] = worldToCanvas(sq.x, sq.y, w, h);
+      const rx = Math.max(5, Math.min(48, sq.spread_x * sc));
+      const ry = Math.max(5, Math.min(48, sq.spread_y * sc));
+      const isP1 = sq.owner === 1;
+      const hiddenInFog = sq.vis_by_opp < 0.35;
+      ctx.strokeStyle = isP1
+        ? (hiddenInFog ? "rgba(248, 113, 113, 0.55)" : "rgba(252, 165, 165, 0.92)")
+        : (hiddenInFog ? "rgba(96, 165, 250, 0.55)" : "rgba(147, 197, 253, 0.92)");
+      ctx.lineWidth = sq.risk >= 150 ? 2.0 : 1.25;
+      ctx.setLineDash(hiddenInFog ? [3, 3] : []);
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Squad centroid diamond
+      ctx.setLineDash([]);
+      ctx.fillStyle = isP1 ? "#ef4444" : "#3b82f6";
+      ctx.strokeStyle = "#f8fafc";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 4);
+      ctx.lineTo(sx + 4, sy);
+      ctx.lineTo(sx, sy + 4);
+      ctx.lineTo(sx - 4, sy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      if (sq.risk >= 140) {
+        const tag = `-${Math.round(sq.risk)}`;
+        ctx.font = "bold 9.5px ui-monospace, monospace";
+        const tw = ctx.measureText(tag).width + 6;
+        ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+        ctx.fillRect(sx - tw * 0.5, sy - ry - 13, tw, 12);
+        ctx.strokeStyle = isP1 ? "#f87171" : "#60a5fa";
+        ctx.strokeRect(sx - tw * 0.5, sy - ry - 13, tw, 12);
+        ctx.fillStyle = "#fde047";
+        ctx.textAlign = "center";
+        ctx.fillText(tag, sx, sy - ry - 4);
+      }
+    });
+    ctx.restore();
+  }
+
   // 4. Spatial 2D-RoPE Attention Rays from SELECTED_TOK_IDX
   if (document.getElementById("chkAttnRays").checked && TOKEN_DETAILS && TOKEN_DETAILS.outgoing) {
     const srcTok = FRAME.tokens.find(t => t.tok_idx === SELECTED_TOK_IDX);
@@ -4088,10 +4524,30 @@ document.getElementById("btnPlayPause").addEventListener("click", e => {
   }
 });
 
-["mapBgMode", "fieldCombineMode", "unitColorMode", "chkFieldContours", "chkMomentumQuivers", "chkAttnRays", "chkForceAdv", "chkForceKin", "chkS2MA", "chkAnchors"].forEach(id => {
+["mapBgMode", "fieldCombineMode", "unitColorMode", "chkFieldContours", "chkMomentumQuivers", "chkAttnRays", "chkForceAdv", "chkForceKin", "chkS2MA", "chkSquadTokens", "chkAnchors"].forEach(id => {
   const el = document.getElementById(id);
-  if (el) el.addEventListener("change", () => renderMap());
+  if (el) el.addEventListener("change", () => {
+    renderMap();
+    renderObserverPanel();
+  });
 });
+
+const btnToggleThreat = document.getElementById("btnToggleThreatMap");
+if (btnToggleThreat) {
+  btnToggleThreat.addEventListener("click", () => {
+    const bgSel = document.getElementById("mapBgMode");
+    const sqChk = document.getElementById("chkSquadTokens");
+    if (!bgSel) return;
+    if (bgSel.value.startsWith("threat_")) {
+      bgSel.value = "diff";
+      if (sqChk) sqChk.checked = false;
+    } else {
+      bgSel.value = "threat_net";
+      if (sqChk) sqChk.checked = true;
+    }
+    renderAll();
+  });
+}
 
 const alphaSliderEl = document.getElementById("fieldAlphaSlider");
 if (alphaSliderEl) {

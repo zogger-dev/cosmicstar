@@ -130,7 +130,22 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
                     "checkpoints": INSPECTOR.list_checkpoints(),
                     "active_l1_ckpt": INSPECTOR.active_l1_ckpt,
                     "active_l2_ckpt": INSPECTOR.active_l2_ckpt,
+                    "active_observer_ckpt": INSPECTOR.active_observer_ckpt,
                 }
+            )
+            return
+
+        # /api/game/{gid}/observer/{loop_t}
+        if path.startswith("/api/game/") and "/observer/" in path:
+            parts = path.strip("/").split("/")
+            gid = parts[2]
+            loop_t = int(parts[4])
+            n_branches = int(qs.get("branches", ["32"])[0])
+            horizon = int(qs.get("horizon", ["8"])[0])
+            self._send_json(
+                INSPECTOR.inspect_observer_rollout(
+                    gid, loop_t=loop_t, n_branches=n_branches, horizon_steps=horizon
+                )
             )
             return
 
@@ -192,10 +207,13 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
                 INSPECTOR.load_l1_checkpoint(body["l1_ckpt"])
             if "l2_ckpt" in body and os.path.exists(body["l2_ckpt"]):
                 INSPECTOR.load_l2_checkpoint(body["l2_ckpt"])
+            if "observer_ckpt" in body and os.path.exists(body["observer_ckpt"]):
+                INSPECTOR.load_observer_checkpoint(body["observer_ckpt"])
             self._send_json(
                 {
                     "active_l1_ckpt": INSPECTOR.active_l1_ckpt,
                     "active_l2_ckpt": INSPECTOR.active_l2_ckpt,
+                    "active_observer_ckpt": INSPECTOR.active_observer_ckpt,
                 }
             )
             return
@@ -229,6 +247,10 @@ def main():
         "--l2_ckpt",
         default="data/worldmodel/runs/energy_l2_535g_cont_5k/model_l2_step5000.pt",
     )
+    ap.add_argument(
+        "--observer_ckpt",
+        default="data/worldmodel/runs/observer_v1/model_best.pt",
+    )
     args = ap.parse_args()
 
     print("Initializing CosmicStar WorldModelInspector on GPU...", flush=True)
@@ -241,7 +263,9 @@ def main():
         except Exception as e:
             print(f"Warning: could not auto-extract SC2 game icons ({e}); falling back to SVGs.", flush=True)
 
-    INSPECTOR = WorldModelInspector(l1_ckpt=args.l1_ckpt, l2_ckpt=args.l2_ckpt)
+    INSPECTOR = WorldModelInspector(
+        l1_ckpt=args.l1_ckpt, l2_ckpt=args.l2_ckpt, observer_ckpt=args.observer_ckpt
+    )
     # Warm up CUDA autograd kernels on first unseen game so first browser load is <140ms
     if INSPECTOR.catalog:
         gid0 = INSPECTOR.catalog[0]["gid"]

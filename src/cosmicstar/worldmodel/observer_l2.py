@@ -1511,13 +1511,30 @@ class ObserverWorldModelL2(nn.Module):
             static_map=static_map,
         )
         a0 = h0["A1"].float()[0]  # scalar in 1,000-resource units
-        init_sq_val = (
-            cur_s["q_squad"][0, :, :, SP.SQ["cost"]]
-            + 0.5 * (cur_s["q_squad"][0, :, :, SP.SQ["hp"]] + cur_s["q_squad"][0, :, :, SP.SQ["shield"]])
-        ) * cur_s["active"][0].float()  # [2, M]
-        init_pos = cur_s["q_squad"][0, :, :, 0:2]      # [2, M, 2]
-        init_spread = cur_s["q_squad"][0, :, :, 4:6]   # [2, M, 2]
-        init_act = cur_s["active"][0]                  # [2, M]
+        def _sq_val_fn(s_d: dict[str, torch.Tensor]) -> torch.Tensor:
+            return (
+                s_d["q_squad"][..., SP.SQ["cost"]]
+                + 0.5 * (s_d["q_squad"][..., SP.SQ["hp"]] + s_d["q_squad"][..., SP.SQ["shield"]])
+            ) * s_d["active"].float()
+
+        prev_sq_val = _sq_val_fn(cur_s)          # [N, 2, M]
+        cum_sq_losses = torch.zeros_like(prev_sq_val)
+        init_pos = cur_s["q_squad"][0, :, :, 0:2]  # [2, M, 2]
+        init_act = cur_s["active"][0]            # [2, M]
+
+        if static_map is not None and "half" in static_map:
+            hx = float(static_map["half"][0, 0].item()) / E.MAP_SCALE
+            hy = float(static_map["half"][0, 1].item()) / E.MAP_SCALE
+        else:
+            hx, hy = 0.85, 0.85
+        xs = torch.linspace(-hx, hx, grid_w, device=dev)
+        ys = torch.linspace(-hy, hy, grid_h, device=dev)
+        gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+        grid_pts = torch.stack([gx, gy], dim=-1).view(-1, 2)  # [G, 2]
+        threat_acc = [
+            torch.zeros(grid_pts.shape[0], device=dev),
+            torch.zeros(grid_pts.shape[0], device=dev),
+        ]
 
         a_steps = [a0.expand(N)]
 
@@ -1526,10 +1543,29 @@ class ObserverWorldModelL2(nn.Module):
             h_last = h_seq[:, -1]  # [N, 2, d_model]
             c_last = c_seq[:, -1]  # [N, 2, d_cap]
 
+            prev_pos = cur_s["q_squad"][:, :, :, 0:2]
+            prev_act_k = cur_s["active"]
+
             u_samp, tempo_next = self.flow_prior.sample(
                 h_last, c_last, steps=flow_steps, temperature=temperature
             )
             cur_s, pieces_k = self.ph.step_dynamics(cur_s, u_samp.float(), static_map=static_map)
+
+            # Accumulate step-level attrition at actual rolled-out engagement coordinates (unmasked by later reinforcements)
+            next_sq_val = _sq_val_fn(cur_s)
+            step_loss = (prev_sq_val - next_sq_val).clamp(min=0.0) * 1000.0 * prev_act_k.float()
+            cum_sq_losses = cum_sq_losses + step_loss
+            prev_sq_val = next_sq_val
+
+            disc_k = 0.92 ** step_k
+            mid_pos = 0.5 * (prev_pos + cur_s["q_squad"][:, :, :, 0:2])  # [N, 2, M, 2]
+            for p_i in (0, 1):
+                pts_p = mid_pos[:, p_i].reshape(-1, 2)                    # [N*M, 2]
+                w_p = (step_loss[:, p_i] * (disc_k / N)).reshape(-1)      # [N*M]
+                nz = w_p > 0.05
+                if nz.any():
+                    d2 = (grid_pts.unsqueeze(1) - pts_p[nz].unsqueeze(0)).square().sum(dim=-1)
+                    threat_acc[p_i] = threat_acc[p_i] + torch.matmul(torch.exp(-d2 / (2.0 * 0.09**2)), w_p[nz])
 
             # Evaluate new state's Hamiltonian & update fog-of-war visibility for next step!
             hk = self.ph.evaluate_hamiltonian(
@@ -1570,36 +1606,13 @@ class ObserverWorldModelL2(nn.Module):
         k_cvar = max(1, N // 10)
         cvar10_p1 = torch.topk(drift, k=k_cvar, largest=False).values.mean()
 
-        # Per-squad expected attrition/risk over the horizon (in resource-equivalent units)
-        end_sq_val = (
-            cur_s["q_squad"][:, :, :, SP.SQ["cost"]]
-            + 0.5 * (cur_s["q_squad"][:, :, :, SP.SQ["hp"]] + cur_s["q_squad"][:, :, :, SP.SQ["shield"]])
-        ) * cur_s["active"].float()  # [N, 2, M]
-        sq_losses = (init_sq_val.unsqueeze(0) - end_sq_val).clamp(min=0.0) * 1000.0  # [N, 2, M]
-        # Combine mean expected damage + 90th-percentile tail damage (captures 40%-branch Pool snipes!)
-        sq_p90 = torch.quantile(sq_losses, 0.90, dim=0)
-        squad_risk = (0.5 * sq_losses.mean(dim=0) + 0.5 * sq_p90) * init_act.float()  # [2, M]
-
-        # Project emergent squad risk onto 2D playable map grid [grid_h, grid_w]
-        if static_map is not None and "half" in static_map:
-            hx = float(static_map["half"][0, 0].item()) / E.MAP_SCALE
-            hy = float(static_map["half"][0, 1].item()) / E.MAP_SCALE
-        else:
-            hx, hy = 0.85, 0.85
-        xs = torch.linspace(-hx, hx, grid_w, device=dev)
-        ys = torch.linspace(-hy, hy, grid_h, device=dev)
-        gy, gx = torch.meshgrid(ys, xs, indexing="ij")  # [H_g, W_g]
-
-        threat_grids = []
-        for p_i in (0, 1):
-            # Threat TO player p_i's exposed structures & forces across rollout futures
-            sig_x = init_spread[p_i, :, 0].clamp(0.05, 0.20)
-            sig_y = init_spread[p_i, :, 1].clamp(0.05, 0.20)
-            dx2 = (gx.unsqueeze(-1) - init_pos[p_i, :, 0]) ** 2 / (2.0 * sig_x**2)
-            dy2 = (gy.unsqueeze(-1) - init_pos[p_i, :, 1]) ** 2 / (2.0 * sig_y**2)
-            kern = torch.exp(-(dx2 + dy2)) * init_act[p_i].float()  # [H_g, W_g, M]
-            t_grid = torch.matmul(kern, squad_risk[p_i])            # [H_g, W_g]
-            threat_grids.append(t_grid)
+        # Per-squad gross expected + 90th-percentile tail attrition across the 40s rollout
+        sq_p90 = torch.quantile(cum_sq_losses, 0.90, dim=0)
+        squad_risk = (0.5 * cum_sq_losses.mean(dim=0) + 0.5 * sq_p90) * init_act.float()  # [2, M]
+        threat_grids = [
+            threat_acc[0].view(grid_h, grid_w),
+            threat_acc[1].view(grid_h, grid_w),
+        ]
 
         end_total_cost = (
             cur_s["q_squad"][:, :, :, SP.SQ["cost"]] * cur_s["active"].float()
