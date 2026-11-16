@@ -83,12 +83,68 @@ N_RACES = 5
 UNKNOWN_ABILITY = 2**31 - 1
 
 
+def _parse_single_ruleset(g, rels, widths):
+    w_u, w_w, w_a, w_g = (
+        widths["unit"],
+        widths["weapon"],
+        widths["ability"],
+        widths["upgrade"],
+    )
+    unit_feat_dim = w_u + w_w
+    speed = np.zeros(N_RAW_TYPES, np.float32)
+    mass = np.zeros(N_RAW_TYPES, np.float32)
+    unit_feat = np.zeros((N_RAW_TYPES, unit_feat_dim), np.float32)
+    for u in g["units"]:
+        sp = u["scal"][SPEED_AT] * 5 / LOOPS_PER_SECOND_EXPORT
+        ac = float(np.expm1(u["scal"][ACCEL_AT] * 8))
+        m = (
+            0.0
+            if ac >= INSTANT_ACCEL or ac <= 0
+            else LOOPS_PER_SECOND_EXPORT**2 / ac
+        )
+        scal = np.asarray(u["scal"], dtype=np.float32)
+        wpn = (
+            np.sum(u["weapons"], axis=0, dtype=np.float32)
+            if u["weapons"]
+            else np.zeros(w_w, np.float32)
+        )
+        uf = np.concatenate([scal, wpn])
+        for a in u["api_ids"]:
+            if 0 <= a < N_RAW_TYPES:
+                speed[a], mass[a] = sp, m
+                unit_feat[a] = uf
+
+    rel_u = rels.index("a_makes_u")
+    rel_g = rels.index("a_makes_g")
+    makes_u = {s: d_ for r, s, d_ in g["edges"] if r == rel_u}
+    makes_g = {s: d_ for r, s, d_ in g["edges"] if r == rel_g}
+    abil_by_raw = {}
+    for i, ab in enumerate(g["abilities"]):
+        af = np.asarray(ab["feat"], dtype=np.float32)
+        u_sc = (
+            np.asarray(g["units"][makes_u[i]]["scal"], dtype=np.float32)
+            if i in makes_u
+            else np.zeros(w_u, np.float32)
+        )
+        g_ft = (
+            np.asarray(g["upgrades"][makes_g[i]]["feat"], dtype=np.float32)
+            if i in makes_g
+            else np.zeros(w_g, np.float32)
+        )
+        vec = np.concatenate([af, u_sc, g_ft])
+        for a_id in ab["api_ids"]:
+            if a_id is not None and a_id >= 0:
+                abil_by_raw[int(a_id)] = vec
+    return speed, mass, unit_feat, abil_by_raw
+
+
 class Tables:
     """Per raw unit type (API id): value, build_time (loops), race, speed (map units a
     loop), mass (loops² a map unit: the inverse of acceleration; 0 when instant),
     energy_max (0: no pool), flying, cliff, plus static ruleset feature vectors for
     units (unit_scal + summed weapons) and abilities (abil_feat + produced unit_scal +
-    researched upg_feat)."""
+    researched upg_feat) across both the primary `base_build` and all rulesets in
+    `rulesets.json`."""
 
     def __init__(
         self,
@@ -98,19 +154,24 @@ class Tables:
         energy_types="data/worldmodel/energy_types.json",
     ):
         value, build, race = (np.zeros(N_RAW_TYPES, np.float32) for _ in range(3))
+        is_struct = np.zeros(N_RAW_TYPES, np.float32)
+        is_worker = np.zeros(N_RAW_TYPES, np.float32)
         for t, u in json.load(open(unit_data)).items():
             t = int(t)
             if 0 <= t < N_RAW_TYPES:
                 value[t] = u["minerals"] + u["vespene"]
                 build[t] = u["build_time"]
                 race[t] = u["race"]
+                is_struct[t] = 1.0 if u.get("structure", False) else 0.0
+                is_worker[t] = 1.0 if u.get("worker", False) else 0.0
         rs_doc = json.load(open(rulesets))
         widths = rs_doc["widths"]
         rels = list(rs_doc["relations"])
         rs = rs_doc["rulesets"]
-        keys = [k for k in rs if k.split("_")[0] == str(base_build)]
-        self.ruleset = keys[0] if keys else sorted(rs)[-1]
-        g = rs[self.ruleset]
+        self.ruleset_names = sorted(rs.keys())
+        self.ruleset_to_id = {k: i for i, k in enumerate(self.ruleset_names)}
+        keys = [k for k in self.ruleset_names if k.split("_")[0] == str(base_build)]
+        self.ruleset = keys[0] if keys else self.ruleset_names[-1]
 
         w_u, w_w, w_a, w_g = (
             widths["unit"],
@@ -121,53 +182,6 @@ class Tables:
         self.unit_feat_dim = w_u + w_w
         self.abil_feat_dim = w_a + w_u + w_g
 
-        speed, mass = (
-            np.zeros(N_RAW_TYPES, np.float32),
-            np.zeros(N_RAW_TYPES, np.float32),
-        )
-        unit_feat = np.zeros((N_RAW_TYPES, self.unit_feat_dim), np.float32)
-        for u in g["units"]:
-            sp = u["scal"][SPEED_AT] * 5 / LOOPS_PER_SECOND_EXPORT
-            ac = float(np.expm1(u["scal"][ACCEL_AT] * 8))
-            m = (
-                0.0
-                if ac >= INSTANT_ACCEL or ac <= 0
-                else LOOPS_PER_SECOND_EXPORT**2 / ac
-            )
-            scal = np.asarray(u["scal"], dtype=np.float32)
-            wpn = (
-                np.sum(u["weapons"], axis=0, dtype=np.float32)
-                if u["weapons"]
-                else np.zeros(w_w, np.float32)
-            )
-            uf = np.concatenate([scal, wpn])
-            for a in u["api_ids"]:
-                if 0 <= a < N_RAW_TYPES:
-                    speed[a], mass[a] = sp, m
-                    unit_feat[a] = uf
-
-        rel_u = rels.index("a_makes_u")
-        rel_g = rels.index("a_makes_g")
-        makes_u = {s: d_ for r, s, d_ in g["edges"] if r == rel_u}
-        makes_g = {s: d_ for r, s, d_ in g["edges"] if r == rel_g}
-        self.abil_by_raw = {}
-        for i, ab in enumerate(g["abilities"]):
-            af = np.asarray(ab["feat"], dtype=np.float32)
-            u_sc = (
-                np.asarray(g["units"][makes_u[i]]["scal"], dtype=np.float32)
-                if i in makes_u
-                else np.zeros(w_u, np.float32)
-            )
-            g_ft = (
-                np.asarray(g["upgrades"][makes_g[i]]["feat"], dtype=np.float32)
-                if i in makes_g
-                else np.zeros(w_g, np.float32)
-            )
-            vec = np.concatenate([af, u_sc, g_ft])
-            for a_id in ab["api_ids"]:
-                if a_id is not None and a_id >= 0:
-                    self.abil_by_raw[int(a_id)] = vec
-
         energy_max, flying = (np.zeros(N_RAW_TYPES, np.float32) for _ in range(2))
         if os.path.exists(energy_types):
             et = json.load(open(energy_types))
@@ -177,11 +191,27 @@ class Tables:
                 flying[t] = 1.0
         cliff = np.zeros(N_RAW_TYPES, np.float32)
         cliff[list(CLIFF_WALKERS)] = 1.0
+
+        all_k_list = []
+        all_uf_list = []
+        self._all_abil_by_raw = []
+        for rk in self.ruleset_names:
+            sp_r, m_r, uf_r, ab_r = _parse_single_ruleset(rs[rk], rels, widths)
+            all_k_list.append(
+                np.stack([value, m_r, sp_r, build, energy_max, flying, cliff], 1)
+            )
+            all_uf_list.append(uf_r)
+            self._all_abil_by_raw.append(ab_r)
+
+        def_idx = self.ruleset_to_id[self.ruleset]
+        self.abil_by_raw = self._all_abil_by_raw[def_idx]
         self.race = torch.from_numpy(race.astype(np.int64))
-        self.k = torch.from_numpy(
-            np.stack([value, mass, speed, build, energy_max, flying, cliff], 1)
-        )
-        self.unit_feat = torch.from_numpy(unit_feat)
+        self.is_struct = torch.from_numpy(is_struct)
+        self.is_worker = torch.from_numpy(is_worker)
+        self.k = torch.from_numpy(all_k_list[def_idx])
+        self.unit_feat = torch.from_numpy(all_uf_list[def_idx])
+        self.all_k = torch.from_numpy(np.stack(all_k_list, axis=0))
+        self.all_unit_feat = torch.from_numpy(np.stack(all_uf_list, axis=0))
 
     def abil_feat(self, vocab):
         """[vocab.n_abilities, abil_feat_dim] static feature tensor indexed by vocab ability id."""
@@ -190,6 +220,133 @@ class Tables:
             if raw_a in self.abil_by_raw and 0 <= idx < vocab.n_abilities:
                 out[idx] = self.abil_by_raw[raw_a]
         return torch.from_numpy(out)
+
+    def all_abil_feat(self, vocab):
+        """[N_RS, vocab.n_abilities, abil_feat_dim] static ability features across all rulesets."""
+        out = np.zeros(
+            (len(self.ruleset_names), vocab.n_abilities, self.abil_feat_dim), np.float32
+        )
+        for ri, ab_map in enumerate(self._all_abil_by_raw):
+            for raw_a, idx in vocab._abil.items():
+                if raw_a in ab_map and 0 <= idx < vocab.n_abilities:
+                    out[ri, idx] = ab_map[raw_a]
+        return torch.from_numpy(out)
+
+
+def extract_entity_perception(
+    b: dict[str, torch.Tensor],
+    f_idx: torch.Tensor | list[int],
+    is_struct_buf: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """Extracts exact SC2 engine per-player entity & effect perception at frames `f_idx`:
+      - `gt_vis_live`: `[B, nf, 2, R]` bool (player `p` has full live sight & detection on `r`)
+      - `gt_shimmer`: `[B, nf, 2, R]` bool (player `p` sees translucent cloak shimmer at `r`, `display=3, cloak=1`)
+      - `gt_seen_struct`: `[B, nf, 2, R]` bool (player `p` has fog-snapshot memory of structure `r`)
+      - `onscreen`: `[B, nf, R]` bool (`F2_ONSCREEN` bit in owner's camera view)
+      - `g_vis`: `[B, nf, 2, R]` bool (raw `vis == 2` cell lookup at entity `(x, y)`)
+      - `eff_vis`: `[B, nf, 2, X]` bool (raw `vis == 2` cell lookup at effect `(x, y)`)
+    """
+    dev = b["mask"].device
+    f_t = torch.as_tensor(f_idx, device=dev, dtype=torch.long)
+    B = b["mask"].shape[0]
+    nf = len(f_t)
+    R = b["mask"].shape[2]
+    X = b["eff_mask"].shape[2] if "eff_mask" in b else 0
+
+    alive_map = b["mask"][:, f_t] & b["alive"][:, f_t] & (b["inside"][:, f_t] == 0)
+    num = b["num"][:, f_t]
+    xy_raw = torch.stack([b["x"][:, f_t], b["y"][:, f_t]], dim=-1).float()
+
+    cloak = num[..., I["cloak"]].round().long()
+    flags = num[..., I["flags"]].round().long()
+    onscreen = ((num[..., I["flags2"]].round().long() & 4) != 0) & alive_map
+    cloaked_undetected = (cloak == 4) | (cloak == 1)
+    burrowed = (flags & 2) != 0
+
+    if is_struct_buf is not None:
+        rtype = b["rtype"][:, f_t].clamp(0, is_struct_buf.shape[0] - 1)
+        is_st = is_struct_buf.to(dev)[rtype] > 0.5
+    else:
+        is_st = torch.zeros_like(alive_map)
+
+    if "grid" in b and "origin" in b:
+        with torch.autocast(device_type=dev.type, enabled=False):
+            gr = b["grid"][:, f_t].float()  # [B, nf, gh, gw, C_LIVE]
+            gh, gw = gr.shape[2:4]
+            gr_chw = gr.reshape(B * nf, gh, gw, C_LIVE).permute(0, 3, 1, 2)
+            origin = b["origin"][:, None, None, :].float()
+            wh = xy_raw.new_tensor([float(gw), float(gh)])
+            at_ent = (((xy_raw - origin) / wh) * 2.0 - 1.0).reshape(B * nf, R, 1, 2)
+            samp_ent = (
+                F.grid_sample(gr_chw, at_ent, mode="nearest", align_corners=False)
+                .squeeze(-1)
+                .permute(0, 2, 1)
+                .reshape(B, nf, R, C_LIVE)
+            )
+            g_vis = torch.stack(
+                [samp_ent[..., 0] > 0.5, samp_ent[..., 5] > 0.5], dim=2
+            )  # [B, nf, 2, R]
+            g_seen = torch.stack(
+                [samp_ent[..., 1] > 0.5, samp_ent[..., 6] > 0.5], dim=2
+            )  # [B, nf, 2, R]
+
+            if X > 0 and "eff_xy" in b and "center" in b:
+                eff_xy_abs = b["eff_xy"][:, f_t].float() + b["center"][:, None, None, :].float()
+                at_eff = (((eff_xy_abs - origin) / wh) * 2.0 - 1.0).reshape(B * nf, X, 1, 2)
+                samp_eff = (
+                    F.grid_sample(gr_chw, at_eff, mode="nearest", align_corners=False)
+                    .squeeze(-1)
+                    .permute(0, 2, 1)
+                    .reshape(B, nf, X, C_LIVE)
+                )
+                eff_vis = torch.stack(
+                    [samp_eff[..., 0] > 0.5, samp_eff[..., 5] > 0.5], dim=2
+                )
+            else:
+                eff_vis = torch.ones(B, nf, 2, X, dtype=torch.bool, device=dev)
+    else:
+        g_vis = alive_map.unsqueeze(2).expand(B, nf, 2, R)
+        g_seen = g_vis
+        eff_vis = torch.ones(B, nf, 2, X, dtype=torch.bool, device=dev)
+
+    # Burrowed detection check via own detectors' detect_range (cloaked units already flip u_cloak 4 -> 2)
+    det_r = num[..., I["detect_range"]].float()
+    owner_raw = b["owner"][:, None, :].expand(B, nf, R)  # 0=P1, 1=P2, 2=NEUTRAL
+    det_by_p = []
+    has_burrow = bool(burrowed.any()) if not torch._dynamo.is_compiling() else True
+    if has_burrow:
+        with torch.autocast(device_type=dev.type, enabled=False):
+            for p_i in (0, 1):
+                is_det_p = alive_map & (owner_raw == p_i) & (det_r > 0.5)
+                r_allow = (det_r + 1.0) * is_det_p.float()  # [B, nf, R_det]
+                # Pairwise squared distance [B, nf, R_det, R_target] only if burrowed
+                dist2 = (xy_raw.unsqueeze(-2) - xy_raw.unsqueeze(-3)).square().sum(dim=-1)
+                in_det = is_det_p.unsqueeze(-1) & (dist2 <= r_allow.unsqueeze(-1).square())
+                det_by_p.append(in_det.any(dim=-2))
+        det_p = torch.stack(det_by_p, dim=2)  # [B, nf, 2, R]
+    else:
+        det_p = torch.zeros(B, nf, 2, R, dtype=torch.bool, device=dev)
+
+    vis_list, shim_list, snap_list = [], [], []
+    for p_i in (0, 1):
+        gv = g_vis[:, :, p_i]
+        gs = g_seen[:, :, p_i]
+        dp = det_p[:, :, p_i]
+        v_live = alive_map & gv & (~cloaked_undetected) & ((~burrowed) | dp)
+        v_shim = alive_map & gv & cloaked_undetected
+        v_snap = alive_map & (~gv) & gs & is_st & (~cloaked_undetected) & (~burrowed)
+        vis_list.append(v_live)
+        shim_list.append(v_shim)
+        snap_list.append(v_snap)
+
+    return dict(
+        gt_vis_live=torch.stack(vis_list, dim=2),
+        gt_shimmer=torch.stack(shim_list, dim=2),
+        gt_seen_struct=torch.stack(snap_list, dim=2),
+        onscreen=onscreen,
+        g_vis=g_vis,
+        eff_vis=eff_vis,
+    )
 
 
 def _compute_dtype(ref: torch.Tensor) -> torch.dtype:
@@ -237,8 +394,11 @@ class ContinuousPotentialField(nn.Module):
         in_dim = (4 * n_freqs) + len(offsets) * c_map
         self.net = E.mlp(in_dim, d, d)
 
-    def forward(self, b, f_idx, pos):
-        """pos: [B, nf, K, 2] in map units relative to map center -> [B, nf, K, d]."""
+    def forward(self, b, f_idx, pos, owner=None):
+        """pos: [B, nf, K, 2] in map units relative to map center -> [B, nf, K, d].
+        When `owner` (`[B, nf, K]`: `E.P1=1`, `E.P2=2`, `E.GROUND=0`) is supplied, each
+        player's entities read ONLY their own 5 live visibility/creep channels (zeroing
+        opponent vision/seen channels so invisible enemy observers cannot leak!)."""
         B, nf, K, _ = pos.shape
         dev = pos.device
         dt = _compute_dtype(self.net[0].weight)
@@ -268,8 +428,16 @@ class ContinuousPotentialField(nn.Module):
                     align_corners=False,
                 )
                 .permute(0, 2, 3, 1)
-                .reshape(B, nf, K, n_pts * C_LIVE)
+                .reshape(B, nf, K, n_pts, C_LIVE)
             )
+            if owner is not None:
+                keep_p1 = (owner == E.P1).to(dt)[..., None, None]
+                keep_p2 = (owner == E.P2).to(dt)[..., None, None]
+                samp_live = torch.cat(
+                    [samp_live[..., 0:5] * keep_p1, samp_live[..., 5:10] * keep_p2],
+                    dim=-1,
+                )
+            samp_live = samp_live.reshape(B, nf, K, n_pts * C_LIVE)
             samp_stat = (
                 F.grid_sample(
                     st,
@@ -452,6 +620,10 @@ class Frames(nn.Module):
         self.register_buffer("race", tables.race)
         self.register_buffer("unit_feat", tables.unit_feat)
         self.register_buffer("abil_feat", tables.abil_feat(vocab))
+        self.register_buffer("all_k_type", tables.all_k, persistent=False)
+        self.register_buffer("all_unit_feat", tables.all_unit_feat, persistent=False)
+        self.register_buffer("all_abil_feat", tables.all_abil_feat(vocab), persistent=False)
+        self.register_buffer("is_struct_type", tables.is_struct, persistent=False)
         self.register_buffer("extras_at", torch.tensor([I[n] for n in EXTRAS]))
         self.register_buffer(
             "map_omega",
@@ -563,10 +735,38 @@ class Frames(nn.Module):
             "ability": float(self.abil_emb.weight.detach().float().pow(2).mean().sqrt()),
         }
 
-    def nodes(self, rtype, abil, prod_abil):
+    def nodes(self, rtype, abil, prod_abil, rs_id=None):
         """Evaluates learned embeddings + light MLPs on the static ruleset tables once per
-        pass, projects the small vocabulary tables first, and gathers via F.embedding."""
+        pass (indexing exact per-game rulesets when `rs_id` is supplied) and gathers."""
         dt = _compute_dtype(self.cls_tok)
+        if rs_id is not None and hasattr(self, "all_unit_feat"):
+            B, nf, R = rtype.shape
+            d = self.cls_tok.shape[-1]
+            n_rs = self.all_unit_feat.shape[0]
+            ri = torch.where(rs_id >= 0, rs_id, 0).clamp(0, n_rs - 1)  # [B]
+            uf_b = self.all_unit_feat[ri].to(dt)  # [B, N_RAW_TYPES, uf_dim]
+            af_b = self.all_abil_feat[ri].to(dt)  # [B, n_abil, af_dim]
+            u_tab = self.unit_emb.weight.to(dt)[None] + self.unit_mlp(uf_b)
+            a_tab = self.abil_emb.weight.to(dt)[None] + self.abil_mlp(af_b)
+            u_c_b = self.unit_c(u_tab)  # [B, N_RAW_TYPES, d]
+            z_a = torch.zeros(B, 1, d, device=a_tab.device, dtype=dt)
+            a_c_b = torch.cat([z_a, self.abil_c(a_tab[:, 1:])], dim=1)
+            a_p_b = torch.cat([z_a, self.prod_c(a_tab[:, 1:])], dim=1)
+            z_u = torch.zeros(B, 1, self.u_dim, device=a_tab.device, dtype=dt)
+            a_u_b = torch.cat([z_u, self.abil_u(a_tab[:, 1:])], dim=1)
+
+            r_idx = rtype.clamp(0, u_c_b.shape[1] - 1).reshape(B, nf * R, 1)
+            a_idx = abil.clamp(0, a_c_b.shape[1] - 1).reshape(B, nf * R, 1)
+            p_idx = prod_abil.clamp(0, a_p_b.shape[1] - 1).reshape(B, nf * R, 1)
+
+            unit_c = torch.gather(u_c_b, 1, r_idx.expand(-1, -1, d)).view(B, nf, R, d)
+            ord_c = torch.gather(a_c_b, 1, a_idx.expand(-1, -1, d)).view(B, nf, R, d)
+            prod_c = torch.gather(a_p_b, 1, p_idx.expand(-1, -1, d)).view(B, nf, R, d)
+            ord_u = torch.gather(a_u_b, 1, a_idx.expand(-1, -1, self.u_dim)).view(
+                B, nf, R, self.u_dim
+            )
+            return unit_c, ord_c, prod_c, ord_u
+
         u_tab = self.unit_emb.weight.to(dt) + self.unit_mlp(self.unit_feat.to(dt))
         a_tab = self.abil_emb.weight.to(dt) + self.abil_mlp(self.abil_feat.to(dt))
         u_c = self.unit_c(u_tab)
@@ -584,7 +784,7 @@ class Frames(nn.Module):
         ord_u = F.embedding(a_idx, a_u, padding_idx=0)
         return unit_c, ord_c, prod_c, ord_u
 
-    def project_entities(self, c_ent_flat, rtype, mask):
+    def project_entities(self, c_ent_flat, rtype, mask, rs_id=None):
         """Projects contextualized entity tokens c_ent_flat [M, R, d] to amplitude-scaled
         latent modes z_flat [M, R, r] = m_u * softsign(W_z LayerNorm(c_u)), where m_u > 0
         is anchored to the unit's physical log-cost log(1 + value_u / 100) + 0.5 and
@@ -594,11 +794,21 @@ class Frames(nn.Module):
         m_flat = mask.reshape(M, R, 1).to(dt)
         c_normed = self.z_norm(c_ent_flat) * m_flat
 
-        u_tab = self.unit_emb.weight.to(dt) + self.unit_mlp(self.unit_feat.to(dt))
-        m_type_tab = self.mass_type(u_tab)  # [N_RAW_TYPES, 1]
-        r_idx = rtype.reshape(M, R).clamp(0, len(m_type_tab) - 1)
-        m_type = F.embedding(r_idx, m_type_tab)  # [M, R, 1]
+        if rs_id is not None and hasattr(self, "all_unit_feat"):
+            B = rs_id.shape[0]
+            nf = M // B
+            ri = torch.where(rs_id >= 0, rs_id, 0).clamp(0, self.all_unit_feat.shape[0] - 1)
+            u_tab_b = self.unit_emb.weight.to(dt)[None] + self.unit_mlp(self.all_unit_feat[ri].to(dt))
+            m_tab_b = self.mass_type(u_tab_b)  # [B, N_RAW_TYPES, 1]
+            r_idx_b = rtype.reshape(B, nf * R, 1).clamp(0, m_tab_b.shape[1] - 1)
+            m_type = torch.gather(m_tab_b, 1, r_idx_b).reshape(M, R, 1)
+        else:
+            u_tab = self.unit_emb.weight.to(dt) + self.unit_mlp(self.unit_feat.to(dt))
+            m_type_tab = self.mass_type(u_tab)  # [N_RAW_TYPES, 1]
+            r_idx = rtype.reshape(M, R).clamp(0, len(m_type_tab) - 1)
+            m_type = F.embedding(r_idx, m_type_tab)  # [M, R, 1]
 
+        r_idx = rtype.reshape(M, R).clamp(0, len(self.k_type) - 1)
         # Physical unit cost anchor from self.k_type[:, 0] (minerals + vespene)
         cost_u = self.k_type[r_idx, 0:1].to(dt).clamp(min=0.0)
         m_base = torch.log1p(cost_u / 100.0) + 0.5  # [M, R, 1] >= 0.5
@@ -748,7 +958,15 @@ class Frames(nn.Module):
         mask = on_map & b["alive"][:, f_idx]
 
         num = b["num"][:, f_idx]
-        kt = self.k_type[rtype]  # [B, nf, R, 7]
+        rs_id = b.get("ruleset_id", None)
+        if rs_id is not None and hasattr(self, "all_k_type"):
+            ri = torch.where(rs_id >= 0, rs_id, 0).clamp(0, self.all_k_type.shape[0] - 1)
+            kt_b = self.all_k_type[ri]  # [B, N_RAW_TYPES, 7]
+            kt = torch.gather(
+                kt_b, 1, rtype.reshape(B, nf * R, 1).expand(-1, -1, 7)
+            ).view(B, nf, R, 7)
+        else:
+            kt = self.k_type[rtype]  # [B, nf, R, 7]
         kt_comp = torch.sign(kt) * torch.log1p(kt.abs()) / 8.0
 
         abil = b["slot_abil"][:, f_idx, :, 0]
@@ -797,9 +1015,13 @@ class Frames(nn.Module):
         pos_ent = xy_raw - center
         ckpt = self.grad_ckpt and torch.is_grad_enabled()
 
+        perc = extract_entity_perception(
+            b, f_idx, getattr(self, "is_struct_type", None)
+        )
+
         def _embed_x():
-            unit_c, ord_c, prod_c, _ = self.nodes(rtype, abil, prod_abil)
-            field_ent = self.field(b, f_idx, pos_ent)
+            unit_c, ord_c, prod_c, _ = self.nodes(rtype, abil, prod_abil, rs_id=rs_id)
+            field_ent = self.field(b, f_idx, pos_ent, owner=owner)
             dt = _compute_dtype(self.cls_tok)
             c_ent = (
                 unit_c
@@ -827,7 +1049,52 @@ class Frames(nn.Module):
             x_tok = _embed_x()
         valid_g = torch.ones(B, nf, g0, dtype=torch.bool, device=dev)
         valid_all = torch.cat([valid_g, mask, eff_mask], dim=2)
-        valid_flat = valid_all.reshape(B * nf, 1, 1, T)
+
+        # Perspective-isolated spatial attention mask [B * nf, 1, T, T]:
+        # - CLS (0) is omniscient and attends to all valid tokens; no token attends to CLS.
+        # - P1 (1) and P1-owned entities attend strictly to P1 + P1-visible neutrals/effects.
+        # - P2 (2) and P2-owned entities attend strictly to P2 + P2-visible neutrals/effects.
+        # - Neutrals and effects attend only to themselves (zero 2-hop cross-player relay!).
+        p1_ent_k = mask & ((owner == E.P1) | ((owner == E.GROUND) & perc["g_vis"][:, :, 0]))
+        p2_ent_k = mask & ((owner == E.P2) | ((owner == E.GROUND) & perc["g_vis"][:, :, 1]))
+        p1_eff_k = eff_mask & perc["eff_vis"][:, :, 0]
+        p2_eff_k = eff_mask & perc["eff_vis"][:, :, 1]
+
+        z_bool = torch.zeros(B, nf, 1, dtype=torch.bool, device=dev)
+        o_bool = torch.ones(B, nf, 1, dtype=torch.bool, device=dev)
+        p1_keys = torch.cat([z_bool, o_bool, z_bool, p1_ent_k, p1_eff_k], dim=2)  # [B, nf, T]
+        p2_keys = torch.cat([z_bool, z_bool, o_bool, p2_ent_k, p2_eff_k], dim=2)  # [B, nf, T]
+
+        q_is_cls = torch.zeros(B, nf, T, dtype=torch.bool, device=dev)
+        q_is_cls[:, :, 0] = True
+        q_is_p1 = torch.cat(
+            [
+                z_bool,
+                o_bool,
+                z_bool,
+                owner == E.P1,
+                torch.zeros(B, nf, X, dtype=torch.bool, device=dev),
+            ],
+            dim=2,
+        )
+        q_is_p2 = torch.cat(
+            [
+                z_bool,
+                z_bool,
+                o_bool,
+                owner == E.P2,
+                torch.zeros(B, nf, X, dtype=torch.bool, device=dev),
+            ],
+            dim=2,
+        )
+        eye_T = torch.eye(T, dtype=torch.bool, device=dev)[None, None]
+        allow_s = (
+            (q_is_cls.unsqueeze(-1) & valid_all.unsqueeze(-2))
+            | (q_is_p1.unsqueeze(-1) & p1_keys.unsqueeze(-2))
+            | (q_is_p2.unsqueeze(-1) & p2_keys.unsqueeze(-2))
+            | eye_T
+        )
+        valid_flat = allow_s.reshape(B * nf, 1, T, T)
 
         t_valid = torch.cat([valid_g, mask], dim=2)
         t_mask = t_valid.transpose(1, 2).reshape(B * T_t, nf)
@@ -892,7 +1159,7 @@ class Frames(nn.Module):
         )  # [B * nf, 2, r]
 
         c_ent_raw = x_tok[:, g0 : g0 + R]
-        z_flat, c_ent_normed = self.project_entities(c_ent_raw, rtype, mask)
+        z_flat, c_ent_normed = self.project_entities(c_ent_raw, rtype, mask, rs_id=rs_id)
         u, u_active, q_changed = self._encode_commands(
             b, f_idx, abil, prod_abil, ord_reg, owner, mask, return_changed=True
         )
@@ -913,6 +1180,7 @@ class Frames(nn.Module):
                 u=u,
                 u_active=u_active,
                 q_changed=q_changed,
+                perception=perc,
             )
         return (
             q,
@@ -1094,6 +1362,14 @@ BATCH_KEYS = (
     "act_xy",
     "act_placed",
     "act_target",
+    "death_frame",
+    "parent_row",
+    "ruleset_id",
+    "birth_count",
+    "birth_b",
+    "birth_f",
+    "birth_r",
+    "birth_p",
 )
 
 

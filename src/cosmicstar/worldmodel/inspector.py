@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 from . import energy as E
 from . import energy_data as ED
 from . import energy_l2 as EL2
+from . import l1_chunk_decoder as LCD
 from . import observer_l2 as OL2
 from . import physics_data as PD
 from . import squad_pooler as SP
@@ -58,6 +59,39 @@ from . import statefile
 from .action_tokens import ActionVocab
 from .sae import MultiLayerSAEStack
 from .vocab import Vocab
+
+
+def _clean_state_dict(sd: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k.replace("._orig_mod.", ".").removeprefix("_orig_mod."): v
+        for k, v in sd.items()
+    }
+
+
+def _describe_squad_units_from_weights(
+    assign_w_pm: np.ndarray,
+    own_mask: np.ndarray,
+    alive_mask: np.ndarray,
+    rtypes: np.ndarray,
+    unit_meta: dict[int, dict[str, Any]],
+    max_types: int = 3,
+) -> str:
+    counts: dict[str, float] = {}
+    for r in range(len(assign_w_pm)):
+        w = float(assign_w_pm[r])
+        if not (own_mask[r] and alive_mask[r]) or w < 0.06:
+            continue
+        uid = int(rtypes[r])
+        nm = unit_meta.get(uid, {}).get("name", f"Unit_{uid}")
+        counts[nm] = counts.get(nm, 0.0) + w
+    if not counts:
+        return ""
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:max_types]
+    parts = []
+    for nm, cnt in top:
+        c_int = max(1, int(round(cnt)))
+        parts.append(f"{c_int}×{nm}" if c_int > 1 or cnt >= 0.6 else nm)
+    return ", ".join(parts)
 
 
 def _trim_batch(b: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -217,10 +251,10 @@ class WorldModelInspector:
         rulesets_path: str = "data/worldmodel/rulesets.json",
         l1_ckpt: str = "data/worldmodel/runs/energy_r16_zerogram/model_step44285.pt",
         l2_ckpt: str = "data/worldmodel/runs/energy_l2_535g_cont_5k/model_l2_step5000.pt",
-        observer_ckpt: str = "data/worldmodel/runs/observer_v1/model_best.pt",
+        observer_ckpt: str = "data/worldmodel/runs/observer_v2/model_best.pt",
         l2_summary_dir: str = "data/worldmodel/l2_summaries_5014_cont",
         l2_burst_summary_dir: str = "data/worldmodel/l2_summaries_5014",
-        patch: str = "5.0.14",
+        patch: str = "",
         base_build: int = 94137,
         device: str = "cuda",
     ):
@@ -256,6 +290,8 @@ class WorldModelInspector:
                 "food": u.get("food", 0.0),
                 "structure": bool(u.get("structure", False)),
                 "worker": bool(u.get("worker", False)),
+                "flying": bool(u.get("flying", False)),
+                "radius": float(u.get("radius", 0.5) or 0.5),
                 "category": cat,
             }
 
@@ -322,17 +358,28 @@ class WorldModelInspector:
         for raw_a, v_idx in self.vocab._abil.items():
             self.vocab_abil_name[int(v_idx)] = self.raw_abil_name.get(int(raw_a), f"Abil_{raw_a}")
 
-        # Discover games (unseen_games + train)
+        # Discover ALL extracted games across all 24 builds in data/games_v3 (~932 games)
         split = json.load(open(split_path))
         import train_physics as tp
 
         unseen_ids = set(split["held_out_games"]) - set(tp.EXCLUDED)
-        train_ids = set(split["train"]) - set(tp.EXCLUDED)
-        self.unseen_bases = tp.of_patch(PD.base_paths(games_dir, unseen_ids), patch)
-        self.train_bases = tp.of_patch(PD.base_paths(games_dir, train_ids), patch)
-        self.all_bases = {**self.unseen_bases, **self.train_bases}
+        map_val_ids = set(split.get("held_out_map_games", [])) - set(tp.EXCLUDED)
+        all_found = {
+            k: v for k, v in PD.base_paths(games_dir, None).items() if k not in set(tp.EXCLUDED)
+        }
+        if patch:
+            all_found = tp.of_patch(all_found, patch)
+        self.unseen_bases = {k: all_found[k] for k in unseen_ids if k in all_found}
+        self.map_val_bases = {k: all_found[k] for k in map_val_ids if k in all_found}
+        self.train_bases = {
+            k: v
+            for k, v in all_found.items()
+            if k not in self.unseen_bases and k not in self.map_val_bases
+        }
+        self.all_bases = {**self.unseen_bases, **self.map_val_bases, **self.train_bases}
         self.game_subset = {
             **{gid: "unseen_games" for gid in self.unseen_bases},
+            **{gid: "held_out_map_games" for gid in self.map_val_bases},
             **{gid: "train" for gid in self.train_bases},
         }
 
@@ -355,13 +402,14 @@ class WorldModelInspector:
             d=256, layers=4, heads=8, r_gram=16, r_macro=32, u_dim=32, hidden=256, rank=16
         ).to(device).eval()
 
-        # Multi-Horizon Stochastic Observer (L1 step=14 + SquadPooler + HindsightIntentPosterior + ObserverWorldModelL2)
+        # Multi-Scale Stochastic Observer v2 (L1 step=7 + PerceiverSquadCompressor + L1ChunkFlowDecoder + ObserverWorldModelL2)
         self.obs_enc = ED.Frames(
             self.vocab, self.tables, 256, 32, attn_layers=6, dh=64, ff=768
         ).to(device).eval()
         self.obs_enc.grad_ckpt = False
-        self.obs_pooler = SP.SquadPooler(self.tables, d_l1=256).to(device).eval()
-        self.obs_posterior = SP.HindsightIntentPosterior().to(device).eval()
+        self.obs_pooler = SP.PerceiverSquadCompressor(self.tables, d_l1=256).to(device).eval()
+        self.obs_posterior = SP.HindsightOutcomePosterior().to(device).eval()
+        self.obs_decoder = LCD.L1ChunkFlowDecoder(d_l1=256, d_squad=SP.D_SQUAD_DEFAULT).to(device).eval()
         self.obs_l2 = OL2.ObserverWorldModelL2(rollout_steps=4).to(device).eval()
         self._obs_game_cache: dict[str, dict[str, Any]] = {}
         self.observer_ckpt_default = observer_ckpt
@@ -411,9 +459,15 @@ class WorldModelInspector:
             pass
 
     def _build_catalog(self):
-        # Prioritize all 30 unseen games + first 80 train games for instant startup,
-        # while allowing any gid in all_bases to be queried
-        ordered_gids = sorted(self.unseen_bases.keys()) + sorted(self.train_bases.keys())[:100]
+        # Prioritize Solar vs Trigger (0443eb525a344b63) + all unseen games + 40 held-out map games + 100 train games
+        unseen_sorted = sorted(self.unseen_bases.keys())
+        if "0443eb525a344b63" in unseen_sorted:
+            unseen_sorted = ["0443eb525a344b63"] + [g for g in unseen_sorted if g != "0443eb525a344b63"]
+        ordered_gids = (
+            unseen_sorted
+            + sorted(self.map_val_bases.keys())[:40]
+            + sorted(self.train_bases.keys())[:100]
+        )
         for gid in ordered_gids:
             base = self.all_bases[gid]
             subset = self.game_subset[gid]
@@ -468,10 +522,10 @@ class WorldModelInspector:
         obs_ckpts = [
             p
             for p in (
-                "data/worldmodel/runs/observer_v1/model_best.pt",
-                "data/worldmodel/runs/observer_v1/model_latest.pt",
+                "data/worldmodel/runs/observer_v2/model_best.pt",
+                "data/worldmodel/runs/observer_v2/model_latest.pt",
             )
-            + tuple(sorted(glob.glob("data/worldmodel/runs/observer_*/model_*.pt"), reverse=True))
+            + tuple(sorted(glob.glob("data/worldmodel/runs/observer_v2*/model_*.pt"), reverse=True))
             if os.path.exists(p) and not p.endswith(".tmp")
         ]
         seen_obs = []
@@ -503,16 +557,19 @@ class WorldModelInspector:
         with self.lock:
             ck = torch.load(path, map_location=self.device, weights_only=False)
             if "enc" in ck:
-                self.obs_enc.load_state_dict(ck["enc"], strict=False)
+                self.obs_enc.load_state_dict(_clean_state_dict(ck["enc"]), strict=False)
             if "pooler" in ck:
-                self.obs_pooler.load_state_dict(ck["pooler"], strict=False)
+                self.obs_pooler.load_state_dict(_clean_state_dict(ck["pooler"]), strict=False)
             if "posterior" in ck:
-                self.obs_posterior.load_state_dict(ck["posterior"], strict=False)
+                self.obs_posterior.load_state_dict(_clean_state_dict(ck["posterior"]), strict=False)
+            if "decoder" in ck:
+                self.obs_decoder.load_state_dict(_clean_state_dict(ck["decoder"]), strict=False)
             if "obs_l2" in ck:
-                self.obs_l2.load_state_dict(ck["obs_l2"], strict=False)
+                self.obs_l2.load_state_dict(_clean_state_dict(ck["obs_l2"]), strict=False)
             self.obs_enc.eval()
             self.obs_pooler.eval()
             self.obs_posterior.eval()
+            self.obs_decoder.eval()
             self.obs_l2.eval()
             self.active_observer_ckpt = path
             self._observer_mtime = os.path.getmtime(path)
@@ -589,7 +646,61 @@ class WorldModelInspector:
         meta_info = self.catalog_by_id.get(gid, {"gid": gid, "duration_loops": g_game.F})
 
         if not os.path.exists(pt_path):
-            return {"error": f"Summary file not found for {gid}", "meta": meta_info}
+            # Fallback for non-5.0.14 builds & held_out_map_games: synthesize 5s timeline via Observer v2!
+            with self.lock, torch.no_grad():
+                self._maybe_reload_observer()
+                g_sum = self._get_obs_game_summary(gid, up_to_loop=g_game.F)
+                loops = g_sum["loops"].astype(int).tolist()
+                T = len(loops)
+                t_sec = [round(l / 22.4, 2) for l in loops]
+                q_sq = g_sum["q_squad"].to(self.device).float()
+                z_sq = g_sum["z_squad"].to(self.device).float()
+                gate = g_sum["gate"].to(self.device).float()
+                q_mac = g_sum["q_macro"].to(self.device).float()
+                z_mac = g_sum["z_macro"].to(self.device).float()
+                st_1 = OL2.collate_static_maps([g_sum["static_map"]], device=self.device)
+                st_t = {
+                    k: (v.expand(T, *v.shape[1:]) if isinstance(v, torch.Tensor) and v.shape[0] == 1 else v)
+                    for k, v in st_1.items()
+                }
+                hout = self.obs_l2.ph.evaluate_hamiltonian(
+                    torch.cat([q_sq, z_sq], dim=-1),
+                    torch.cat([q_mac, z_mac], dim=-1),
+                    gate,
+                    static_map=st_t,
+                )
+                h1_v = (hout["H1"].detach().cpu().numpy() * 1000.0).round(2).tolist()
+                h2_v = (hout["H2"].detach().cpu().numpy() * 1000.0).round(2).tolist()
+                a1_v = (hout["A1"].detach().cpu().numpy() * 1000.0).round(2).tolist()
+                zeros = [0.0] * T
+                q_np = q_sq.detach().cpu().numpy()
+                p1_u = (q_np[:, 0, :, 6].sum(axis=-1) * E.N0).round(1).tolist()
+                p2_u = (q_np[:, 1, :, 6].sum(axis=-1) * E.N0).round(1).tolist()
+                p1_hp = (q_np[:, 0, :, 8].sum(axis=-1) + q_np[:, 0, :, 9].sum(axis=-1)).round(2).tolist()
+                p2_hp = (q_np[:, 1, :, 8].sum(axis=-1) + q_np[:, 1, :, 9].sum(axis=-1)).round(2).tolist()
+                z_mac_32 = z_mac[:, :, :32].detach().cpu().numpy().round(3).tolist()
+                return {
+                    "gid": gid,
+                    "mode": "observer_v2",
+                    "meta": meta_info,
+                    "T": T,
+                    "loops": loops,
+                    "t_sec": t_sec,
+                    "H1_l1": zeros,
+                    "H2_l1": zeros,
+                    "A1_l1": zeros,
+                    "H1_l2": h1_v,
+                    "H2_l2": h2_v,
+                    "A1_l2": a1_v,
+                    "A1_tot": a1_v,
+                    "diss1_l2": zeros,
+                    "diss2_l2": zeros,
+                    "p1_units": p1_u,
+                    "p2_units": p2_u,
+                    "p1_hp_eq": p1_hp,
+                    "p2_hp_eq": p2_hp,
+                    "z_macro": z_mac_32,
+                }
 
         d = torch.load(pt_path, map_location="cpu", weights_only=False)
         self._reconstruct_gcc_triu(d)
@@ -683,18 +794,21 @@ class WorldModelInspector:
 
     @torch.no_grad()
     def _get_obs_game_summary(self, gid: str, up_to_loop: int | None = None) -> dict[str, Any]:
-        """Progressively encodes and caches 5.0s (`112`-loop) Squad + Macro + Tempo prefix
-        summaries up to `up_to_loop` so cold-start game opening is near-instant (`< 200ms` at 0:00)
-        and scrubbing forward extends the prefix seamlessly."""
+        """Progressively encodes and caches 5.0s (`112`-loop) v2 Perceiver Squad + Macro +
+        Perceived-Enemy + Tempo prefix summaries up to `up_to_loop` (`step=7`, `need_map=False`)."""
         g = self._get_game(gid)
         all_marks = list(range(112, max(225, g.F - 113), 112))
         if not all_marks:
             all_marks = [min(112, max(28, g.F // 2))]
         cutoff = g.F if up_to_loop is None else max(224, int(up_to_loop))
         needed_marks = [m for m in all_marks if m <= cutoff] or [all_marks[0]]
+        target_n = len(needed_marks)
+        if target_n % 2 == 1 and target_n < len(all_marks):
+            target_n += 1
+            needed_marks = all_marks[:target_n]
 
         if gid not in self._obs_game_cache:
-            if len(self._obs_game_cache) >= 8:
+            if len(self._obs_game_cache) >= 6:
                 oldest = next(iter(self._obs_game_cache))
                 del self._obs_game_cache[oldest]
             self._obs_game_cache[gid] = dict(
@@ -703,9 +817,16 @@ class WorldModelInspector:
                 static_map=OL2.extract_rich_static_map(g),
                 q_squad=None,
                 z_squad=None,
+                gate=None,
                 active=None,
                 q_macro=None,
                 z_macro=None,
+                q_opp_obs=None,
+                z_opp_obs=None,
+                gate_opp_obs=None,
+                z_omni_scene=None,
+                gt_vis_live=None,
+                gt_shimmer=None,
                 tempo_feat=None,
                 prev_s=None,
             )
@@ -716,44 +837,84 @@ class WorldModelInspector:
             return entry
 
         new_marks = needed_marks[done_n:]
-        q_sq_all, z_sq_all, act_all = [], [], []
-        q_mac_all, z_mac_all, tempo_all = [], [], []
+        q_sq_all, z_sq_all, gate_all, act_all = [], [], [], []
+        q_mac_all, z_mac_all = [], []
+        q_opp_all, z_opp_all, g_opp_all = [], [], []
+        z_omni_all, vis_all, shim_all, tempo_all = [], [], [], []
         prev_s = entry["prev_s"]
-        chunk = 32
-        for i in range(0, len(new_marks), chunk):
-            marks_c = new_marks[i : i + chunk]
-            ws = [g.window(max(14, lp - 14), 10, swap=False, step=14) for lp in marks_c]
+
+        def _push_state(st: dict[str, torch.Tensor], vl: torch.Tensor, sh: torch.Tensor, tmp: torch.Tensor):
+            q_sq_all.append(st["q_squad"].detach().cpu().float())
+            z_sq_all.append(st["z_squad"].detach().cpu().to(torch.bfloat16))
+            gate_all.append(st["gate"].detach().cpu().to(torch.float16))
+            act_all.append(st["active"].detach().cpu().bool())
+            q_mac_all.append(st["q_macro"].detach().cpu().float())
+            z_mac_all.append(st["z_macro"].detach().cpu().to(torch.bfloat16))
+            q_opp_all.append(st["q_opp_obs"].detach().cpu().to(torch.float16))
+            z_opp_all.append(st["z_opp_obs"].detach().cpu().to(torch.bfloat16))
+            g_opp_all.append(st["gate_opp_obs"].detach().cpu().to(torch.float16))
+            z_omni_all.append(st["z_omni_scene"].detach().cpu().to(torch.bfloat16))
+            vis_all.append(vl.detach().cpu().to(torch.float16))
+            shim_all.append(sh.detach().cpu().to(torch.float16))
+            tempo_all.append(tmp.detach().cpu().float())
+
+        def _slice_ctx_one(ctx_d: dict[str, Any], j: int) -> dict[str, Any]:
+            return {
+                k: ({pk: pv[j : j + 1] for pk, pv in v.items()} if isinstance(v, dict) else v[j : j + 1])
+                for k, v in ctx_d.items()
+            }
+
+        pair_specs = []
+        idx_m = 0
+        while idx_m + 1 < len(new_marks):
+            m0 = new_marks[idx_m]
+            t0_w = 0 if (done_n == 0 and idx_m == 0) else max(0, m0 - 112)
+            pair_specs.append(t0_w)
+            idx_m += 2
+        odd_mark = new_marks[idx_m] if idx_m < len(new_marks) else None
+
+        chunk = 16
+        for i in range(0, len(pair_specs), chunk):
+            sp_c = pair_specs[i : i + chunk]
+            ws = [g.window(t0_w, 33, swap=False, step=7, need_map=False) for t0_w in sp_c]
             b = ED.to_device(_trim_batch(PD.collate(ws, self.vocab)), self.device)
+            B_c = b["mask"].shape[0]
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                ctx = self.obs_enc.encode_window_context(b, list(range(1, 10)))
+                ctx = self.obs_enc.encode_window_context(b, list(range(1, 33)))
+                tmp_0_b = self.obs_posterior.extract_window_tempo_and_tokens(b, list(range(1, 17)))[0]
+                tmp_1_b = self.obs_posterior.extract_window_tempo_and_tokens(b, list(range(17, 33)))[0]
+                for j in range(B_c):
+                    bj = {
+                        k: (v[j : j + 1] if isinstance(v, torch.Tensor) and v.ndim > 0 and v.shape[0] == B_c else v)
+                        for k, v in b.items()
+                    }
+                    cj = _slice_ctx_one(ctx, j)
+                    s_0 = self.obs_pooler(bj, cj, f_start=0, f_end=15, prev_state=prev_s, batch_frame_end=16)
+                    s_1 = self.obs_pooler(bj, cj, f_start=16, f_end=31, prev_state=s_0, batch_frame_end=32)
+                    vl_0, sh_0 = OL2.extract_squad_gt_perception(cj, 15, s_0)
+                    vl_1, sh_1 = OL2.extract_squad_gt_perception(cj, 31, s_1)
+                    _push_state(s_0, vl_0, sh_0, tmp_0_b[j : j + 1])
+                    _push_state(s_1, vl_1, sh_1, tmp_1_b[j : j + 1])
+                    prev_s = {
+                        k: s_1[k].detach()
+                        for k in ("q_squad", "z_squad", "gate", "active", "loop_end")
+                    }
 
-            s_cur_list, s_nxt_list = [], []
-            for j in range(len(marks_c)):
-                bj = {k: (v[j : j + 1] if isinstance(v, torch.Tensor) else v) for k, v in b.items()}
-                cj = {k: v[j : j + 1] for k, v in ctx.items()}
-                s_c = self.obs_pooler(bj, cj, f_start=0, f_end=0, prev_state=prev_s, batch_frame_end=1)
-                s_n = self.obs_pooler(bj, cj, f_start=0, f_end=8, prev_state=s_c, batch_frame_end=9)
-                s_cur_list.append(s_c)
-                s_nxt_list.append(s_n)
-                prev_s = {k: v.detach() for k, v in s_n.items() if k in ("q_squad", "z_squad", "active")}
-
-            s_cur_b = {
-                k: torch.cat([x[k] for x in s_cur_list], dim=0)
-                for k in ("q_squad", "z_squad", "active", "q_macro", "z_macro", "assign_w")
-            }
-            s_nxt_b = {
-                k: torch.cat([x[k] for x in s_nxt_list], dim=0)
-                for k in ("q_squad", "z_squad", "active", "q_macro", "z_macro")
-            }
-            post_b = self.obs_posterior(
-                s_cur_b, s_nxt_b, b, ctx, f_indices=list(range(2, 10)), ctx_indices=list(range(0, 8))
-            )
-            q_sq_all.append(s_cur_b["q_squad"].cpu().float())
-            z_sq_all.append(s_cur_b["z_squad"].cpu().to(torch.bfloat16))
-            act_all.append(s_cur_b["active"].cpu().bool())
-            q_mac_all.append(s_cur_b["q_macro"].cpu().float())
-            z_mac_all.append(s_cur_b["z_macro"].cpu().to(torch.bfloat16))
-            tempo_all.append(post_b["tempo_feat"].cpu().float())
+        if odd_mark is not None:
+            w_odd = g.window(max(0, odd_mark - 112), 17, swap=False, step=7, need_map=False)
+            b_odd = ED.to_device(_trim_batch(PD.collate([w_odd], self.vocab)), self.device)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                ctx_odd = self.obs_enc.encode_window_context(b_odd, list(range(1, 17)))
+                tmp_odd = self.obs_posterior.extract_window_tempo_and_tokens(b_odd, list(range(1, 17)))[0]
+                s_odd = self.obs_pooler(
+                    b_odd, ctx_odd, f_start=0, f_end=15, prev_state=prev_s, batch_frame_end=16
+                )
+                vl_o, sh_o = OL2.extract_squad_gt_perception(ctx_odd, 15, s_odd)
+                _push_state(s_odd, vl_o, sh_o, tmp_odd)
+                prev_s = {
+                    k: s_odd[k].detach()
+                    for k in ("q_squad", "z_squad", "gate", "active", "loop_end")
+                }
 
         def _append_cat(old_t, new_list):
             nt = torch.cat(new_list, dim=0)
@@ -762,9 +923,16 @@ class WorldModelInspector:
         entry["loops"] = np.array(needed_marks, dtype=np.int32)
         entry["q_squad"] = _append_cat(entry["q_squad"], q_sq_all)
         entry["z_squad"] = _append_cat(entry["z_squad"], z_sq_all)
+        entry["gate"] = _append_cat(entry["gate"], gate_all)
         entry["active"] = _append_cat(entry["active"], act_all)
         entry["q_macro"] = _append_cat(entry["q_macro"], q_mac_all)
         entry["z_macro"] = _append_cat(entry["z_macro"], z_mac_all)
+        entry["q_opp_obs"] = _append_cat(entry["q_opp_obs"], q_opp_all)
+        entry["z_opp_obs"] = _append_cat(entry["z_opp_obs"], z_opp_all)
+        entry["gate_opp_obs"] = _append_cat(entry["gate_opp_obs"], g_opp_all)
+        entry["z_omni_scene"] = _append_cat(entry["z_omni_scene"], z_omni_all)
+        entry["gt_vis_live"] = _append_cat(entry["gt_vis_live"], vis_all)
+        entry["gt_shimmer"] = _append_cat(entry["gt_shimmer"], shim_all)
         entry["tempo_feat"] = _append_cat(entry["tempo_feat"], tempo_all)
         entry["prev_s"] = prev_s
         return entry
@@ -774,24 +942,29 @@ class WorldModelInspector:
         gid: str,
         loop_t: int,
         n_branches: int = 32,
-        horizon_steps: int = 8,
+        horizon_steps: int = 24,
+        mode: str = "forecast",
         grid_res: int = 44,
     ) -> dict[str, Any]:
-        """Runs the fog-of-war Multi-Horizon Stochastic Observer (`ObserverWorldModelL2`)
-        at exact `loop_t`, rolling out `n_branches` 5.0s futures over `horizon_steps` (`40s`)."""
+        """Runs Multi-Scale Stochastic Observer v2 (`ObserverWorldModelL2` + `L1ChunkFlowDecoder`)
+        at exact `loop_t`, rolling out `n_branches` `5.0s` futures over `horizon_steps` (`+120s`)
+        with Common Random Numbers, 3-Stream Theory-of-Mind Plan Misalignment, Intrinsic Leverage,
+        and `+5.0s` (`16 x 0.3125s`) tactical entity trajectories."""
         self._maybe_reload_observer()
         with self.lock, torch.no_grad():
             t0_wall = time.perf_counter()
             g = self._get_game(gid)
-            loop_t = max(42, min(g.F - 4, int(loop_t)))
+            loop_t = max(112, min(g.F - 4, int(loop_t)))
             n_branches = max(4, min(64, int(n_branches)))
-            horizon_steps = max(2, min(16, int(horizon_steps)))
+            horizon_steps = max(2, min(32, int(horizon_steps)))
+            if mode not in ("forecast", "counterplay_p1", "counterplay_p2"):
+                mode = "forecast"
 
             g_sum = self._get_obs_game_summary(gid, up_to_loop=loop_t)
             marks = g_sum["loops"]
-            valid_idx = np.where(marks <= loop_t - 56)[0]
-            if len(valid_idx) > 31:
-                valid_idx = valid_idx[-31:]
+            valid_idx = np.where(marks <= loop_t - 224)[0]
+            if len(valid_idx) > 46:
+                valid_idx = valid_idx[-46:]
 
             prev_s = None
             if len(valid_idx) > 0:
@@ -799,47 +972,83 @@ class WorldModelInspector:
                 prev_s = {
                     "q_squad": g_sum["q_squad"][last_i : last_i + 1].to(self.device).float(),
                     "z_squad": g_sum["z_squad"][last_i : last_i + 1].to(self.device).float(),
+                    "gate": g_sum["gate"][last_i : last_i + 1].to(self.device).float(),
                     "active": g_sum["active"][last_i : last_i + 1].to(self.device).bool(),
+                    "loop_end": torch.tensor([float(marks[last_i])], device=self.device, dtype=torch.float32),
                 }
 
-            # Live-encode exact 5s window ending right at loop_t
-            w_live = g.window(max(14, loop_t - 126), 10, swap=False, step=14)
-            b_live = ED.to_device(_trim_batch(PD.collate([w_live], self.vocab)), self.device)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                ctx_live = self.obs_enc.encode_window_context(b_live, list(range(1, 10)))
-            s_pre = self.obs_pooler(
-                b_live, ctx_live, f_start=0, f_end=0, prev_state=prev_s, batch_frame_end=1
-            )
-            s_now = self.obs_pooler(
-                b_live, ctx_live, f_start=0, f_end=8, prev_state=s_pre, batch_frame_end=9
-            )
-            post_now = self.obs_posterior(
-                s_pre, s_now, b_live, ctx_live, f_indices=list(range(2, 10)), ctx_indices=list(range(0, 8))
-            )
+            # Live-encode exact step=7 window ending right at loop_t
+            if loop_t >= 224:
+                w_live = g.window(loop_t - 224, 33, swap=False, step=7, need_map=False)
+                b_live = ED.to_device(_trim_batch(PD.collate([w_live], self.vocab)), self.device)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    ctx_live = self.obs_enc.encode_window_context(b_live, list(range(1, 33)))
+                    tmp_pre = self.obs_posterior.extract_window_tempo_and_tokens(b_live, list(range(1, 17)))[0]
+                    tmp_now = self.obs_posterior.extract_window_tempo_and_tokens(b_live, list(range(17, 33)))[0]
+                    s_pre = self.obs_pooler(
+                        b_live, ctx_live, f_start=0, f_end=15, prev_state=prev_s, batch_frame_end=16
+                    )
+                    s_now = self.obs_pooler(
+                        b_live, ctx_live, f_start=16, f_end=31, prev_state=s_pre, batch_frame_end=32
+                    )
+                    vl_pre, sh_pre = OL2.extract_squad_gt_perception(ctx_live, 15, s_pre)
+                    vl_now, sh_now = OL2.extract_squad_gt_perception(ctx_live, 31, s_now)
+                s_pre["gt_vis_live"] = vl_pre
+                s_pre["gt_shimmer"] = sh_pre
+                s_now["gt_vis_live"] = vl_now
+                s_now["gt_shimmer"] = sh_now
+                live_states = [s_pre, s_now]
+                live_tempos = [tmp_pre, tmp_now]
+                f_end_b, f_end_c = 32, 31
+            else:
+                w_live = g.window(max(0, loop_t - 112), 17, swap=False, step=7, need_map=False)
+                b_live = ED.to_device(_trim_batch(PD.collate([w_live], self.vocab)), self.device)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    ctx_live = self.obs_enc.encode_window_context(b_live, list(range(1, 17)))
+                    tmp_now = self.obs_posterior.extract_window_tempo_and_tokens(b_live, list(range(1, 17)))[0]
+                    s_now = self.obs_pooler(
+                        b_live, ctx_live, f_start=0, f_end=15, prev_state=prev_s, batch_frame_end=16
+                    )
+                    vl_now, sh_now = OL2.extract_squad_gt_perception(ctx_live, 15, s_now)
+                s_now["gt_vis_live"] = vl_now
+                s_now["gt_shimmer"] = sh_now
+                live_states = [s_now]
+                live_tempos = [tmp_now]
+                f_end_b, f_end_c = 16, 15
 
-            def _cat_pref(key_cache: str, live_t: torch.Tensor) -> torch.Tensor:
-                lv = live_t.float() if live_t.is_floating_point() else live_t
+            def _cat_pref(key_cache: str, live_list: list[torch.Tensor]) -> torch.Tensor:
+                lv = torch.cat(
+                    [(x.float() if x.is_floating_point() else x) for x in live_list], dim=0
+                ).unsqueeze(0)
                 if len(valid_idx) == 0:
-                    return lv.unsqueeze(1)
+                    return lv
                 idx_t = torch.as_tensor(valid_idx, dtype=torch.long)
                 hist = g_sum[key_cache][idx_t].to(self.device)
                 if hist.is_floating_point():
                     hist = hist.float()
-                return torch.cat([hist.unsqueeze(0), lv.unsqueeze(1)], dim=1)
+                return torch.cat([hist.unsqueeze(0), lv], dim=1)
 
-            prefix_seq = dict(
-                q_squad=_cat_pref("q_squad", s_now["q_squad"]),
-                z_squad=_cat_pref("z_squad", s_now["z_squad"]),
-                active=_cat_pref("active", s_now["active"].bool()),
-                q_macro=_cat_pref("q_macro", s_now["q_macro"]),
-                z_macro=_cat_pref("z_macro", s_now["z_macro"]),
-                tempo_feat=_cat_pref("tempo_feat", post_now["tempo_feat"]),
+            state_keys = (
+                "q_squad",
+                "z_squad",
+                "gate",
+                "active",
+                "q_macro",
+                "z_macro",
+                "q_opp_obs",
+                "z_opp_obs",
+                "gate_opp_obs",
+                "z_omni_scene",
+                "gt_vis_live",
+                "gt_shimmer",
             )
+            prefix_seq = {sk: _cat_pref(sk, [st[sk] for st in live_states]) for sk in state_keys}
+            prefix_seq["tempo_feat"] = _cat_pref("tempo_feat", live_tempos)
             st_1 = OL2.collate_static_maps([g_sum["static_map"]], device=self.device)
 
-            seed_val = ((sum(ord(c) for c in gid) * 1315423911) + int(loop_t) * 2654435761) & 0x7FFFFFFF
-            with torch.random.fork_rng(devices=[self.device]):
-                torch.manual_seed(seed_val)
+            # Common Random Numbers: seed depends ONLY on gid (NEVER loop_t!) so 1s scrubs are smooth!
+            seed_val = ((sum(ord(c) for c in gid) * 1315423911) + 42) & 0x7FFFFFFF
+            with torch.autocast("cuda", dtype=torch.bfloat16):
                 roll = self.obs_l2.rollout_observer(
                     prefix_seq,
                     static_map=st_1,
@@ -849,13 +1058,113 @@ class WorldModelInspector:
                     temperature=1.0,
                     grid_h=grid_res,
                     grid_w=grid_res,
+                    seed=seed_val,
+                    mode=mode,
                 )
 
-            vis_0, _ = self.obs_l2.sight.compute_visibility(
-                s_now["q_squad"], s_now["z_squad"], s_now["active"]
-            )  # [1, 2, M]
+            # Synthesize +5.0s (16 frames @ 0.3125s) tactical entity trajectories via L1ChunkFlowDecoder
+            micro_chunk = None
+            if (
+                roll.get("step0_s1") is not None
+                and roll.get("step0_u") is not None
+                and roll.get("step0_xi_world") is not None
+            ):
+                ch = self.obs_decoder.sample_chunk(
+                    b=b_live,
+                    ctx=ctx_live,
+                    f_0=f_end_b,
+                    c_0=f_end_c,
+                    s_0=s_now,
+                    s_1=roll["step0_s1"],
+                    u_flat=roll["step0_u"],
+                    xi_world=roll["step0_xi_world"],
+                    static_map=st_1,
+                    steps=4,
+                    seed=seed_val,
+                )
+                ent_valid_np = ch["ent_valid"][0].detach().cpu().numpy()
+                ent_owner_np = ch["ent_owner"][0].detach().cpu().numpy()
+                ent_rtype_np = ch["ent_rtype"][0].detach().cpu().numpy()
+                ent_pos0_np = ch["ent_pos_0"][0].detach().cpu().numpy()
+                ent_xy_np = ch["ent_xy"][0].detach().cpu().numpy()
+                ent_hp_np = ch["ent_hp"][0].detach().cpu().numpy()
+                ent_al_np = ch["ent_alive_prob"][0].detach().cpu().numpy()
+                ent_op_np = ch["ent_ord_prob"][0].detach().cpu().numpy()
+                ent_ot_np = ch["ent_ord_target_xy"][0].detach().cpu().numpy()
 
-            a_traj_np = roll["A_traj"].detach().cpu().numpy()  # [N, H + 1]
+                micro_units = []
+                for r in np.where(ent_valid_np)[0]:
+                    uid = int(ent_rtype_np[r])
+                    um = self.unit_meta.get(uid, {})
+                    is_st = bool(um.get("structure", False))
+                    # Include all mobile units + any structure predicted to take damage / die
+                    if is_st and float(ent_al_np[r].min()) > 0.90 and float(ent_hp_np[r].max() - ent_hp_np[r].min()) < 0.04:
+                        continue
+                    micro_units.append(
+                        {
+                            "owner": int(ent_owner_np[r]) + 1,
+                            "rtype": uid,
+                            "name": um.get("name", f"Unit_{uid}"),
+                            "structure": is_st,
+                            "flying": bool(um.get("flying", False)),
+                            "radius": round(float(um.get("radius", 0.5)), 2),
+                            "x0": round(float(ent_pos0_np[r, 0]), 2),
+                            "y0": round(float(ent_pos0_np[r, 1]), 2),
+                            "x": np.round(ent_xy_np[r, :, 0], 2).tolist(),
+                            "y": np.round(ent_xy_np[r, :, 1], 2).tolist(),
+                            "hp": np.round(ent_hp_np[r], 2).tolist(),
+                            "alive_prob": np.round(ent_al_np[r], 2).tolist(),
+                            "ord_prob": np.round(ent_op_np[r], 2).tolist(),
+                            "ord_tx": np.round(ent_ot_np[r, :, 0], 2).tolist(),
+                            "ord_ty": np.round(ent_ot_np[r, :, 1], 2).tolist(),
+                        }
+                    )
+
+                sp_prob_np = ch["spawn_prob"][0].detach().cpu().numpy()
+                sp_bk_np = ch["spawn_birth_k"][0].detach().cpu().numpy()
+                sp_orig_np = ch["spawn_origin_xy"][0].detach().cpu().numpy()
+                sp_xy_np = ch["spawn_xy"][0].detach().cpu().numpy()
+                sp_al_np = ch["spawn_alive_prob"][0].detach().cpu().numpy()
+                sp_rt_np = ch["spawn_rtype"][0].detach().cpu().numpy()
+
+                micro_spawns = []
+                for p_i in (0, 1):
+                    for s_i in range(sp_prob_np.shape[1]):
+                        pr = float(sp_prob_np[p_i, s_i])
+                        if pr < 0.65:
+                            continue
+                        uid = int(sp_rt_np[p_i, s_i])
+                        um = self.unit_meta.get(uid, {})
+                        sp_nm = um.get("name", f"Unit_{uid}")
+                        if sp_nm.lower() in ("larva", "egg", "creeptumor", "creeptumorburrowed"):
+                            continue
+                        micro_spawns.append(
+                            {
+                                "owner": p_i + 1,
+                                "prob": round(pr, 2),
+                                "birth_k": int(sp_bk_np[p_i, s_i]),
+                                "rtype": uid,
+                                "name": sp_nm,
+                                "flying": bool(um.get("flying", False)),
+                                "radius": round(float(um.get("radius", 0.5)), 2),
+                                "origin_x": round(float(sp_orig_np[p_i, s_i, 0]), 2),
+                                "origin_y": round(float(sp_orig_np[p_i, s_i, 1]), 2),
+                                "x": np.round(sp_xy_np[p_i, s_i, :, 0], 2).tolist(),
+                                "y": np.round(sp_xy_np[p_i, s_i, :, 1], 2).tolist(),
+                                "alive_prob": np.round(sp_al_np[p_i, s_i], 2).tolist(),
+                            }
+                        )
+
+                micro_chunk = {
+                    "dt_sec": 0.3125,
+                    "n_steps": 16,
+                    "step_secs": [round((k + 1) * 0.3125, 2) for k in range(16)],
+                    "rep_branch_idx": int(roll.get("rep_branch_idx", 0)),
+                    "units": micro_units,
+                    "spawns": micro_spawns,
+                }
+
+            a_traj_np = roll["A_traj"].detach().float().cpu().numpy()  # [N, H + 1]
             q10, q25, q50, q75, q90 = np.percentile(a_traj_np, [10, 25, 50, 75, 90], axis=0)
             q_mean = a_traj_np.mean(axis=0)
             drift_np = a_traj_np[:, -1] - a_traj_np[:, 0]
@@ -863,48 +1172,110 @@ class WorldModelInspector:
             cvar10_p2 = float(-np.sort(drift_np)[-k_cv:].mean())
 
             cx, cy = float(g.center[0]), float(g.center[1])
-            q_sq_0 = s_now["q_squad"][0].detach().cpu().numpy()   # [2, M, 12]
-            act_0 = s_now["active"][0].detach().cpu().numpy()     # [2, M]
-            risk_0 = roll["squad_risk"][:, :].detach().cpu().numpy()  # [2, M]
-            vis_0_np = vis_0[0].detach().cpu().numpy()            # [2, M]
+            q_sq_0 = s_now["q_squad"][0].detach().float().cpu().numpy()   # [2, M, 14]
+            gate_0 = s_now["gate"][0].detach().float().cpu().numpy()      # [2, M]
+            act_0 = s_now["active"][0].detach().cpu().numpy()             # [2, M]
+            assign_0 = s_now["assign_w"][0].detach().float().cpu().numpy()  # [2, M, R]
+            lev_0 = roll["squad_leverage"].detach().float().cpu().numpy()   # [2, M]
+            vl_0_np = s_now["gt_vis_live"][0].detach().float().cpu().numpy()  # [2, M]: viewer p -> enemy 1-p slot m
+            sh_0_np = s_now["gt_shimmer"][0].detach().float().cpu().numpy()   # [2, M]
+
+            b_own_np = b_live["owner"][0].detach().cpu().numpy()
+            b_alive_np = (b_live["mask"][0, f_end_b] & b_live["alive"][0, f_end_b]).detach().cpu().numpy()
+            b_rtype_np = b_live["rtype"][0, f_end_b].detach().cpu().numpy()
 
             squads_out = []
+            squad_desc_map: dict[tuple[int, int], str] = {}
             for p_i in (0, 1):
                 opp = 1 - p_i
+                own_m = b_own_np == p_i
                 for m in range(q_sq_0.shape[1]):
                     if not act_0[p_i, m]:
                         continue
                     qm = q_sq_0[p_i, m]
+                    gm = max(1e-4, float(gate_0[p_i, m]))
+                    # q_squad[0:2] is gate-weighted (xm * gate), divide by gm for true world centroid!
+                    wx = cx + (float(qm[0]) / gm) * E.MAP_SCALE
+                    wy = cy + (float(qm[1]) / gm) * E.MAP_SCALE
+                    u_desc = _describe_squad_units_from_weights(
+                        assign_0[p_i, m], own_m, b_alive_np, b_rtype_np, self.unit_meta
+                    )
+                    squad_desc_map[(p_i, m)] = u_desc
+                    lev_val = round(float(lev_0[p_i, m]), 1)
                     squads_out.append(
                         {
                             "owner": p_i + 1,
                             "slot": int(m),
-                            "x": round(cx + float(qm[0]) * E.MAP_SCALE, 2),
-                            "y": round(cy + float(qm[1]) * E.MAP_SCALE, 2),
-                            "vx": round(float(qm[2]) * 5.0, 2),
-                            "vy": round(float(qm[3]) * 5.0, 2),
-                            "spread_x": round(float(qm[4]) * E.MAP_SCALE, 2),
-                            "spread_y": round(float(qm[5]) * E.MAP_SCALE, 2),
+                            "x": round(wx, 2),
+                            "y": round(wy, 2),
+                            "vx": round((float(qm[2]) / gm) * 5.0, 2),
+                            "vy": round((float(qm[3]) / gm) * 5.0, 2),
+                            "spread_x": round((float(qm[4]) / gm) * E.MAP_SCALE, 2),
+                            "spread_y": round((float(qm[5]) / gm) * E.MAP_SCALE, 2),
+                            "gate": round(float(gate_0[p_i, m]), 3),
                             "count": round(float(qm[6]) * E.N0, 1),
                             "cost": round(float(qm[7]) * E.BANK_SCALE, 0),
                             "hp": round(float(qm[8]) * 1000.0, 0),
                             "shield": round(float(qm[9]) * 1000.0, 0),
-                            "struct_frac": round(float(qm[10]), 2),
-                            "air_frac": round(float(qm[11]), 2),
-                            "risk": round(float(risk_0[p_i, m]), 1),
-                            "vis_by_opp": round(float(vis_0_np[opp, m]), 2),
+                            "struct_frac": round(float(qm[10]) / gm, 2),
+                            "air_frac": round(float(qm[11]) / gm, 2),
+                            "cloak_frac": round(float(qm[12]) / gm, 2),
+                            "det_frac": round(float(qm[13]) / gm, 2),
+                            "leverage": lev_val,
+                            "risk": lev_val,
+                            "vis_by_opp": round(min(1.0, float(vl_0_np[opp, m]) / gm), 2),
+                            "shimmer_by_opp": round(min(1.0, float(sh_0_np[opp, m]) / gm), 2),
+                            "units": u_desc,
                         }
                     )
-            squads_out.sort(key=lambda s: (-s["risk"], -s["cost"]))
+            squads_out.sort(key=lambda s: (-s["leverage"], -s["cost"]))
 
-            tg_p1 = roll["threat_grid_p1"].detach().cpu().numpy()
-            tg_p2 = roll["threat_grid_p2"].detach().cpu().numpy()
-            # Net Threat: +ve (Red) = P1 threatening/damaging P2; -ve (Blue) = P2 threatening/damaging P1
-            tg_net = tg_p2 - tg_p1
+            # Unscouted Enemy Attribution driving each player's Theory-of-Mind Plan Misalignment
+            unsc_attr_np = roll["unscouted_attribution"].detach().float().cpu().numpy()  # [2, M]
+            unsc_mask_np = roll["unscouted_mask"].detach().float().cpu().numpy()         # [2, M]
+            unscouted_threats: dict[str, list[dict[str, Any]]] = {"p1": [], "p2": []}
+            for p_viewer, p_key in ((0, "p1"), (1, "p2")):
+                opp = 1 - p_viewer
+                order = np.argsort(-unsc_attr_np[p_viewer])
+                for m in order[:5]:
+                    m_i = int(m)
+                    attr_v = float(unsc_attr_np[p_viewer, m_i])
+                    if attr_v <= 1e-4 or not act_0[opp, m_i]:
+                        continue
+                    gm = max(1e-4, float(gate_0[opp, m_i]))
+                    qm = q_sq_0[opp, m_i]
+                    wx = cx + (float(qm[0]) / gm) * E.MAP_SCALE
+                    wy = cy + (float(qm[1]) / gm) * E.MAP_SCALE
+                    u_desc = squad_desc_map.get((opp, m_i), "")
+                    if not u_desc:
+                        continue
+                    unscouted_threats[p_key].append(
+                        {
+                            "enemy_owner": opp + 1,
+                            "slot": m_i,
+                            "x": round(wx, 1),
+                            "y": round(wy, 1),
+                            "attr": round(attr_v, 4),
+                            "unscouted_frac": round(float(unsc_mask_np[p_viewer, m_i]) / gm, 2),
+                            "shimmer": round(float(sh_0_np[p_viewer, m_i]) / gm, 2),
+                            "cost": int(round(float(qm[7]) * E.BANK_SCALE)),
+                            "units": u_desc,
+                        }
+                    )
 
+            lg_p1 = roll["leverage_grid_p1"].detach().float().cpu().numpy()
+            lg_p2 = roll["leverage_grid_p2"].detach().float().cpu().numpy()
+            # Net Intrinsic Leverage: +ve (Red) = P1 high-leverage positional control; -ve (Blue) = P2 high-leverage control
+            lg_net = lg_p1 - lg_p2
+
+            mis_np = roll["plan_misalignment"].detach().float().cpu().numpy()
+            del b_live, ctx_live, prefix_seq
+            torch.cuda.empty_cache()
             elapsed_ms = (time.perf_counter() - t0_wall) * 1000.0
             return {
                 "available": True,
+                "schema_version": 2,
+                "mode": mode,
                 "active_observer_ckpt": self.active_observer_ckpt,
                 "gid": gid,
                 "loop_t": loop_t,
@@ -914,6 +1285,9 @@ class WorldModelInspector:
                 "horizon_sec": round(horizon_steps * 5.0, 1),
                 "step_secs": [round(k * 5.0, 1) for k in range(horizon_steps + 1)],
                 "A0": round(float(roll["A0"].item()), 1),
+                "H1_0": round(float(roll["H1_0"].item()), 1),
+                "H2_0": round(float(roll["H2_0"].item()), 1),
+                "prob_lead_now_p1": round(float(roll["prob_lead_now_p1"].item()), 4),
                 "expected_A_end": round(float(q_mean[-1]), 1),
                 "expected_drift": round(float(roll["expected_drift"].item()), 1),
                 "prob_improve_p1": round(float(roll["prob_improve_p1"].item()), 4),
@@ -921,6 +1295,11 @@ class WorldModelInspector:
                 "std_drift": round(float(roll["std_drift"].item()), 1),
                 "cvar10_p1": round(float(roll["cvar10_p1"].item()), 1),
                 "cvar10_p2": round(cvar10_p2, 1),
+                "plan_misalignment": {
+                    "p1": round(float(mis_np[0]), 4),
+                    "p2": round(float(mis_np[1]), 4),
+                },
+                "unscouted_threats": unscouted_threats,
                 "capability_norm": {
                     "p1": round(float(roll["capability_p1"].norm().item()), 3),
                     "p2": round(float(roll["capability_p2"].norm().item()), 3),
@@ -935,10 +1314,14 @@ class WorldModelInspector:
                 },
                 "branches": np.round(a_traj_np[: min(16, n_branches)], 1).tolist(),
                 "squads": squads_out,
+                "micro_chunk": micro_chunk,
                 "grid_res": grid_res,
-                "threat_grid_p1": np.round(tg_p1, 2).tolist(),
-                "threat_grid_p2": np.round(tg_p2, 2).tolist(),
-                "threat_grid_net": np.round(tg_net, 2).tolist(),
+                "leverage_grid_p1": np.round(lg_p1, 2).tolist(),
+                "leverage_grid_p2": np.round(lg_p2, 2).tolist(),
+                "leverage_grid_net": np.round(lg_net, 2).tolist(),
+                "threat_grid_p1": np.round(lg_p1, 2).tolist(),
+                "threat_grid_p2": np.round(lg_p2, 2).tolist(),
+                "threat_grid_net": np.round(lg_net, 2).tolist(),
                 "elapsed_ms": round(elapsed_ms, 1),
             }
 

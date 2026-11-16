@@ -644,6 +644,83 @@
     line-height: 1.2;
     white-space: nowrap;
   }
+  .obs-mode-seg {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 3px;
+    background: rgba(15, 23, 42, 0.85);
+    padding: 2px;
+    border-radius: 5px;
+    border: 1px solid rgba(71, 85, 105, 0.65);
+  }
+  .obs-mode-btn {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2.5px 4px;
+    border-radius: 3.5px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.12s ease;
+    white-space: nowrap;
+  }
+  .obs-mode-btn:hover {
+    color: #f8fafc;
+    background: rgba(51, 65, 85, 0.5);
+  }
+  .obs-mode-btn.active[data-obs-mode="forecast"] {
+    background: rgba(79, 70, 229, 0.38);
+    border-color: #818cf8;
+    color: #ffffff;
+  }
+  .obs-mode-btn.active[data-obs-mode="counterplay_p1"] {
+    background: rgba(220, 38, 38, 0.36);
+    border-color: #f87171;
+    color: #ffffff;
+  }
+  .obs-mode-btn.active[data-obs-mode="counterplay_p2"] {
+    background: rgba(37, 99, 235, 0.36);
+    border-color: #60a5fa;
+    color: #ffffff;
+  }
+  .obs-tom-box {
+    background: rgba(15, 23, 42, 0.78);
+    border: 1px solid rgba(99, 102, 241, 0.32);
+    border-radius: 4px;
+    padding: 4px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 10px;
+  }
+  .obs-threat-pill {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 5px;
+    padding: 2px 5px;
+    border-radius: 3px;
+    background: rgba(30, 41, 59, 0.72);
+    border: 1px solid rgba(71, 85, 105, 0.65);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 9.8px;
+  }
+  .obs-threat-pill:hover {
+    border-color: #fbbf24;
+    background: rgba(51, 65, 85, 0.75);
+  }
+  .obs-micro-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(15, 23, 42, 0.82);
+    border: 1px solid rgba(51, 65, 85, 0.75);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 10px;
+  }
 
   /* Reverse SAE Attribution Panel */
   .sae-attr-box {
@@ -1079,9 +1156,9 @@
                 <option value="env">Neutral / Resource Field: F_env(x,y)</option>
                 <option value="kinetic">Kinetic Momentum Field: Π(x,y)</option>
                 <option value="terrain_v">Terrain CNN Field: V_loc(x,y)</option>
-                <option value="threat_net">Rollout Threat (+40s): P1 vs P2 Pressure</option>
-                <option value="threat_p1_risk">Rollout Risk to P1 Units &amp; Bases (+40s)</option>
-                <option value="threat_p2_risk">Rollout Risk to P2 Units &amp; Bases (+40s)</option>
+                <option value="threat_net">Intrinsic Leverage: P1 vs P2 ||∇_z A||</option>
+                <option value="threat_p1_risk">P1 Squad Leverage: ||∇_z A|| · g_m</option>
+                <option value="threat_p2_risk">P2 Squad Leverage: ||∇_z A|| · g_m</option>
                 <option value="terrain">Off (Terrain + Fog + Creep Only)</option>
               </select>
               <select id="fieldCombineMode" title="How to combine multiple selected dimensions" style="font-size:11px; padding:2px 5px;">
@@ -1146,7 +1223,7 @@
           <label title="Show or hide neutral mineral fields and geysers"><input type="checkbox" id="chkShowNeutrals" checked />Minerals</label>
           <label title="Subtly dim neutral minerals so player army &amp; bases pop out"><input type="checkbox" id="chkDimNeutrals" checked />Dim Minerals</label>
           <label><input type="checkbox" id="chkS2MA" checked />.s2ma AirBlockers/Shrines</label>
-          <label title="Overlay L1->L2 Top-2 conserved Squad Token centroids, spread ellipses, and +40s attrition risk" style="color:#a5b4fc;font-weight:600;"><input type="checkbox" id="chkSquadTokens" />Squads (M=64)</label>
+          <label title="Overlay Perceiver M=64 Squad Token centroids, spread ellipses, visibility, and intrinsic learned leverage ||∇_z A||" style="color:#a5b4fc;font-weight:600;"><input type="checkbox" id="chkSquadTokens" />Squads (M=64)</label>
           <label style="display:none;"><input type="checkbox" id="chkAnchors" />Anchors</label>
           <label style="color:#c084fc;font-weight:600;"><input type="checkbox" id="chkDragMove" />Drag Unit (What-If)</label>
           <button id="btnResetView" style="padding:1px 6px;font-size:11px;margin-left:auto;">Reset Zoom</button>
@@ -1269,24 +1346,31 @@
         </div>
       </div>
 
-      <!-- 1b. MULTI-HORIZON STOCHASTIC OBSERVER (+40s Fog-of-War Rollout) -->
+      <!-- 1b. MULTI-SCALE STOCHASTIC OBSERVER v2 (+120s Theory-of-Mind + L1 Chunk Flow) -->
       <div class="obs-panel" id="observerPanel">
         <div class="row-group-title">
           <div style="display:flex; align-items:center; gap:5px;">
-            <span style="color:#a5b4fc;">STOCHASTIC OBSERVER (+40s)</span>
+            <span style="color:#a5b4fc;">STOCHASTIC OBSERVER v2 (+120s)</span>
             <span id="obsStatusBadge" class="badge" style="font-size:9.5px; padding:0 4px;">32 branches</span>
           </div>
-          <button id="btnToggleThreatMap" style="padding:1px 6px; font-size:10px; border-color:#6366f1; color:#e0e7ff;" title="Overlay emergent +40s rollout threat heatmap &amp; M=64 Squad Tokens on the 2D battlefield map">
-            Project Threat Map
+          <button id="btnToggleThreatMap" style="padding:1px 6px; font-size:10px; border-color:#6366f1; color:#e0e7ff;" title="Overlay intrinsic learned leverage ||∇_z A|| &amp; Perceiver M=64 Squad Tokens on the 2D battlefield map">
+            Leverage Map
           </button>
         </div>
 
-        <!-- Stronger Hand Probability Bar: P(A(tau + 40s) > 0) -->
-        <div class="obs-stronger-wrap" title="Fraction of fog-of-war rollout futures where each player holds a positive resource+positional lead at +40s (no arbitrary calibration constant)">
+        <!-- Dual-Mode Counterplay Segmented Control -->
+        <div class="obs-mode-seg" id="obsModeSeg">
+          <button class="obs-mode-btn active" data-obs-mode="forecast" title="Roll out natural player policies π(u_p | h^(p), c_p) under fog-of-war">Forecast Play</button>
+          <button class="obs-mode-btn" data-obs-mode="counterplay_p1" title="Optimal P1 Counterplay: CFG ΔA>0 + manifold +∇_u A_1 polish">P1 Counterplay</button>
+          <button class="obs-mode-btn" data-obs-mode="counterplay_p2" title="Optimal P2 Counterplay: CFG ΔA<0 + manifold -∇_u A_1 polish">P2 Counterplay</button>
+        </div>
+
+        <!-- Omniscient Positional Evaluation & +120s Stronger Hand Bar -->
+        <div class="obs-stronger-wrap" title="Omniscient Positional Lead σ(A₀/1500) now and fraction of +120s futures where each player holds A(τ₀+120s) > 0">
           <div class="obs-stronger-labels">
-            <span id="obsStrongP1" style="color:#f87171;">P1 Stronger Hand: 50%</span>
-            <span style="font-size:9px; color:var(--text-muted); font-weight:500;">P(Lead @ +40s)</span>
-            <span id="obsStrongP2" style="color:#60a5fa;">50% :P2 Stronger Hand</span>
+            <span id="obsStrongP1" style="color:#f87171;">P1: 50%</span>
+            <span id="obsLeadCenterLbl" style="font-size:9px; color:var(--text-muted); font-weight:600;">Omni Lead Now • +120s</span>
+            <span id="obsStrongP2" style="color:#60a5fa;">50% :P2</span>
           </div>
           <div class="obs-stronger-track">
             <div id="obsStrongBarP1" class="obs-stronger-p1" style="width:50%;"></div>
@@ -1295,28 +1379,46 @@
           </div>
         </div>
 
-        <!-- 4 KPI Cells: Static A0, Drift E[dA], Initiative P(dA>0), Volatility Std[dA] -->
+        <!-- 4 KPI Cells: Purely Learned Omni A0, Drift E[dA], Initiative P(dA>0), Plan Misalignment -->
         <div class="obs-kpi-grid">
-          <div class="obs-kpi-cell" title="Static Hamiltonian Advantage A(τ₀) at current frame (mineral+gas equivalent)">
-            <span class="obs-kpi-lbl">Static A(τ₀)</span>
+          <div class="obs-kpi-cell" title="Purely learned Omniscient Hamiltonian Advantage A(τ₀) = H₁ − H₂ (zero hardcoded cost formula)">
+            <span class="obs-kpi-lbl">Omni A(τ₀)</span>
             <span id="obsKpiA0" class="obs-kpi-val">—</span>
           </div>
-          <div class="obs-kpi-cell" title="Expected 40s Advantage Drift E[A(τ₀+40s) − A(τ₀)] across 32 fog-of-war futures">
+          <div class="obs-kpi-cell" title="Expected +120s Advantage Drift E[A(τ₀+120s) − A(τ₀)] across 32 Common-Random-Number futures">
             <span class="obs-kpi-lbl">Drift E[ΔA]</span>
             <span id="obsKpiDrift" class="obs-kpi-val">—</span>
           </div>
-          <div class="obs-kpi-cell" title="Initiative: Probability that P1 / P2 improves their net position over the next 40s">
+          <div class="obs-kpi-cell" title="Initiative: Probability that P1 / P2 improves net positional advantage over +120s">
             <span class="obs-kpi-lbl">Initiative</span>
             <span id="obsKpiInit" class="obs-kpi-val">—</span>
           </div>
-          <div class="obs-kpi-cell" id="obsKpiVolCell" title="Tactical Volatility Std[ΔA] across rollout branches (high = volatile clash/drop)">
-            <span class="obs-kpi-lbl">Volatility σ</span>
-            <span id="obsKpiVol" class="obs-kpi-val" style="color:#fbbf24;">—</span>
+          <div class="obs-kpi-cell" id="obsKpiVolCell" title="3-Stream Theory-of-Mind Plan Misalignment: policy velocity shift ||v(h_omni) - v(h_fog)|| when fog is lifted">
+            <span class="obs-kpi-lbl">Misalign P1|P2</span>
+            <span id="obsKpiVol" class="obs-kpi-val" style="color:#fbbf24; font-size:10.5px;">—</span>
           </div>
         </div>
 
-        <!-- Multi-Horizon Advantage Fan Chart (Now .. +40s) -->
-        <canvas id="observerFanCanvas" height="88" style="width:100%; display:block; border-radius:4px; background:rgba(9,13,22,0.7);"></canvas>
+        <!-- Multi-Horizon Advantage Fan Chart (Now .. +120s) -->
+        <canvas id="observerFanCanvas" height="86" style="width:100%; display:block; border-radius:4px; background:rgba(9,13,22,0.7);"></canvas>
+
+        <!-- Theory-of-Mind Unscouted Threat Attribution -->
+        <div class="obs-tom-box" id="obsUnscoutedBox">
+          <div style="display:flex; justify-content:space-between; align-items:center; color:#cbd5e1; font-weight:700; font-size:9.5px;">
+            <span>THEORY-OF-MIND UNSCOUTED THREATS</span>
+            <span id="obsVolSummary" style="font-family:var(--font-mono); color:var(--text-secondary); font-weight:500;">σ=—</span>
+          </div>
+          <div id="obsUnscoutedList" style="display:flex; flex-direction:column; gap:2.5px;">
+            <span style="color:var(--text-muted); font-style:italic;">Awaiting observer evaluation…</span>
+          </div>
+        </div>
+
+        <!-- L1ChunkFlowDecoder +5.0s (16 x 0.3125s) Tactical Micro Scrubber -->
+        <div class="obs-micro-bar" title="Scrub or animate the 16-frame (0.3125s/step, +5.0s) L1ChunkFlowDecoder unit trajectories, orders, casualties, and spawns/warp-ins on the 2D map">
+          <button id="btnMicroPlay" style="padding:1px 6px; font-size:9.8px; font-weight:700; border-color:#818cf8; color:#e0e7ff; white-space:nowrap;">▶ +5s Micro</button>
+          <input type="range" id="microStepSlider" min="0" max="16" value="0" style="flex:1; accent-color:#818cf8; cursor:pointer;" />
+          <span id="microStepLabel" style="font-family:var(--font-mono); font-size:9.8px; color:#c7d2fe; min-width:74px; text-align:right;">Live τ₀</span>
+        </div>
       </div>
 
       <!-- 2. PRODUCTION QUEUE (Image 1 style) -->
@@ -1624,33 +1726,75 @@ function hasCounterfactuals() {
 let isLoadingFrame = false;
 let pendingFrameReq = null;
 let OBSERVER_DATA = null;
+let OBSERVER_MODE = "forecast";
+let MICRO_STEP = 0;
+let microPlayTimer = null;
+let HIGHLIGHT_THREAT_XY = null;
 let isLoadingObserver = false;
 let pendingObserverReq = null;
 
-async function loadObserverRollout(gid, loop_t) {
+function stopMicroPlayback() {
+  if (microPlayTimer) {
+    clearInterval(microPlayTimer);
+    microPlayTimer = null;
+  }
+  const btn = document.getElementById("btnMicroPlay");
+  if (btn) btn.textContent = "▶ +5s Micro";
+}
+
+function updateMicroStepUI() {
+  const sl = document.getElementById("microStepSlider");
+  const lbl = document.getElementById("microStepLabel");
+  if (sl) sl.value = String(MICRO_STEP);
+  if (!lbl) return;
+  if (MICRO_STEP <= 0 || !OBSERVER_DATA || !OBSERVER_DATA.micro_chunk) {
+    const nSp = (OBSERVER_DATA && OBSERVER_DATA.micro_chunk && OBSERVER_DATA.micro_chunk.spawns)
+      ? OBSERVER_DATA.micro_chunk.spawns.length
+      : 0;
+    lbl.textContent = nSp > 0 ? `Live τ₀ (${nSp} sp)` : "Live τ₀";
+    lbl.style.color = "#94a3b8";
+  } else {
+    const mc = OBSERVER_DATA.micro_chunk;
+    const k = Math.min(mc.n_steps - 1, MICRO_STEP - 1);
+    const dt = (mc.step_secs && mc.step_secs[k]) ? mc.step_secs[k] : ((k + 1) * 0.3125);
+    const activeSp = (mc.spawns || []).filter(s => s.birth_k <= k).length;
+    lbl.textContent = activeSp > 0 ? `+${dt.toFixed(2)}s • +${activeSp}u` : `+${dt.toFixed(2)}s (f${k + 1})`;
+    lbl.style.color = "#fde047";
+  }
+}
+
+async function loadObserverRollout(gid, loop_t, modeOverride = null) {
+  if (modeOverride) {
+    OBSERVER_MODE = modeOverride;
+  }
+  document.querySelectorAll(".obs-mode-btn[data-obs-mode]").forEach(btn => {
+    btn.classList.toggle("active", btn.getAttribute("data-obs-mode") === OBSERVER_MODE);
+  });
   if (isLoadingObserver) {
-    pendingObserverReq = [gid, loop_t];
+    pendingObserverReq = [gid, loop_t, OBSERVER_MODE];
     return;
   }
   isLoadingObserver = true;
   const badge = document.getElementById("obsStatusBadge");
   if (badge) {
-    badge.textContent = "rolling +40s…";
+    badge.textContent = `rolling +120s (${OBSERVER_MODE === "forecast" ? "fc" : (OBSERVER_MODE === "counterplay_p1" ? "cp1" : "cp2")})…`;
     badge.style.color = "#fbbf24";
   }
   try {
-    const res = await fetch(`/api/game/${gid}/observer/${loop_t}?branches=32&horizon=8`);
+    const res = await fetch(`/api/game/${gid}/observer/${loop_t}?branches=32&horizon=24&mode=${encodeURIComponent(OBSERVER_MODE)}`);
     const data = await res.json();
     if (data && data.available) {
       OBSERVER_DATA = data;
       if (badge) {
-        badge.textContent = `${data.n_branches}b • ${Math.round(data.elapsed_ms)}ms`;
+        const mTag = data.mode === "counterplay_p1" ? "CP1" : (data.mode === "counterplay_p2" ? "CP2" : "FC");
+        badge.textContent = `${mTag} ${data.n_branches}b • ${Math.round(data.elapsed_ms)}ms`;
         badge.style.color = "#a5b4fc";
       }
+      updateMicroStepUI();
       renderObserverPanel();
       const bgSel = document.getElementById("mapBgMode");
       const sqChk = document.getElementById("chkSquadTokens");
-      if ((bgSel && bgSel.value.startsWith("threat_")) || (sqChk && sqChk.checked)) {
+      if ((bgSel && bgSel.value.startsWith("threat_")) || (sqChk && sqChk.checked) || MICRO_STEP > 0 || HIGHLIGHT_THREAT_XY) {
         renderMap();
       }
     }
@@ -1659,9 +1803,9 @@ async function loadObserverRollout(gid, loop_t) {
   } finally {
     isLoadingObserver = false;
     if (pendingObserverReq) {
-      const [nGid, nLoop] = pendingObserverReq;
+      const [nGid, nLoop, nMode] = pendingObserverReq;
       pendingObserverReq = null;
-      loadObserverRollout(nGid, nLoop);
+      loadObserverRollout(nGid, nLoop, nMode);
     }
   }
 }
@@ -1704,6 +1848,11 @@ async function loadFrame(gid, loop_t) {
       const u = FRAME.units.find(x => x.row === SELECTED_UNIT_ROW);
       if (u) SELECTED_TOK_IDX = u.tok_idx;
     }
+
+    HIGHLIGHT_THREAT_XY = null;
+    MICRO_STEP = 0;
+    stopMicroPlayback();
+    updateMicroStepUI();
 
     populateTokenSelect();
     populateSaeMapSelect();
@@ -1827,6 +1976,10 @@ function clearOverlaySelection() {
   ACTIVE_FIELD_DIMS = new Set(Array.from({ length: rDim }, (_, i) => i));
   const bgSel = document.getElementById("mapBgMode");
   if (bgSel && bgSel.value === "terrain") bgSel.value = "diff";
+  HIGHLIGHT_THREAT_XY = null;
+  MICRO_STEP = 0;
+  stopMicroPlayback();
+  updateMicroStepUI();
   renderAll();
 }
 
@@ -1863,6 +2016,10 @@ function resetAllSelections() {
   if (cMode && (cMode.value === "gram_mode" || cMode.value === "cos_sim")) cMode.value = "owner";
   const bgSel = document.getElementById("mapBgMode");
   if (bgSel && bgSel.value === "terrain") bgSel.value = "diff";
+  HIGHLIGHT_THREAT_XY = null;
+  MICRO_STEP = 0;
+  stopMicroPlayback();
+  updateMicroStepUI();
   renderAll();
 }
 
@@ -2670,7 +2827,7 @@ function renderObserverPanel() {
   const bgSel = document.getElementById("mapBgMode");
   if (btnMap && bgSel) {
     const isThreat = bgSel.value.startsWith("threat_");
-    btnMap.textContent = isThreat ? "✓ Threat Map Active" : "Project Threat Map";
+    btnMap.textContent = isThreat ? "✓ Leverage Map" : "Leverage Map";
     btnMap.style.background = isThreat ? "#4f46e5" : "";
     btnMap.style.color = isThreat ? "#ffffff" : "#e0e7ff";
   }
@@ -2682,29 +2839,38 @@ function renderObserverPanel() {
     ctx.fillStyle = "#64748b";
     ctx.font = "11px system-ui, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("Computing 32-branch +40s fog-of-war rollout…", w * 0.5, h * 0.52);
+    ctx.fillText("Computing 32-branch +120s Theory-of-Mind rollout…", w * 0.5, h * 0.52);
     return;
   }
 
   const d = OBSERVER_DATA;
+  const p1NowProb = (d.prob_lead_now_p1 !== undefined && d.prob_lead_now_p1 !== null)
+    ? d.prob_lead_now_p1
+    : d.prob_stronger_hand_p1;
+  const p1NowPct = Math.round(p1NowProb * 100);
+  const p2NowPct = 100 - p1NowPct;
   const p1StrongPct = Math.round(d.prob_stronger_hand_p1 * 100);
   const p2StrongPct = 100 - p1StrongPct;
   const p1InitPct = Math.round(d.prob_improve_p1 * 100);
   const p2InitPct = 100 - p1InitPct;
 
   const p1NameShort = (FRAME && FRAME.hud && FRAME.hud.p1 && FRAME.hud.p1.name)
-    ? unescapeHtml(FRAME.hud.p1.name).slice(0, 10)
+    ? unescapeHtml(FRAME.hud.p1.name).slice(0, 9)
     : "P1";
   const p2NameShort = (FRAME && FRAME.hud && FRAME.hud.p2 && FRAME.hud.p2.name)
-    ? unescapeHtml(FRAME.hud.p2.name).slice(0, 10)
+    ? unescapeHtml(FRAME.hud.p2.name).slice(0, 9)
     : "P2";
 
   const elSP1 = document.getElementById("obsStrongP1");
+  const elSCtr = document.getElementById("obsLeadCenterLbl");
   const elSP2 = document.getElementById("obsStrongP2");
   const elSBar = document.getElementById("obsStrongBarP1");
-  if (elSP1) elSP1.textContent = `${p1NameShort}: ${p1StrongPct}%`;
-  if (elSP2) elSP2.textContent = `${p2StrongPct}% :${p2NameShort}`;
-  if (elSBar) elSBar.style.width = `${Math.max(2, Math.min(98, p1StrongPct))}%`;
+  if (elSP1) elSP1.textContent = `${p1NameShort}: ${p1NowPct}% (→${p1StrongPct}%)`;
+  if (elSCtr) elSCtr.textContent = d.mode === "counterplay_p1"
+    ? "Omni • P1 Opt +120s"
+    : (d.mode === "counterplay_p2" ? "Omni • P2 Opt +120s" : "Omni Now • +120s");
+  if (elSP2) elSP2.textContent = `(${p2StrongPct}%←) ${p2NowPct}% :${p2NameShort}`;
+  if (elSBar) elSBar.style.width = `${Math.max(2, Math.min(98, p1NowPct))}%`;
 
   const fmtRes = v => `${v >= 0 ? "+" : ""}${Math.round(v)}`;
   const elA0 = document.getElementById("obsKpiA0");
@@ -2729,16 +2895,84 @@ function renderObserverPanel() {
   }
   const elVol = document.getElementById("obsKpiVol");
   const elVolCell = document.getElementById("obsKpiVolCell");
+  const pm1 = (d.plan_misalignment && d.plan_misalignment.p1 !== undefined) ? d.plan_misalignment.p1 : 0;
+  const pm2 = (d.plan_misalignment && d.plan_misalignment.p2 !== undefined) ? d.plan_misalignment.p2 : 0;
   if (elVol) {
-    elVol.textContent = `±${Math.round(d.std_drift)}`;
+    elVol.textContent = `${pm1.toFixed(3)}|${pm2.toFixed(3)}`;
+    elVol.style.color = Math.max(pm1, pm2) > 0.025 ? "#fbbf24" : "#cbd5e1";
   }
   if (elVolCell) {
-    elVolCell.title = `Tactical Volatility σ(ΔA)=±${Math.round(d.std_drift)} • Tail Risk CVaR₁₀%: P1 ${fmtRes(d.cvar10_p1)} | P2 ${fmtRes(-d.cvar10_p2)}`;
+    elVolCell.title =
+      `Plan Misalignment ||v(h_omni) - v(h_fog)||: P1=${pm1.toFixed(3)}, P2=${pm2.toFixed(3)} • ` +
+      `Volatility σ(ΔA)=±${Math.round(d.std_drift)} • CVaR₁₀%: P1 ${fmtRes(d.cvar10_p1)} | P2 ${fmtRes(-d.cvar10_p2)}`;
   }
 
-  // Draw Multi-Horizon Advantage Fan Chart (Now .. +40s)
+  const elVolSum = document.getElementById("obsVolSummary");
+  if (elVolSum) {
+    elVolSum.textContent = `σ=±${Math.round(d.std_drift)} • CVaR₁₀ ${fmtRes(d.cvar10_p1)}|${fmtRes(-d.cvar10_p2)}`;
+  }
+
+  // Render Theory-of-Mind Unscouted Threat Attribution Pills
+  const elUnsc = document.getElementById("obsUnscoutedList");
+  if (elUnsc) {
+    elUnsc.innerHTML = "";
+    const ut = d.unscouted_threats || { p1: [], p2: [] };
+    const items = [];
+    (ut.p1 || []).slice(0, 2).forEach(th => items.push({ viewer: 1, ...th }));
+    (ut.p2 || []).slice(0, 2).forEach(th => items.push({ viewer: 2, ...th }));
+    items.sort((a, b) => (b.attr || 0) - (a.attr || 0));
+
+    if (items.length === 0) {
+      const emptySpan = document.createElement("span");
+      emptySpan.style.color = "var(--text-muted)";
+      emptySpan.textContent = "No high-attribution unscouted threats right now.";
+      elUnsc.appendChild(emptySpan);
+    } else {
+      items.slice(0, 3).forEach(th => {
+        const pill = document.createElement("div");
+        pill.className = "obs-threat-pill";
+        const isActive = HIGHLIGHT_THREAT_XY &&
+          Math.abs(HIGHLIGHT_THREAT_XY.x - th.x) < 0.2 &&
+          Math.abs(HIGHLIGHT_THREAT_XY.y - th.y) < 0.2;
+        if (isActive) {
+          pill.style.borderColor = "#fbbf24";
+          pill.style.background = "rgba(120, 53, 15, 0.45)";
+        }
+        const vTagCol = th.viewer === 1 ? "#fca5a5" : "#93c5fd";
+        const shimBadge = (th.shimmer && th.shimmer >= 0.15)
+          ? `<span style="color:#fde047; font-weight:700;" title="Cloaked/burrowed shimmer visible on-screen!">✦Shimmer</span> `
+          : "";
+        pill.innerHTML =
+          `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">` +
+          `<b style="color:${vTagCol};">P${th.viewer} Blind:</b> ${shimBadge}${escapeHtml(th.units)}</span>` +
+          `<span style="color:#fbbf24; white-space:nowrap;">(${Math.round(th.x)},${Math.round(th.y)}) Δπ=${(Number(th.attr) * 1000).toFixed(1)}m</span>`;
+        pill.title = `Click to highlight on 2D map • Enemy P${th.enemy_owner} squad at (${th.x}, ${th.y}) • Unscouted=${Math.round((th.unscouted_frac || 0) * 100)}% • Shimmer=${Math.round((th.shimmer || 0) * 100)}%`;
+        pill.addEventListener("click", () => {
+          if (HIGHLIGHT_THREAT_XY &&
+              Math.abs(HIGHLIGHT_THREAT_XY.x - th.x) < 0.2 &&
+              Math.abs(HIGHLIGHT_THREAT_XY.y - th.y) < 0.2) {
+            HIGHLIGHT_THREAT_XY = null;
+          } else {
+            HIGHLIGHT_THREAT_XY = {
+              x: th.x,
+              y: th.y,
+              viewer: th.viewer,
+              enemy_owner: th.enemy_owner,
+              units: th.units,
+              shimmer: th.shimmer || 0
+            };
+          }
+          renderObserverPanel();
+          renderMap();
+        });
+        elUnsc.appendChild(pill);
+      });
+    }
+  }
+
+  // Draw Multi-Horizon Advantage Fan Chart (Now .. +120s)
   const q = d.quantiles;
-  const secs = d.step_secs || [0, 5, 10, 15, 20, 25, 30, 35, 40];
+  const secs = d.step_secs || [0, 30, 60, 90, 120];
   const K = secs.length;
   const padL = 38, padR = 10, padT = 8, padB = 16;
   const cw = Math.max(20, w - padL - padR);
@@ -2752,14 +2986,14 @@ function renderObserverPanel() {
       if (v > yMax) yMax = v;
     });
   });
-  const span = Math.max(250.0, yMax - yMin);
+  const span = Math.max(50.0, yMax - yMin);
   yMin -= span * 0.08;
   yMax += span * 0.08;
 
   const xOf = i => padL + (i / Math.max(1, K - 1)) * cw;
   const yOf = v => padT + (1.0 - (v - yMin) / Math.max(1e-6, yMax - yMin)) * ch;
 
-  // Background zero line (A = 0) & static A(tau_0) reference line
+  // Background zero line (A = 0)
   const yZero = yOf(0);
   if (yZero >= padT && yZero <= padT + ch) {
     ctx.save();
@@ -2835,8 +3069,15 @@ function renderObserverPanel() {
   ctx.fillText(fmtRes(yMin), padL - 4, padT + ch);
 
   ctx.textAlign = "center";
-  [0, 2, 4, 6, K - 1].forEach(idx => {
-    if (idx < K) {
+  const tickIdxs = Array.from(new Set([
+    0,
+    Math.floor((K - 1) * 0.25),
+    Math.floor((K - 1) * 0.50),
+    Math.floor((K - 1) * 0.75),
+    K - 1
+  ]));
+  tickIdxs.forEach(idx => {
+    if (idx >= 0 && idx < K) {
       const lbl = idx === 0 ? "Now" : `+${Math.round(secs[idx])}s`;
       ctx.fillText(lbl, xOf(idx), h - 3);
     }
@@ -3350,19 +3591,22 @@ function computeFieldOverlayGrid() {
   let isDiverging = true;
   let label = "";
 
-  // Case 0: Multi-Horizon Stochastic Observer Threat Projection (+40s Rollout)
+  // Case 0: Multi-Scale Stochastic Observer v2 Intrinsic Learned Leverage ||∇_z A||
   if (bgMode.startsWith("threat_")) {
-    if (!OBSERVER_DATA || !OBSERVER_DATA.threat_grid_net) {
+    const netGrid = OBSERVER_DATA && (OBSERVER_DATA.leverage_grid_net || OBSERVER_DATA.threat_grid_net);
+    if (!netGrid) {
       LAST_FIELD_EVAL = null;
       return null;
     }
+    const p1Grid = OBSERVER_DATA.leverage_grid_p1 || OBSERVER_DATA.threat_grid_p1;
+    const p2Grid = OBSERVER_DATA.leverage_grid_p2 || OBSERVER_DATA.threat_grid_p2;
     const src = bgMode === "threat_p1_risk"
-      ? OBSERVER_DATA.threat_grid_p1
-      : (bgMode === "threat_p2_risk" ? OBSERVER_DATA.threat_grid_p2 : OBSERVER_DATA.threat_grid_net);
+      ? p1Grid
+      : (bgMode === "threat_p2_risk" ? p2Grid : netGrid);
     isDiverging = (bgMode === "threat_net");
     label = bgMode === "threat_p1_risk"
-      ? "Rollout Risk to P1 (+40s)"
-      : (bgMode === "threat_p2_risk" ? "Rollout Risk to P2 (+40s)" : "Net Threat: P1 vs P2 Pressure (+40s)");
+      ? "P1 Squad Leverage ||∇_z A|| · g_m"
+      : (bgMode === "threat_p2_risk" ? "P2 Squad Leverage ||∇_z A|| · g_m" : "Intrinsic Leverage: P1 vs P2 ||∇_z A||");
     let lo = 1e9, hi = -1e9, maxAbs = 1e-6;
     for (let iy = 0; iy < G; iy++) {
       const row = src[iy] || [];
@@ -4032,20 +4276,40 @@ function renderMap() {
     });
   }
 
-  // 3b. Dynamic Squad Tokens (1 + M=64 Top-2 Conserved Squads & +40s Attrition Risk)
+  // 3b. Dynamic Perceiver Squad Tokens (M=64 Smooth Queries, Intrinsic Leverage ||∇_z A||, Shimmer)
   const chkSquads = document.getElementById("chkSquadTokens");
   if (((chkSquads && chkSquads.checked) || bgMode.startsWith("threat_")) && OBSERVER_DATA && OBSERVER_DATA.squads) {
     ctx.save();
+    let maxLev = 1e-3;
     OBSERVER_DATA.squads.forEach(sq => {
+      const lv = sq.leverage !== undefined ? sq.leverage : (sq.risk || 0);
+      if (lv > maxLev) maxLev = lv;
+    });
+    OBSERVER_DATA.squads.forEach((sq, sqIdx) => {
       const [sx, sy, sc] = worldToCanvas(sq.x, sq.y, w, h);
       const rx = Math.max(5, Math.min(48, sq.spread_x * sc));
       const ry = Math.max(5, Math.min(48, sq.spread_y * sc));
       const isP1 = sq.owner === 1;
       const hiddenInFog = sq.vis_by_opp < 0.35;
+      const hasShimmer = (sq.shimmer_by_opp || 0) >= 0.15;
+      const lev = sq.leverage !== undefined ? sq.leverage : (sq.risk || 0);
+      const isHighLev = sqIdx < 6 || lev >= Math.max(25, 0.38 * maxLev);
+
+      if (hasShimmer) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(250, 204, 21, 0.85)";
+        ctx.lineWidth = 1.6;
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.ellipse(sx, sy, rx + 3, ry + 3, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       ctx.strokeStyle = isP1
-        ? (hiddenInFog ? "rgba(248, 113, 113, 0.55)" : "rgba(252, 165, 165, 0.92)")
-        : (hiddenInFog ? "rgba(96, 165, 250, 0.55)" : "rgba(147, 197, 253, 0.92)");
-      ctx.lineWidth = sq.risk >= 150 ? 2.0 : 1.25;
+        ? (hiddenInFog ? "rgba(248, 113, 113, 0.58)" : "rgba(252, 165, 165, 0.94)")
+        : (hiddenInFog ? "rgba(96, 165, 250, 0.58)" : "rgba(147, 197, 253, 0.94)");
+      ctx.lineWidth = isHighLev ? 2.1 : 1.2;
       ctx.setLineDash(hiddenInFog ? [3, 3] : []);
       ctx.beginPath();
       ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
@@ -4054,8 +4318,8 @@ function renderMap() {
       // Squad centroid diamond
       ctx.setLineDash([]);
       ctx.fillStyle = isP1 ? "#ef4444" : "#3b82f6";
-      ctx.strokeStyle = "#f8fafc";
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = hasShimmer ? "#fde047" : "#f8fafc";
+      ctx.lineWidth = hasShimmer ? 1.5 : 1.0;
       ctx.beginPath();
       ctx.moveTo(sx, sy - 4);
       ctx.lineTo(sx + 4, sy);
@@ -4065,13 +4329,15 @@ function renderMap() {
       ctx.fill();
       ctx.stroke();
 
-      if (sq.risk >= 140) {
-        const tag = `-${Math.round(sq.risk)}`;
-        ctx.font = "bold 9.5px ui-monospace, monospace";
+      if (isHighLev && lev > 1.0) {
+        const shortU = (sqIdx < 4 && sq.units) ? ` ${String(sq.units).split(",")[0].slice(0, 12)}` : "";
+        const tag = `⚡${Math.round(lev)}${shortU}`;
+        ctx.font = "bold 9px ui-monospace, monospace";
         const tw = ctx.measureText(tag).width + 6;
-        ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
         ctx.fillRect(sx - tw * 0.5, sy - ry - 13, tw, 12);
         ctx.strokeStyle = isP1 ? "#f87171" : "#60a5fa";
+        ctx.lineWidth = 1;
         ctx.strokeRect(sx - tw * 0.5, sy - ry - 13, tw, 12);
         ctx.fillStyle = "#fde047";
         ctx.textAlign = "center";
@@ -4163,6 +4429,9 @@ function renderMap() {
     } else if (isNeutral && dimNeutrals && !isSel && !isSaeContributor && !isGroupSel) {
       // Subtly dim background neutral mineral fields and rocks so player armies pop out
       ctx.globalAlpha = 0.38;
+    }
+    if (MICRO_STEP > 0 && !isNeutral && !u.structure && !isSel) {
+      ctx.globalAlpha *= 0.24;
     }
 
     // Prominent golden halo for units in the currently selected Unit/Structure group
@@ -4334,11 +4603,164 @@ function renderMap() {
     ctx.restore();
   });
 
+  // 6. L1ChunkFlowDecoder +5.0s (16 x 0.3125s) Tactical Micro Trajectories, Orders, Casualties & Spawns
+  const mc = OBSERVER_DATA && OBSERVER_DATA.micro_chunk;
+  if (mc && mc.units && MICRO_STEP > 0) {
+    ctx.save();
+    const kMax = MICRO_STEP > 0 ? Math.min(mc.n_steps - 1, MICRO_STEP - 1) : (mc.n_steps - 1);
+
+    // 6a. Movement polyline trails over +5.0s
+    mc.units.forEach(mu => {
+      if (mu.structure) return;
+      const dxTot = Math.hypot((mu.x[kMax] || mu.x0) - mu.x0, (mu.y[kMax] || mu.y0) - mu.y0);
+      if (dxTot < 1.1) return;
+      ctx.strokeStyle = mu.owner === 1
+        ? (MICRO_STEP > 0 ? "rgba(252, 165, 165, 0.72)" : "rgba(248, 113, 113, 0.36)")
+        : (MICRO_STEP > 0 ? "rgba(147, 197, 253, 0.72)" : "rgba(96, 165, 250, 0.36)");
+      ctx.lineWidth = MICRO_STEP > 0 ? 1.35 : 0.95;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath();
+      const [sx0, sy0] = worldToCanvas(mu.x0, mu.y0, w, h);
+      ctx.moveTo(sx0, sy0);
+      for (let j = 0; j <= kMax; j++) {
+        const [px, py] = worldToCanvas(mu.x[j], mu.y[j], w, h);
+        ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+
+    // 6b. Animated entity positions, tactical order arrows, casualties & predicted spawns at step k
+    if (MICRO_STEP > 0) {
+      const k = kMax;
+      mc.units.forEach(mu => {
+        const [ux, uy, sc] = worldToCanvas(mu.x[k], mu.y[k], w, h);
+        const rad = Math.max(2.8, Math.min(11.5, (mu.radius || 0.5) * sc * (mu.structure ? 1.1 : 1.35)));
+        const aliveP = mu.alive_prob ? mu.alive_prob[k] : 1.0;
+        const isDead = aliveP < 0.35;
+
+        if (isDead) {
+          ctx.strokeStyle = mu.owner === 1 ? "rgba(248, 113, 113, 0.75)" : "rgba(96, 165, 250, 0.75)";
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(ux - 3.5, uy - 3.5);
+          ctx.lineTo(ux + 3.5, uy + 3.5);
+          ctx.moveTo(ux + 3.5, uy - 3.5);
+          ctx.lineTo(ux - 3.5, uy + 3.5);
+          ctx.stroke();
+          return;
+        }
+
+        // Tactical unit order target ray
+        const ordP = mu.ord_prob ? mu.ord_prob[k] : 0.0;
+        if (!mu.structure && ordP > 0.55 && mu.ord_tx && mu.ord_ty) {
+          const [tx, ty] = worldToCanvas(mu.ord_tx[k], mu.ord_ty[k], w, h);
+          const dist = Math.hypot(tx - ux, ty - uy);
+          if (dist > 4.0) {
+            const clampD = Math.min(34.0, dist);
+            const ex = ux + ((tx - ux) / dist) * clampD;
+            const ey = uy + ((ty - uy) / dist) * clampD;
+            ctx.strokeStyle = mu.owner === 1 ? "rgba(254, 202, 202, 0.75)" : "rgba(191, 219, 254, 0.75)";
+            ctx.lineWidth = 1.15;
+            ctx.beginPath();
+            ctx.moveTo(ux, uy);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+          }
+        }
+
+        ctx.globalAlpha = Math.max(0.45, Math.min(1.0, aliveP));
+        ctx.fillStyle = mu.owner === 1 ? "#ef4444" : "#3b82f6";
+        ctx.strokeStyle = mu.flying ? "#f0abfc" : "#f8fafc";
+        ctx.lineWidth = mu.flying ? 1.6 : 1.1;
+        ctx.beginPath();
+        if (mu.structure) {
+          ctx.rect(ux - rad, uy - rad, rad * 2, rad * 2);
+        } else {
+          ctx.arc(ux, uy, rad, 0, Math.PI * 2);
+        }
+        ctx.fill();
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
+      });
+
+      // Predicted newly spawned / warped-in units
+      (mc.spawns || []).forEach(sp => {
+        if (sp.birth_k > k) return;
+        const [ox, oy] = worldToCanvas(sp.origin_x, sp.origin_y, w, h);
+        const [sx, sy, sc] = worldToCanvas(sp.x[k], sp.y[k], w, h);
+        const rad = Math.max(3.5, Math.min(10.0, (sp.radius || 0.5) * sc * 1.4));
+        ctx.save();
+        ctx.strokeStyle = sp.owner === 1 ? "rgba(252, 165, 165, 0.7)" : "rgba(147, 197, 253, 0.7)";
+        ctx.setLineDash([2, 2]);
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.moveTo(ox, oy);
+        ctx.lineTo(sx, sy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = sp.owner === 1 ? "rgba(239, 68, 68, 0.88)" : "rgba(59, 130, 246, 0.88)";
+        ctx.strokeStyle = "#fde047";
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.arc(sx, sy, rad + 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.font = "bold 8.8px ui-monospace, monospace";
+        ctx.fillStyle = "#fde047";
+        ctx.textAlign = "center";
+        ctx.fillText(`+${sp.name}`, sx, sy - rad - 4);
+        ctx.restore();
+      });
+    }
+    ctx.restore();
+  }
+
+  // 7. Highlighted Unscouted Threat Target Reticle (from Theory-of-Mind Pill Click)
+  if (HIGHLIGHT_THREAT_XY) {
+    const [hx, hy] = worldToCanvas(HIGHLIGHT_THREAT_XY.x, HIGHLIGHT_THREAT_XY.y, w, h);
+    ctx.save();
+    ctx.strokeStyle = "#fbbf24";
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.arc(hx, hy, 18, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(hx, hy, 26, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(hx - 23, hy); ctx.lineTo(hx - 12, hy);
+    ctx.moveTo(hx + 12, hy); ctx.lineTo(hx + 23, hy);
+    ctx.moveTo(hx, hy - 23); ctx.lineTo(hx, hy - 12);
+    ctx.moveTo(hx, hy + 12); ctx.lineTo(hx, hy + 23);
+    ctx.stroke();
+
+    const lbl = `P${HIGHLIGHT_THREAT_XY.viewer} Blind: ${HIGHLIGHT_THREAT_XY.units}`;
+    ctx.font = "bold 10px ui-monospace, monospace";
+    const tw = ctx.measureText(lbl).width + 10;
+    ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+    ctx.fillRect(hx - tw * 0.5, hy - 42, tw, 15);
+    ctx.strokeStyle = "#fbbf24";
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(hx - tw * 0.5, hy - 42, tw, 15);
+    ctx.fillStyle = "#fde047";
+    ctx.textAlign = "center";
+    ctx.fillText(lbl, hx, hy - 31);
+    ctx.restore();
+  }
+
   const s2maBadge = mp.s2ma && mp.s2ma.found_s2ma
     ? ` | .s2ma NFZ:${mp.s2ma.no_fly_zones.length} Shrines:${mp.s2ma.healing_shrines.length}`
     : "";
+  const microBadge = MICRO_STEP > 0 && mc
+    ? ` | Micro +${((mc.step_secs && mc.step_secs[MICRO_STEP - 1]) || (MICRO_STEP * 0.3125)).toFixed(2)}s (${OBSERVER_MODE})`
+    : "";
   document.getElementById("mapOverlayTop").textContent =
-    `${mp.map_name} • t=${fmtTime(FRAME.time_s)} (Loop ${FRAME.loop_t}) • Live Units: ${FRAME.units.length}${s2maBadge}`;
+    `${mp.map_name} • t=${fmtTime(FRAME.time_s)} (Loop ${FRAME.loop_t}) • Live Units: ${FRAME.units.length}${microBadge}${s2maBadge}`;
 }
 
 // ============================================================================
@@ -4546,6 +4968,50 @@ if (btnToggleThreat) {
       if (sqChk) sqChk.checked = true;
     }
     renderAll();
+  });
+}
+
+// Observer v2 Mode Switcher (Forecast Play | P1 Counterplay | P2 Counterplay)
+document.querySelectorAll(".obs-mode-btn[data-obs-mode]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const m = btn.getAttribute("data-obs-mode") || "forecast";
+    if (!CURRENT_GID) return;
+    loadObserverRollout(CURRENT_GID, CURRENT_LOOP, m);
+  });
+});
+
+// Observer v2 +5.0s L1ChunkFlowDecoder Micro Scrubber & Play/Pause
+const microSliderEl = document.getElementById("microStepSlider");
+if (microSliderEl) {
+  microSliderEl.addEventListener("input", e => {
+    stopMicroPlayback();
+    MICRO_STEP = parseInt(e.target.value, 10) || 0;
+    updateMicroStepUI();
+    renderMap();
+  });
+}
+
+const btnMicroPlayEl = document.getElementById("btnMicroPlay");
+if (btnMicroPlayEl) {
+  btnMicroPlayEl.addEventListener("click", () => {
+    if (microPlayTimer) {
+      stopMicroPlayback();
+      return;
+    }
+    if (!OBSERVER_DATA || !OBSERVER_DATA.micro_chunk) return;
+    const maxS = OBSERVER_DATA.micro_chunk.n_steps || 16;
+    if (MICRO_STEP >= maxS) MICRO_STEP = 0;
+    btnMicroPlayEl.textContent = "⏸ +5s Micro";
+    microPlayTimer = setInterval(() => {
+      if (!OBSERVER_DATA || !OBSERVER_DATA.micro_chunk) {
+        stopMicroPlayback();
+        return;
+      }
+      const nS = OBSERVER_DATA.micro_chunk.n_steps || 16;
+      MICRO_STEP = MICRO_STEP >= nS ? 0 : (MICRO_STEP + 1);
+      updateMicroStepUI();
+      renderMap();
+    }, 180);
   });
 }
 

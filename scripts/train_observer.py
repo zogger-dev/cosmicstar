@@ -1,15 +1,22 @@
-"""Sparse Live-Window Co-Training for the Multi-Horizon Stochastic Observer (`L1` 0.625s -> `L2` 5.0s).
+"""All-932-Game Multi-Scale Co-Training for Stochastic Observer v2 (`L1` 7-Loop Chunk Flow + `L2` 120s Perceiver World Model).
 
-Jointly trains:
-  - `Frames` (`L1`, warm-started from `model_step44285.pt`, adapted at `step=14` with human
-    control-group & camera/onscreen features)
-  - `SquadPooler` (`1` Macro + `M = 64` Squad Tokens/player via Top-2 exact-conservation routing)
-  - `HindsightIntentPosterior` (`K = 4` spatial intents + macro intent + `16d` micro residual `xi`)
-  - `ObserverWorldModelL2` (fog-of-war `PerspectiveMacroEncoder` + Capability `c_p` +
-    Diffusion-Forcing `ConditionalFlowPrior` + token-level `SquadPortHamiltonian`)
+Jointly trains across all 5 StarCraft II builds (`93333, 94137, 95299, 95841, 96883`, `932` games,
+`1,352` symmetric player perspectives):
+  - `Frames` (`L1`, `48`-frame `step=7` = `0.3125s` causal encoder with perspective-isolated
+    spatial attention masks, warm-started from `model_step44285.pt`)
+  - `PerceiverSquadCompressor` (`M = 64` smooth Perceiver queries/player + Null-Sink + `M_opp = 32`
+    strictly leak-free Perceived-Enemy tokens, ZERO `top-k`)
+  - `HindsightOutcomePosterior` (`u_1, u_2` perspective-faithful intents + `32d` player-equivariant
+    `xi_world` outcome shock + realized `combat_loss` destruction impulses)
+  - `L1ChunkFlowDecoder` (`4`-step parallel `16`-frame `0.3125s` trajectory, order & spawn decoder)
+  - `ObserverWorldModelL2` (purely learned gate-weighted `A = H_1 - H_2`, `WorldOutcomeFlowPrior`,
+    3-stream Theory-of-Mind `h_1, h_2, h_obs` + `OpponentBeliefHead`, Dual-Mode CFG `Delta A` Prior)
 
 Usage:
-    PYTHONPATH=src:scripts .venv/bin/python scripts/train_observer.py --steps 2500 --batch 12 --live_batch 4
+    PYTHONPATH=src:scripts .venv/bin/python scripts/train_observer.py \
+        --cache_dir data/worldmodel/observer_cache_v2 \
+        --run data/worldmodel/runs/observer_v2 \
+        --steps 4000 --batch 24 --live_batch 6
 """
 
 from __future__ import annotations
@@ -23,30 +30,35 @@ import queue
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 os.environ.setdefault("TRITON_DEFAULT_FP_FUSION", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 import numpy as np
+import pyarrow as pa
 import torch
 import torch.multiprocessing as mp
 import train_physics as tp
 
 from cosmicstar.worldmodel import energy_data as ED
+from cosmicstar.worldmodel import l1_chunk_decoder as LCD
 from cosmicstar.worldmodel import observer_l2 as OL2
 from cosmicstar.worldmodel import physics_data as PD
 from cosmicstar.worldmodel import squad_pooler as SP
 from cosmicstar.worldmodel.action_tokens import ActionVocab
 from cosmicstar.worldmodel.vocab import Vocab
 
+CACHE_SCHEMA_VERSION = 3
+
 
 def _trim_batch(b: dict) -> dict:
-    """Trims collated batch dict to keys required by `Frames`, `SquadPooler`, and `HindsightIntentPosterior`."""
+    """Trims collated batch dict to keys required by `Frames`, `Perceiver`, `Posterior`, and `L1ChunkFlowDecoder`."""
     out = {k: b[k] for k in ED.BATCH_KEYS if k in b}
     if "slot_reg" in out:
         out["slot_reg"] = out["slot_reg"][..., :1, :].contiguous()
@@ -56,11 +68,15 @@ def _trim_batch(b: dict) -> dict:
 
 
 def _to_numpy_dict(d: dict) -> dict:
-    """Converts Tensor values to NumPy arrays so multiprocessing Queues never allocate `/dev/shm` segments."""
+    """Converts Tensor values to NumPy arrays (losslessly bit-packing binary `grid`) so IPC Queues stay tiny."""
     out = {}
     for k, v in d.items():
         if isinstance(v, torch.Tensor):
-            out[k] = v.detach().cpu().numpy()
+            arr = v.detach().cpu().numpy()
+            if k == "grid" and arr.dtype == np.uint8:
+                out[k] = ("__packbits__", int(arr.shape[-1]), np.packbits(arr, axis=-1))
+            else:
+                out[k] = arr
         elif isinstance(v, dict):
             out[k] = _to_numpy_dict(v)
         elif isinstance(v, list):
@@ -71,10 +87,14 @@ def _to_numpy_dict(d: dict) -> dict:
 
 
 def _from_numpy_dict(d: dict) -> dict:
-    """Zero-copy conversion of NumPy arrays back to CPU `torch.Tensor`s in the consumer process."""
+    """Zero-copy conversion of NumPy arrays (and bit-packed `grid`) back to CPU `torch.Tensor`s."""
     out = {}
     for k, v in d.items():
-        if isinstance(v, np.ndarray):
+        if isinstance(v, tuple) and len(v) == 3 and v[0] == "__packbits__":
+            _, c_dim, packed = v
+            unpacked = np.unpackbits(packed, axis=-1)[..., :c_dim]
+            out[k] = torch.from_numpy(np.ascontiguousarray(unpacked))
+        elif isinstance(v, np.ndarray):
             out[k] = torch.from_numpy(v)
         elif isinstance(v, dict):
             out[k] = _from_numpy_dict(v)
@@ -85,13 +105,28 @@ def _from_numpy_dict(d: dict) -> dict:
     return out
 
 
+def _slice_ctx(ctx: dict, sl: slice) -> dict:
+    """Slices batch dimension `0` across both flat Tensors and nested `perception` dict."""
+    out = {}
+    for k, v in ctx.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v[sl]
+        elif isinstance(v, dict):
+            out[k] = {pk: (pv[sl] if isinstance(pv, torch.Tensor) else pv) for pk, pv in v.items()}
+        else:
+            out[k] = v
+    return out
+
+
 def _extract_one_game_np(gid: str, base: str, vocab: Vocab, avocab: ActionVocab, chunk_size: int) -> dict | None:
-    """Opens a single game, extracts `L=10` (`step=14`) chunks as NumPy arrays, and frees the game immediately."""
+    """Extracts contiguous `49`-frame (`step = 7` loops = `0.3125s`, `15.0s` causal context)
+    windows advancing by `2` macro `5.0s` (`112`-loop) steps per window."""
     g = PD.Game(base, vocab)
     g._load_actions(avocab)
 
     t_marks = list(range(112, g.F - 113, 112))
-    if len(t_marks) < 8:
+    M_marks = len(t_marks)
+    if M_marks < 8:
         del g
         return None
 
@@ -99,12 +134,34 @@ def _extract_one_game_np(gid: str, base: str, vocab: Vocab, avocab: ActionVocab,
     res = g.meta.get("end", {}).get("results", {})
     winner = 1 if res.get("1") == 1 else (2 if res.get("2") == 1 else 0)
 
+    # Build window specs: each 49-frame window covers 2 transitions (or 1 on final even tail)
+    # cursor = 0 -> t0 = 0 (covers marks 0, 1, 2)
+    # cursor = 2 -> t0 = t_marks[2] - 112 = 224 (covers marks 2, 3, 4)
+    win_specs = []
+    cursor = 0
+    while True:
+        t0 = 0 if cursor == 0 else (t_marks[cursor] - 112)
+        rem = M_marks - cursor
+        if rem <= 3:
+            # Final window! rem == 3 covers [cursor, cursor+1, cursor+2] (2 transitions);
+            # rem == 2 covers [cursor, cursor+1] (1 transition).
+            n_trans = rem - 1
+            win_specs.append((t0, n_trans, True))
+            break
+        else:
+            win_specs.append((t0, 2, False))
+            cursor += 2
+
     batches = []
-    for i in range(0, len(t_marks), chunk_size):
-        marks_c = t_marks[i : i + chunk_size]
-        ws = [g.window(lp - 14, 10, swap=False, step=14) for lp in marks_c]
-        batches.append(_to_numpy_dict(_trim_batch(PD.collate(ws, vocab))))
+    for i in range(0, len(win_specs), chunk_size):
+        sp_c = win_specs[i : i + chunk_size]
+        ws = [g.window(t0, 49, swap=False, step=7, need_map=False) for (t0, _, _) in sp_c]
+        meta_c = np.array([[n_tr, int(is_last)] for (_, n_tr, is_last) in sp_c], dtype=np.int32)
+        b_coll = _trim_batch(PD.collate(ws, vocab))
         del ws
+        b_np = _to_numpy_dict(b_coll)
+        del b_coll
+        batches.append(dict(batch=b_np, win_meta=meta_c))
     del g
 
     return dict(
@@ -117,7 +174,7 @@ def _extract_one_game_np(gid: str, base: str, vocab: Vocab, avocab: ActionVocab,
 
 
 def _bounded_extract_worker(in_q, out_q, vocab_path: str):
-    """Bounded CPU extraction worker: blocks when `out_q` (maxsize=2) is full so RAM never grows."""
+    torch.set_num_threads(1)
     vocab = Vocab(json.load(open(vocab_path)))
     avocab = ActionVocab()
     while True:
@@ -129,110 +186,133 @@ def _bounded_extract_worker(in_q, out_q, vocab_path: str):
         out_q.put((gid, payload))
         del payload
         gc.collect()
+        pa.default_memory_pool().release_unused()
 
 
 @torch.no_grad()
 def gpu_encode_game_batches(
     enc: ED.Frames,
-    pooler: SP.SquadPooler,
-    posterior: SP.HindsightIntentPosterior,
+    pooler: SP.PerceiverSquadCompressor,
+    posterior: SP.HindsightOutcomePosterior,
     cpu_payload: dict,
     device: torch.device,
 ) -> dict:
-    """Runs `Frames` (batched `bf16` on GPU) + sequential `SquadPooler` (preserving temporal
-    squad slot tracking across the entire game) + batched `HindsightIntentPosterior`."""
+    """Encodes `49`-frame (`step=7`) GPU chunks into full v2 `bf16`/`fp32` macro sequences."""
     enc.eval(), pooler.eval(), posterior.eval()
 
-    q_sq_all, z_sq_all, act_all = [], [], []
+    q_sq_all, z_sq_all, gate_all, act_all = [], [], [], []
     q_mac_all, z_mac_all = [], []
-    u_all, tempo_all, vis_all = [], [], []
+    q_opp_all, z_opp_all, g_opp_all = [], [], []
+    z_omni_all, vis_all, shim_all = [], [], []
+    u_all, xi_w_all, loss_all, tempo_all = [], [], [], []
 
-    prev_s = None
-    for b_cpu in cpu_payload["batches"]:
-        b = ED.to_device(b_cpu, device)
+    prev_seed = None  # state at mark (cursor - 1) so s_c at cursor has exact dt_loops = 112!
+
+    def _append_state(st: dict, vl: torch.Tensor, sh: torch.Tensor):
+        q_sq_all.append(st["q_squad"].detach().float())
+        z_sq_all.append(st["z_squad"].detach().to(torch.bfloat16))
+        gate_all.append(st["gate"].detach().to(torch.float16))
+        act_all.append(st["active"].detach().bool())
+        q_mac_all.append(st["q_macro"].detach().float())
+        z_mac_all.append(st["z_macro"].detach().to(torch.bfloat16))
+        q_opp_all.append(st["q_opp_obs"].detach().to(torch.float16))
+        z_opp_all.append(st["z_opp_obs"].detach().to(torch.bfloat16))
+        g_opp_all.append(st["gate_opp_obs"].detach().to(torch.float16))
+        z_omni_all.append(st["z_omni_scene"].detach().to(torch.bfloat16))
+        vis_all.append(vl.detach().to(torch.float16))
+        shim_all.append(sh.detach().to(torch.float16))
+
+    while cpu_payload["batches"]:
+        chunk = cpu_payload["batches"].pop(0)
+        b = ED.to_device(chunk["batch"], device)
+        win_meta = chunk["win_meta"]
+        del chunk
         B_c = b["mask"].shape[0]
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            ctx = enc.encode_window_context(b, list(range(1, 10)))
+            ctx = enc.encode_window_context(b, list(range(1, 49)))
 
-        # Sequential SquadPooler along macro steps tau so slot queries track squads smoothly
-        s_cur_list = []
-        s_nxt_list = []
-        for j in range(B_c):
-            bj = {k: (v[j : j + 1] if isinstance(v, torch.Tensor) else v) for k, v in b.items()}
-            cj = {k: v[j : j + 1] for k, v in ctx.items()}
-            s_c = pooler(bj, cj, f_start=0, f_end=0, prev_state=prev_s, batch_frame_end=1)
-            s_n = pooler(bj, cj, f_start=0, f_end=8, prev_state=s_c, batch_frame_end=9)
-            s_cur_list.append(s_c)
-            s_nxt_list.append(s_n)
-            prev_s = s_n  # exact 5.0s evolved state seeds next 5.0s step!
+            for j in range(B_c):
+                n_tr = int(win_meta[j, 0])
+                is_last = bool(win_meta[j, 1])
+                bj = {
+                    k: (v[j : j + 1] if isinstance(v, torch.Tensor) and v.ndim > 0 and v.shape[0] == B_c else v)
+                    for k, v in b.items()
+                }
+                cj = _slice_ctx(ctx, slice(j, j + 1))
 
-        def _cat_s(lst, key):
-            return torch.cat([x[key] for x in lst], dim=0)
+                # s_c at b-frame 16 (ctx 0..15), s_n1 at b-frame 32 (ctx 16..31)
+                s_c = pooler(bj, cj, f_start=0, f_end=15, prev_state=prev_seed, batch_frame_end=16)
+                s_n1 = pooler(bj, cj, f_start=16, f_end=31, prev_state=s_c, batch_frame_end=32)
+                vl_c, sh_c = OL2.extract_squad_gt_perception(cj, 15, s_c)
+                vl_n1, sh_n1 = OL2.extract_squad_gt_perception(cj, 31, s_n1)
 
-        s_cur_b = {k: _cat_s(s_cur_list, k) for k in ("q_squad", "z_squad", "active", "q_macro", "z_macro", "assign_w")}
-        s_nxt_b = {k: _cat_s(s_nxt_list, k) for k in ("q_squad", "z_squad", "active", "q_macro", "z_macro")}
+                post_0 = posterior(
+                    s_c, s_n1, bj, cj, f_indices=list(range(17, 33)), ctx_indices=list(range(16, 32))
+                )
+                _append_state(s_c, vl_c, sh_c)
+                u_all.append(post_0["u_flat"].detach().float())
+                xi_w_all.append(post_0["xi_world"].detach().float())
+                loss_all.append(post_0["combat_loss"].detach().float())
+                tempo_all.append(post_0["tempo_feat"].detach().float())
 
-        post_b = posterior(
-            s_cur_b,
-            s_nxt_b,
-            b,
-            ctx,
-            f_indices=list(range(2, 10)),
-            ctx_indices=list(range(0, 8)),
-        )
-        gt_vis = OL2.extract_gt_vis_live(b, f_end=1, q_squad=s_cur_b["q_squad"])
+                if n_tr == 2:
+                    s_n2 = pooler(bj, cj, f_start=32, f_end=47, prev_state=s_n1, batch_frame_end=48)
+                    post_1 = posterior(
+                        s_n1, s_n2, bj, cj, f_indices=list(range(33, 49)), ctx_indices=list(range(32, 48))
+                    )
+                    _append_state(s_n1, vl_n1, sh_n1)
+                    u_all.append(post_1["u_flat"].detach().float())
+                    xi_w_all.append(post_1["xi_world"].detach().float())
+                    loss_all.append(post_1["combat_loss"].detach().float())
+                    tempo_all.append(post_1["tempo_feat"].detach().float())
+                    prev_seed = s_n1  # loop_end = cursor + 112 -> exact dt_loops = 112 into next window's s_c!
+                    if is_last:
+                        vl_n2, sh_n2 = OL2.extract_squad_gt_perception(cj, 47, s_n2)
+                        _append_state(s_n2, vl_n2, sh_n2)
+                        tempo_all.append(post_1["tempo_feat"].detach().float().clone())
+                else:
+                    # Final 1-transition window!
+                    _append_state(s_n1, vl_n1, sh_n1)
+                    tempo_all.append(post_0["tempo_feat"].detach().float().clone())
+                    prev_seed = s_c
 
-        q_sq_all.append(s_cur_b["q_squad"].cpu().float())
-        z_sq_all.append(s_cur_b["z_squad"].cpu().to(torch.bfloat16))
-        act_all.append(s_cur_b["active"].cpu().bool())
-        q_mac_all.append(s_cur_b["q_macro"].cpu().float())
-        z_mac_all.append(s_cur_b["z_macro"].cpu().to(torch.bfloat16))
-        u_all.append(post_b["u_flat"].cpu().float())
-        tempo_all.append(post_b["tempo_feat"].cpu().float())
-        vis_all.append(gt_vis.cpu().to(torch.float16))
-
-        # Also append the final terminal state s_T at the end of the last chunk!
-        last_s_nxt = s_nxt_list[-1]
-        last_b = {k: (v[-1:] if isinstance(v, torch.Tensor) else v) for k, v in b.items()}
-
-    # Append terminal step T so T states have T-1 transitions u_flat[0..T-2]
-    q_sq_all.append(last_s_nxt["q_squad"].cpu().float())
-    z_sq_all.append(last_s_nxt["z_squad"].cpu().to(torch.bfloat16))
-    act_all.append(last_s_nxt["active"].cpu().bool())
-    q_mac_all.append(last_s_nxt["q_macro"].cpu().float())
-    z_mac_all.append(last_s_nxt["z_macro"].cpu().to(torch.bfloat16))
-    tempo_all.append(tempo_all[-1][-1:].clone())
-    vis_last = OL2.extract_gt_vis_live(last_b, f_end=9, q_squad=last_s_nxt["q_squad"])
-    vis_all.append(vis_last.cpu().to(torch.float16))
-
-    loops_ext = torch.cat(
-        [cpu_payload["loops"], cpu_payload["loops"][-1:] + 112], dim=0
-    )
+    loops_t = cpu_payload["loops"].long()
+    T_tot = len(q_sq_all)
+    assert T_tot == len(loops_t), f"State count {T_tot} != loops {len(loops_t)}"
+    assert len(u_all) == T_tot - 1, f"Transition count {len(u_all)} != {T_tot - 1}"
 
     return dict(
+        schema_version=CACHE_SCHEMA_VERSION,
         gid=cpu_payload["gid"],
         winner=cpu_payload["winner"],
-        loops=loops_ext,
+        loops=loops_t,
         static_map=cpu_payload["static_map"],
-        q_squad=torch.cat(q_sq_all, dim=0),      # [T, 2, M, 12] fp32
-        z_squad=torch.cat(z_sq_all, dim=0),      # [T, 2, M, 128] bf16
-        active=torch.cat(act_all, dim=0),        # [T, 2, M] bool
-        q_macro=torch.cat(q_mac_all, dim=0),     # [T, 2, 6] fp32
-        z_macro=torch.cat(z_mac_all, dim=0),     # [T, 2, 128] bf16
-        u_flat=torch.cat(u_all, dim=0),          # [T-1, 2, 180] fp32
-        tempo_feat=torch.cat(tempo_all, dim=0),  # [T, 2, 16] fp32
-        gt_vis_live=torch.cat(vis_all, dim=0),   # [T, 2, M] fp16
+        q_squad=torch.cat(q_sq_all, dim=0).cpu(),        # [T, 2, 64, 14] fp32
+        z_squad=torch.cat(z_sq_all, dim=0).cpu(),        # [T, 2, 64, 128] bf16
+        gate=torch.cat(gate_all, dim=0).cpu(),           # [T, 2, 64] fp16
+        active=torch.cat(act_all, dim=0).cpu(),          # [T, 2, 64] bool
+        q_macro=torch.cat(q_mac_all, dim=0).cpu(),       # [T, 2, 6] fp32
+        z_macro=torch.cat(z_mac_all, dim=0).cpu(),       # [T, 2, 128] bf16
+        q_opp_obs=torch.cat(q_opp_all, dim=0).cpu(),     # [T, 2, 32, 12] fp16
+        z_opp_obs=torch.cat(z_opp_all, dim=0).cpu(),     # [T, 2, 32, 64] bf16
+        gate_opp_obs=torch.cat(g_opp_all, dim=0).cpu(),  # [T, 2, 32] fp16
+        z_omni_scene=torch.cat(z_omni_all, dim=0).cpu(), # [T, 128] bf16
+        gt_vis_live=torch.cat(vis_all, dim=0).cpu(),     # [T, 2, 64] fp16
+        gt_shimmer=torch.cat(shim_all, dim=0).cpu(),     # [T, 2, 64] fp16
+        tempo_feat=torch.cat(tempo_all, dim=0).cpu(),    # [T, 2, 16] fp32
+        u_flat=torch.cat(u_all, dim=0).cpu(),            # [T-1, 2, 180] fp32
+        xi_world=torch.cat(xi_w_all, dim=0).cpu(),       # [T-1, 32] fp32
+        combat_loss=torch.cat(loss_all, dim=0).cpu(),    # [T-1, 2] fp32
     )
 
 
-def _iter_bounded_extractions(todo: list[tuple[str, str, int]], vocab_path: str, workers: int = 6):
-    """Yields `(gid, cpu_payload_tensors)` with strict backpressure (`out_q` maxsize=3) and zero `/dev/shm` tensors."""
+def _iter_bounded_extractions(todo: list[tuple[str, str, int]], vocab_path: str, workers: int = 8):
     if not todo:
         return
     n_w = max(1, min(workers, len(todo)))
     ctx = mp.get_context("spawn")
     in_q = ctx.Queue()
-    out_q = ctx.Queue(maxsize=3)
+    out_q = ctx.Queue(maxsize=2)
     for item in todo:
         in_q.put(item)
     for _ in range(n_w):
@@ -265,13 +345,13 @@ def build_or_load_cache(
     cache_dir: str,
     vocab_path: str,
     enc: ED.Frames,
-    pooler: SP.SquadPooler,
-    posterior: SP.HindsightIntentPosterior,
+    pooler: SP.PerceiverSquadCompressor,
+    posterior: SP.HindsightOutcomePosterior,
     device: torch.device,
-    workers: int = 4,
+    workers: int = 8,
+    chunk_size: int = 12,
     force_rebuild: bool = False,
 ) -> dict[str, dict]:
-    """Loads cached `bf16` macro game summaries from disk or extracts missing ones with bounded RAM."""
     sub_dir = os.path.join(cache_dir, subset)
     os.makedirs(sub_dir, exist_ok=True)
 
@@ -280,14 +360,23 @@ def build_or_load_cache(
     for gid, base in sorted(bases.items()):
         pt_path = os.path.join(sub_dir, f"{gid}.pt")
         if not force_rebuild and os.path.exists(pt_path):
-            d = torch.load(pt_path, map_location="cpu", weights_only=False)
-            if d is not None and len(d["loops"]) >= 10:
-                loaded[gid] = d
-        else:
-            todo.append((gid, base, 24))
+            try:
+                d = torch.load(pt_path, map_location="cpu", weights_only=False)
+                if (
+                    d is not None
+                    and d.get("schema_version") == CACHE_SCHEMA_VERSION
+                    and len(d["loops"]) >= 8
+                    and d["q_squad"].shape[-1] == SP.N_SQUAD_Q
+                ):
+                    _ensure_static_map_chw(d["static_map"])
+                    loaded[gid] = d
+                    continue
+            except Exception:
+                pass
+        todo.append((gid, base, chunk_size))
 
     if not todo:
-        print(f"[{subset}] Loaded {len(loaded)} cached games from {sub_dir}", flush=True)
+        print(f"[{subset}] Loaded {len(loaded)} cached v2 games from {sub_dir}", flush=True)
         return loaded
 
     print(
@@ -304,6 +393,7 @@ def build_or_load_cache(
             tmp_path = pt_path + ".tmp"
             torch.save(entry, tmp_path)
             os.replace(tmp_path, pt_path)
+            _ensure_static_map_chw(entry["static_map"])
             loaded[gid] = entry
             del cpu_payload
         if done % 20 == 0 or done == len(todo):
@@ -320,8 +410,8 @@ def build_or_load_cache(
 
 
 def slice_cached_game(entry: dict, t0: int, L: int, swap: bool = False) -> dict[str, torch.Tensor]:
-    """Slices `[t0 : t0 + L]` (`[t0 : t0 + L - 1]` for `u_flat`), padding short games by
-    repeating the final frame, and applies exact player-slot swap (`P1 <-> P2`) if `swap`."""
+    """Slices `[t0 : t0 + L]` (`[t0 : t0 + L - 1]` for transitions), padding short games cleanly,
+    and applies exact equivariant player-slot swap (`P1 <-> P2`) when `swap=True`."""
     T_g = len(entry["loops"])
     if T_g >= L:
         s_state = slice(t0, t0 + L)
@@ -332,34 +422,50 @@ def slice_cached_game(entry: dict, t0: int, L: int, swap: bool = False) -> dict[
         s_u = slice(0, T_g - 1)
         pad = L - T_g
 
-    def _sl_state(t: torch.Tensor) -> torch.Tensor:
+    def _sl_player_state(t: torch.Tensor) -> torch.Tensor:
         v = t[s_state]
         if pad > 0:
             v = torch.cat([v, v[-1:].expand(pad, *v.shape[1:])], dim=0)
         return v.flip(dims=[1]) if swap else v
 
-    u_v = entry["u_flat"][s_u]
-    if pad > 0:
-        u_pad = torch.zeros((pad, *u_v.shape[1:]), dtype=u_v.dtype)
-        u_v = torch.cat([u_v, u_pad], dim=0)
-    if swap:
-        u_v = u_v.flip(dims=[1])
+    def _sl_scene_state(t: torch.Tensor) -> torch.Tensor:
+        v = t[s_state]
+        if pad > 0:
+            v = torch.cat([v, v[-1:].expand(pad, *v.shape[1:])], dim=0)
+        return v
+
+    def _sl_trans(t: torch.Tensor, flip_p: bool = False, flip_halves: bool = False) -> torch.Tensor:
+        v = t[s_u]
+        if pad > 0:
+            v = torch.cat([v, torch.zeros((pad, *v.shape[1:]), dtype=v.dtype)], dim=0)
+        if swap:
+            if flip_p:
+                v = v.flip(dims=[1])
+            elif flip_halves:
+                v = v.view(v.shape[0], 2, -1).flip(dims=[1]).reshape(v.shape[0], -1)
+        return v
 
     return dict(
-        q_squad=_sl_state(entry["q_squad"]).float(),
-        z_squad=_sl_state(entry["z_squad"]),
-        active=_sl_state(entry["active"]).bool(),
-        q_macro=_sl_state(entry["q_macro"]).float(),
-        z_macro=_sl_state(entry["z_macro"]),
-        tempo_feat=_sl_state(entry["tempo_feat"]).float(),
-        gt_vis_live=_sl_state(entry["gt_vis_live"]).float(),
-        u_flat=u_v.float(),
+        q_squad=_sl_player_state(entry["q_squad"]).float(),
+        z_squad=_sl_player_state(entry["z_squad"]),
+        gate=_sl_player_state(entry["gate"]).float(),
+        active=_sl_player_state(entry["active"]).bool(),
+        q_macro=_sl_player_state(entry["q_macro"]).float(),
+        z_macro=_sl_player_state(entry["z_macro"]),
+        q_opp_obs=_sl_player_state(entry["q_opp_obs"]).float(),
+        z_opp_obs=_sl_player_state(entry["z_opp_obs"]),
+        gate_opp_obs=_sl_player_state(entry["gate_opp_obs"]).float(),
+        z_omni_scene=_sl_scene_state(entry["z_omni_scene"]),
+        tempo_feat=_sl_player_state(entry["tempo_feat"]).float(),
+        gt_vis_live=_sl_player_state(entry["gt_vis_live"]).float(),
+        gt_shimmer=_sl_player_state(entry["gt_shimmer"]).float(),
+        u_flat=_sl_trans(entry["u_flat"], flip_p=True).float(),
+        xi_world=_sl_trans(entry["xi_world"], flip_halves=True).float(),
+        combat_loss=_sl_trans(entry["combat_loss"], flip_p=True).float(),
     )
 
 
 def _ensure_static_map_chw(sm: dict[str, torch.Tensor]) -> None:
-    """Pre-computes normalized `[4, gh, gw]` `static_grid_chw` once on CPU so per-step
-    collation never scans `.max()` or `.permute()`."""
     if "static_grid_chw" in sm:
         return
     g = sm["static_grid"].float()
@@ -369,7 +475,8 @@ def _ensure_static_map_chw(sm: dict[str, torch.Tensor]) -> None:
 
 
 def _live_worker_loop(req_q, out_q, bases: dict[str, str], vocab_path: str):
-    """Clean worker loop receiving `(full_specs, live_reqs)` and returning `(full_specs, metas, b_pinned)`."""
+    """Extracts `49`-frame (`step = 7` loops) live windows for joint `L1 + Perceiver + L1ChunkFlowDecoder + L2` co-training."""
+    torch.set_num_threads(1)
     vocab = Vocab(json.load(open(vocab_path)))
     avocab = ActionVocab()
     game_lru: dict[str, PD.Game] = {}
@@ -384,7 +491,7 @@ def _live_worker_loop(req_q, out_q, bases: dict[str, str], vocab_path: str):
         g._load_actions(avocab)
         game_lru[gid] = g
         lru_order.append(gid)
-        while len(lru_order) > 4:
+        while len(lru_order) > 2:
             old = lru_order.pop(0)
             game_lru.pop(old, None)
         return g
@@ -399,20 +506,24 @@ def _live_worker_loop(req_q, out_q, bases: dict[str, str], vocab_path: str):
             out_q.put((full_specs, [], None))
             continue
         ws, metas = [], []
-        for gid, lp_start, swap, meta in live_reqs:
+        for gid, t0_win, swap, meta in live_reqs:
             g = _get_game(gid)
-            ws.append(g.window(max(14, lp_start - 14), 18, swap=swap, step=14))
+            ws.append(g.window(max(0, t0_win), 49, swap=swap, step=7, need_map=False))
             metas.append(meta)
-        b_coll_np = _to_numpy_dict(_trim_batch(PD.collate(ws, vocab)))
+        b_coll = _trim_batch(PD.collate(ws, vocab))
+        del ws
+        b_coll_np = _to_numpy_dict(b_coll)
+        del b_coll
         out_q.put((full_specs, metas, b_coll_np))
-        del ws, b_coll_np
+        del b_coll_np
         n += 1
-        if n % 10 == 0:
+        if n % 8 == 0:
             gc.collect()
+            pa.default_memory_pool().release_unused()
 
 
 class CoTrainBatchIterator:
-    """Asynchronous multi-process iterator yielding `(full_specs, live_metas, b_live_pinned)`."""
+    """Asynchronous multi-process iterator yielding pinned `(full_specs, live_metas, b_live, seq_b, st_b)`."""
 
     def __init__(
         self,
@@ -423,8 +534,8 @@ class CoTrainBatchIterator:
         batch_size: int,
         live_batch: int,
         seed: int = 0,
-        n_workers: int = 2,
-        prefetch: int = 2,
+        n_workers: int = 4,
+        prefetch: int = 3,
     ):
         self.train_cache = train_cache
         for e in train_cache.values():
@@ -471,10 +582,17 @@ class CoTrainBatchIterator:
                 t0 = int(self.rng.integers(0, max(1, T_g - L + 1))) if T_g > L else 0
                 swap = bool(self.rng.integers(0, 2))
                 valid_len = min(L, T_g - t0)
-                if b_i < self.live_batch and valid_len >= 5:
-                    tau_rel = int(self.rng.integers(1, valid_len - 2))
-                    lp_start = int(self.train_loops[gid][t0 + tau_rel])
-                    live_reqs.append((gid, lp_start, swap, (b_i, gid, t0, tau_rel, swap)))
+                if b_i < self.live_batch and valid_len >= 6:
+                    # Pick tau_rel in [2 .. valid_len - 3] so:
+                    # - tau_rel - 2 seeds s_prev (at b-frame 16),
+                    # - tau_rel - 1 is s_prev,
+                    # - tau_rel is s_live_0 (at b-frame 32),
+                    # - tau_rel + 1 is s_live_1 (at b-frame 48),
+                    # and L1ChunkFlowDecoder trains cleanly on [b-frame 32 .. 48]!
+                    tau_rel = int(self.rng.integers(2, valid_len - 2))
+                    lp_prev = int(self.train_loops[gid][t0 + tau_rel - 1])
+                    t0_win = max(0, lp_prev - 112)
+                    live_reqs.append((gid, t0_win, swap, (b_i, gid, t0, tau_rel, swap)))
                 full_specs.append((gid, t0, swap))
             self.req_q.put((full_specs, live_reqs))
 
@@ -501,8 +619,8 @@ class CoTrainBatchIterator:
                     k: torch.stack([it_i[k] for it_i in items], dim=0).pin_memory()
                     for k in items[0]
                 }
-                max_h = max(int(m["static_grid_chw"].shape[1]) for m in maps)
-                max_w = max(int(m["static_grid_chw"].shape[2]) for m in maps)
+                max_h = max(224, *(int(m["static_grid_chw"].shape[1]) for m in maps))
+                max_w = max(224, *(int(m["static_grid_chw"].shape[2]) for m in maps))
                 st_chw = torch.zeros((len(maps), 4, max_h, max_w), dtype=torch.float32)
                 for i, m in enumerate(maps):
                     g = m["static_grid_chw"]
@@ -548,12 +666,8 @@ def evaluate_observer(
     window_t: int,
     device: torch.device,
 ) -> dict[str, float]:
-    """Evaluates:
-      1. Full-sequence `forward_sequence` physical 1-step & multi-step losses vs. copy baseline.
-      2. Open-loop multi-horizon Flow-Prior stochastic rollout (`+5s, +10s, +20s, +40s`) RMSE
-         vs. copy baseline AND zero-shot "Stronger Hand" `P(A_{tau+40s} > 0)` alignment at
-         mid/late game (`50%` and `80%` game progress).
-    """
+    """Evaluates held-out full-sequence losses + open-loop `+40s` & `+120s` rollout RMSE
+    and zero-shot Positional Lead alignment (winner used strictly for diagnostic accuracy)."""
     obs_l2.eval()
     gids = sorted(val_cache.keys())
     if not gids:
@@ -564,8 +678,7 @@ def evaluate_observer(
     bs = 16
     for i in range(0, len(gids), bs):
         sub_gids = gids[i : i + bs]
-        items = []
-        maps = []
+        items, maps = [], []
         for gid in sub_gids:
             e = val_cache[gid]
             T_g = len(e["loops"])
@@ -578,18 +691,22 @@ def evaluate_observer(
         }
         st_b = OL2.collate_static_maps(maps, device=device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss, logs = obs_l2.forward_sequence(seq_b, static_map=st_b)
+            _, logs = obs_l2.forward_sequence(seq_b, static_map=st_b)
         for k, v in logs.items():
             agg_logs[k] = agg_logs.get(k, 0.0) + float(v)
         n_batches += 1
 
     out = {k: round(v / max(1, n_batches), 5) for k, v in agg_logs.items()}
 
-    # Open-loop 40s (H=8) Flow-Prior rollout evaluation on up to 24 unseen games
+    pref_keys = (
+        "q_squad", "z_squad", "gate", "active", "q_macro", "z_macro",
+        "q_opp_obs", "z_opp_obs", "gate_opp_obs", "z_omni_scene",
+        "tempo_feat", "gt_vis_live", "gt_shimmer",
+    )
     eval_gids = gids[:24]
     se_model_40s_cost, se_copy_40s_cost = [], []
     se_model_40s_min, se_copy_40s_min = [], []
-    stronger_50_ok, stronger_80_ok, n_win_games = 0, 0, 0
+    lead_50_ok, lead_80_ok, stronger_80_ok, n_win_games = 0, 0, 0, 0
 
     for gid in eval_gids:
         e = val_cache[gid]
@@ -598,23 +715,19 @@ def evaluate_observer(
             continue
         st_1 = OL2.collate_static_maps([e["static_map"]], device=device)
 
-        # Evaluate 40s physical rollout accuracy & Stronger Hand at 50% of game in ONE pass
         t_mid = max(4, min(T_g - 9, T_g // 2))
-        pref_len = min(32, t_mid + 1)
+        pref_len = min(24, t_mid + 1)
         sl_full = slice_cached_game(e, t_mid + 1 - pref_len, pref_len + 8, swap=False)
-        pref_seq = {
-            k: sl_full[k][:pref_len].unsqueeze(0).to(device)
-            for k in ("q_squad", "z_squad", "active", "q_macro", "z_macro", "tempo_feat")
-        }
+        pref_seq = {k: sl_full[k][:pref_len].unsqueeze(0).to(device) for k in pref_keys}
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             roll = obs_l2.rollout_observer(
-                pref_seq, static_map=st_1, n_branches=16, horizon_steps=8, flow_steps=4
+                pref_seq, static_map=st_1, n_branches=16, horizon_steps=8, flow_steps=4, seed=42
             )
 
         pred_cost_40 = roll["end_total_cost"].float().cpu()
-        init_cost_0 = (sl_full["q_squad"][pref_len - 1, :, :, SP.SQ["cost"]] * sl_full["active"][pref_len - 1].float()).sum(dim=-1)
-        true_cost_40 = (sl_full["q_squad"][pref_len + 7, :, :, SP.SQ["cost"]] * sl_full["active"][pref_len + 7].float()).sum(dim=-1)
+        init_cost_0 = sl_full["q_squad"][pref_len - 1, :, :, SP.SQ["cost"]].sum(dim=-1)
+        true_cost_40 = sl_full["q_squad"][pref_len + 7, :, :, SP.SQ["cost"]].sum(dim=-1)
         se_model_40s_cost.append((pred_cost_40 - true_cost_40).square().mean().item())
         se_copy_40s_cost.append((init_cost_0 - true_cost_40).square().mean().item())
 
@@ -627,19 +740,17 @@ def evaluate_observer(
         if e["winner"] in (1, 2):
             n_win_games += 1
             p1_win = e["winner"] == 1
-            stronger_50_ok += int((float(roll["prob_stronger_hand_p1"]) >= 0.5) == p1_win)
+            lead_50_ok += int((float(roll["A0"]) >= 0.0) == p1_win)
 
             t_80 = max(4, int(round(0.80 * (T_g - 1))))
-            p80_len = min(32, t_80 + 1)
+            p80_len = min(24, t_80 + 1)
             sl_80 = slice_cached_game(e, t_80 + 1 - p80_len, p80_len, swap=False)
-            pref_80 = {
-                k: sl_80[k].unsqueeze(0).to(device)
-                for k in ("q_squad", "z_squad", "active", "q_macro", "z_macro", "tempo_feat")
-            }
+            pref_80 = {k: sl_80[k].unsqueeze(0).to(device) for k in pref_keys}
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 roll_80 = obs_l2.rollout_observer(
-                    pref_80, static_map=st_1, n_branches=16, horizon_steps=8, flow_steps=4
+                    pref_80, static_map=st_1, n_branches=16, horizon_steps=16, flow_steps=4, seed=42
                 )
+            lead_80_ok += int((float(roll_80["A0"]) >= 0.0) == p1_win)
             stronger_80_ok += int((float(roll_80["prob_stronger_hand_p1"]) >= 0.5) == p1_win)
 
     if se_model_40s_cost:
@@ -648,7 +759,8 @@ def evaluate_observer(
         out["roll40s_rmse_min"] = round(float(np.mean(se_model_40s_min)) ** 0.5, 4)
         out["copy40s_rmse_min"] = round(float(np.mean(se_copy_40s_min)) ** 0.5, 4)
     if n_win_games > 0:
-        out["stronger_hand_acc_50pct"] = round(stronger_50_ok / n_win_games, 4)
+        out["lead_now_acc_50pct"] = round(lead_50_ok / n_win_games, 4)
+        out["lead_now_acc_80pct"] = round(lead_80_ok / n_win_games, 4)
         out["stronger_hand_acc_80pct"] = round(stronger_80_ok / n_win_games, 4)
     return out
 
@@ -659,13 +771,12 @@ def refresh_cache_subset(
     cache_dict: dict[str, dict],
     vocab_path: str,
     enc: ED.Frames,
-    pooler: SP.SquadPooler,
-    posterior: SP.HindsightIntentPosterior,
+    pooler: SP.PerceiverSquadCompressor,
+    posterior: SP.HindsightOutcomePosterior,
     device: torch.device,
-    workers: int = 3,
+    workers: int = 6,
 ):
-    """Fast rolling `bf16` re-encode of a subset of games with bounded RAM."""
-    todo = [(gid, bases[gid], 24) for gid in gids_to_refresh if gid in bases]
+    todo = [(gid, bases[gid], 12) for gid in gids_to_refresh if gid in bases]
     if not todo:
         return
     for gid, cpu_payload in _iter_bounded_extractions(todo, vocab_path, workers=workers):
@@ -684,29 +795,30 @@ def main():
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--rules_tables", default="data/worldmodel/rulesets.json")
     ap.add_argument("--base_build", type=int, default=94137)
-    ap.add_argument("--patch", default="5.0.14")
+    ap.add_argument("--patch", default="", help="Empty = all 932 games across all 5 builds!")
     ap.add_argument(
         "--l1_ckpt",
         default="data/worldmodel/runs/energy_r16_zerogram/model_step44285.pt",
     )
-    ap.add_argument("--cache_dir", default="data/worldmodel/observer_cache_5014")
-    ap.add_argument("--run", default="data/worldmodel/runs/observer_v1")
-    ap.add_argument("--steps", type=int, default=1200)
-    ap.add_argument("--window", type=int, default=48, help="48 x 5s = 4.0 min macro sequences")
-    ap.add_argument("--batch", type=int, default=22)
-    ap.add_argument("--live_batch", type=int, default=8, help="Live L1 windows per step for L2->L1 backprop")
+    ap.add_argument("--cache_dir", default="data/worldmodel/observer_cache_v2")
+    ap.add_argument("--run", default="data/worldmodel/runs/observer_v2")
+    ap.add_argument("--steps", type=int, default=4000)
+    ap.add_argument("--window", type=int, default=48, help="48 x 5s = 240s (120s history + 120s rollout)")
+    ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--live_batch", type=int, default=6, help="Live 48-frame step=7 L1+L1Chunk+L2 windows/step")
     ap.add_argument("--lr", type=float, default=1.5e-4)
     ap.add_argument("--lr_l1", type=float, default=2e-5)
     ap.add_argument("--wd", type=float, default=0.02)
-    ap.add_argument("--warmup", type=int, default=100)
-    ap.add_argument("--val_every", type=int, default=300)
-    ap.add_argument("--refresh_every", type=int, default=600)
-    ap.add_argument("--cache_workers", type=int, default=6)
-    ap.add_argument("--live_workers", type=int, default=6)
+    ap.add_argument("--warmup", type=int, default=150)
+    ap.add_argument("--val_every", type=int, default=500)
+    ap.add_argument("--refresh_every", type=int, default=1000)
+    ap.add_argument("--cache_workers", type=int, default=8)
+    ap.add_argument("--live_workers", type=int, default=4)
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--no_grad_ckpt_l1", action="store_true")
-    ap.add_argument("--max_train_games", type=int, default=0, help="0 = all 5.0.14 train games")
-    ap.add_argument("--max_map_val_games", type=int, default=36)
+    ap.add_argument("--max_train_games", type=int, default=0, help="0 = all 676 train games (1,352 swapped)")
+    ap.add_argument("--max_val_games", type=int, default=0, help="0 = all 36 held_out_games")
+    ap.add_argument("--max_map_val_games", type=int, default=48)
     ap.add_argument("--resume", default="")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -727,21 +839,30 @@ def main():
     val_ids = set(split["held_out_games"]) - set(tp.EXCLUDED)
     map_val_ids = set(split.get("held_out_map_games", [])) - set(tp.EXCLUDED)
 
-    train_bases = tp.of_patch(PD.base_paths(args.games, train_ids), args.patch)
-    val_bases = tp.of_patch(PD.base_paths(args.games, val_ids), args.patch)
-    map_val_bases_all = tp.of_patch(PD.base_paths(args.games, map_val_ids), args.patch)
+    train_bases = PD.base_paths(args.games, train_ids)
+    val_bases = PD.base_paths(args.games, val_ids)
+    map_val_bases_all = PD.base_paths(args.games, map_val_ids)
+    if args.patch:
+        train_bases = tp.of_patch(train_bases, args.patch)
+        val_bases = tp.of_patch(val_bases, args.patch)
+        map_val_bases_all = tp.of_patch(map_val_bases_all, args.patch)
 
     if args.max_train_games > 0:
         train_bases = dict(sorted(train_bases.items())[: args.max_train_games])
-    map_val_bases = dict(sorted(map_val_bases_all.items())[: args.max_map_val_games])
+    if args.max_val_games > 0:
+        val_bases = dict(sorted(val_bases.items())[: args.max_val_games])
+    if args.max_map_val_games > 0:
+        map_val_bases = dict(sorted(map_val_bases_all.items())[: args.max_map_val_games])
+    else:
+        map_val_bases = dict(sorted(map_val_bases_all.items()))
 
     print(
-        f"Splits ({args.patch}): train={len(train_bases)}, "
-        f"held_out_games={len(val_bases)}, held_out_map_games={len(map_val_bases)}",
+        f"Splits (patch={args.patch or 'ALL_5_BUILDS'}): train={len(train_bases)} ({2*len(train_bases)} sym perspectives), "
+        f"held_out_games={len(val_bases)}, held_out_map_games={len(map_val_bases)} (of {len(map_val_bases_all)} total)",
         flush=True,
     )
 
-    # 1. Initialize L1 Frames + SquadPooler + HindsightIntentPosterior + ObserverWorldModelL2
+    # 1. Initialize L1 Frames + PerceiverSquadCompressor + HindsightOutcomePosterior + L1ChunkFlowDecoder + ObserverWorldModelL2
     enc = ED.Frames(vocab, tables, 256, 32, attn_layers=6, dh=64, ff=768).to(dev)
     enc.grad_ckpt = not bool(args.no_grad_ckpt_l1)
     l1_ck = torch.load(args.l1_ckpt, map_location="cpu", weights_only=False)
@@ -749,31 +870,35 @@ def main():
     print(f"Warm-started L1 Frames from {args.l1_ckpt}: missing={missing}, unexpected={unexpected}", flush=True)
     del l1_ck
 
-    pooler = SP.SquadPooler(tables, d_l1=256).to(dev)
-    posterior = SP.HindsightIntentPosterior().to(dev)
+    pooler = SP.PerceiverSquadCompressor(tables, d_l1=256).to(dev)
+    posterior = SP.HindsightOutcomePosterior().to(dev)
+    decoder = LCD.L1ChunkFlowDecoder(d_l1=256, d_squad=SP.D_SQUAD_DEFAULT).to(dev)
     obs_l2 = OL2.ObserverWorldModelL2(rollout_steps=4).to(dev)
 
     start_step = 0
+    _clean_sd = lambda sd: {
+        k.replace("._orig_mod.", ".").removeprefix("_orig_mod."): v for k, v in sd.items()
+    }
     if args.resume and os.path.exists(args.resume):
         ck = torch.load(args.resume, map_location=dev, weights_only=False)
-        enc.load_state_dict(ck["enc"])
-        pooler.load_state_dict(ck["pooler"])
-        posterior.load_state_dict(ck["posterior"])
-        obs_l2.load_state_dict(ck["obs_l2"])
+        enc.load_state_dict(_clean_sd(ck["enc"]))
+        pooler.load_state_dict(_clean_sd(ck["pooler"]))
+        posterior.load_state_dict(_clean_sd(ck["posterior"]))
+        if "decoder" in ck:
+            decoder.load_state_dict(_clean_sd(ck["decoder"]))
+        obs_l2.load_state_dict(_clean_sd(ck["obs_l2"]))
         start_step = int(ck.get("step", 0))
-        print(f"Resumed full Observer checkpoint {args.resume} at step {start_step}", flush=True)
+        print(f"Resumed full Observer v2 checkpoint {args.resume} at step {start_step}", flush=True)
+        del ck
 
     if not args.no_compile:
         enc.compile_parts()
         obs_l2.compile_parts()
-        pooler_fn = torch.compile(pooler, dynamic=True)
-        posterior_fn = torch.compile(posterior, dynamic=True)
-        print("Enabled torch.compile + bf16 Tensor Cores + TF32 across L1, Pooler, Posterior, and L2", flush=True)
-    else:
-        pooler_fn = pooler
-        posterior_fn = posterior
+        print("Enabled torch.compile + bf16 Tensor Cores + TF32 across L1 & L2", flush=True)
+    pooler_fn = pooler
+    posterior_fn = posterior
 
-    # 2. Build or load initial bf16 Macro Summary Cache
+    # 2. Build or load initial bf16 v2 Macro Summary Cache
     val_cache = build_or_load_cache(
         "held_out_games", val_bases, args.cache_dir, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
     )
@@ -784,17 +909,18 @@ def main():
         "train", train_bases, args.cache_dir, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
     )
 
-    # 3. Optimizer with differential LR (gentle adaptation on pretrained Frames body, full LR on new modules)
+    # 3. Optimizer with differential LR
     l1_backbone_params = [
         p for n, p in enc.named_parameters() if p.requires_grad and not n.startswith("grp_c")
     ]
-    pooler_post_params = (
+    pooler_post_dec_params = (
         [p for n, p in enc.named_parameters() if p.requires_grad and n.startswith("grp_c")]
         + list(pooler.parameters())
         + list(posterior.parameters())
+        + list(decoder.parameters())
     )
     l2_params = list(obs_l2.parameters())
-    new_params = pooler_post_params + l2_params
+    new_params = pooler_post_dec_params + l2_params
     opt = torch.optim.AdamW(
         [
             {"params": l1_backbone_params, "lr": args.lr_l1, "base_lr": args.lr_l1},
@@ -803,16 +929,25 @@ def main():
         weight_decay=args.wd,
         fused=True,
     )
+    if args.resume and os.path.exists(args.resume):
+        ck_opt = torch.load(args.resume, map_location=dev, weights_only=False)
+        if "opt" in ck_opt:
+            try:
+                opt.load_state_dict(ck_opt["opt"])
+                print("Restored AdamW optimizer state cleanly", flush=True)
+            except Exception as exc:
+                print(f"Note: fresh optimizer state ({exc})", flush=True)
+        del ck_opt
+
     print(
         f"Trainable params: L1_backbone={sum(p.numel() for p in l1_backbone_params)/1e6:.2f}M, "
-        f"New(grp_c+Pooler+Post+L2)={sum(p.numel() for p in new_params)/1e6:.2f}M",
+        f"Perceiver+Post+L1Chunk+L2={sum(p.numel() for p in new_params)/1e6:.2f}M",
         flush=True,
     )
 
     log_path = os.path.join(args.run, "train.jsonl")
     eval_path = os.path.join(args.run, "eval.jsonl")
 
-    # Initial step-0 baseline evaluation
     if start_step == 0:
         ev_games = evaluate_observer(obs_l2, val_cache, args.window, dev)
         ev_maps = evaluate_observer(obs_l2, map_val_cache, args.window, dev)
@@ -821,7 +956,6 @@ def main():
         with open(eval_path, "a") as f:
             f.write(json.dumps({"step": 0, "held_out_games": ev_games, "held_out_map_games": ev_maps}) + "\n")
 
-    # 4. Launch background live-window prefetcher for Sparse Live-Window Co-Training
     it = CoTrainBatchIterator(
         train_cache=train_cache,
         bases=train_bases,
@@ -831,104 +965,175 @@ def main():
         live_batch=args.live_batch,
         seed=args.seed + start_step,
         n_workers=args.live_workers,
-        prefetch=4,
+        prefetch=2,
     )
 
     refresh_cursor = 0
+    map_refresh_cursor = 0
     sorted_train_gids = sorted(train_cache.keys())
+    sorted_map_val_gids = sorted(map_val_cache.keys())
     t_loop_start = time.perf_counter()
     best_val_loss = float("inf")
+    if start_step > 0 and os.path.exists(eval_path):
+        for ln in open(eval_path):
+            if ln.strip():
+                rec_ev = json.loads(ln)
+                if rec_ev.get("step", 0) > 0 and "held_out_games" in rec_ev:
+                    best_val_loss = min(best_val_loss, float(rec_ev["held_out_games"].get("loss", float("inf"))))
 
     try:
         for step in range(start_step + 1, args.steps + 1):
-            enc.train(), pooler.train(), posterior.train(), obs_l2.train()
+            enc.train(), pooler.train(), posterior.train(), decoder.train(), obs_l2.train()
             full_specs, live_metas, b_live_cpu, seq_cpu, st_cpu = it.next_batch()
-            seq_b = {k: v.to(dev, non_blocking=True) for k, v in seq_cpu.items()}
-            st_b = {k: v.to(dev, non_blocking=True) for k, v in st_cpu.items()}
+            try:
+                seq_b = {k: v.to(dev, non_blocking=True) for k, v in seq_cpu.items()}
+                st_b = {k: v.to(dev, non_blocking=True) for k, v in st_cpu.items()}
 
-            aux_post_loss = seq_b["q_squad"].sum() * 0.0
-            pending_wb = None
-            if b_live_cpu is not None and len(live_metas) > 0:
-                b_live = ED.to_device(b_live_cpu, dev)
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    ctx_live = enc.encode_window_context(b_live, list(range(1, 18)))
-                    prev_state_live = {
-                        k: torch.stack(
-                            [seq_b[k][m[0], m[3] - 1].detach() for m in live_metas], dim=0
+                aux_post_loss = seq_b["q_squad"].sum() * 0.0
+                chunk_dec_loss = seq_b["q_squad"].sum() * 0.0
+                pending_wb = None
+
+                if b_live_cpu is not None and len(live_metas) > 0:
+                    b_live = ED.to_device(b_live_cpu, dev)
+                    live_b_idx = [m[0] for m in live_metas]
+                    st_live_map = dict(
+                        static_grid_chw=st_b["static_grid_chw"][live_b_idx],
+                        origin=st_b["origin"][live_b_idx],
+                        center=st_b["center"][live_b_idx],
+                        half=st_b["half"][live_b_idx],
+                    )
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        ctx_live = enc.encode_window_context(b_live, list(range(1, 49)))
+                        seed_live = {
+                            k: torch.stack(
+                                [seq_b[k][m[0], m[3] - 2].detach() for m in live_metas], dim=0
+                            )
+                            for k in ("q_squad", "z_squad", "gate", "active")
+                        }
+                        seed_live["loop_end"] = b_live["loops"][:, 0].float()
+                        s_prev = pooler_fn(
+                            b_live, ctx_live, f_start=0, f_end=15, prev_state=seed_live, batch_frame_end=16
                         )
-                        for k in ("q_squad", "z_squad", "active")
-                    }
-                    s_live_0 = pooler_fn(
-                        b_live, ctx_live, f_start=0, f_end=0, prev_state=prev_state_live, batch_frame_end=1
+                        s_live_0 = pooler_fn(
+                            b_live, ctx_live, f_start=16, f_end=31, prev_state=s_prev, batch_frame_end=32
+                        )
+                        s_live_1 = pooler_fn(
+                            b_live, ctx_live, f_start=32, f_end=47, prev_state=s_live_0, batch_frame_end=48
+                        )
+                        post_prev_0 = posterior_fn(
+                            s_prev, s_live_0, b_live, ctx_live,
+                            f_indices=list(range(17, 33)), ctx_indices=list(range(16, 32)),
+                        )
+                        post_0_1 = posterior_fn(
+                            s_live_0, s_live_1, b_live, ctx_live,
+                            f_indices=list(range(33, 49)), ctx_indices=list(range(32, 48)),
+                        )
+                        dec_out = decoder.flow_matching_loss(
+                            b=b_live,
+                            ctx=ctx_live,
+                            f_0=32,
+                            c_0=31,
+                            s_0=s_live_0,
+                            s_1=s_live_1,
+                            u_flat=post_0_1["u_flat"],
+                            xi_world=post_0_1["xi_world"],
+                            static_map=st_live_map,
+                        )
+
+                        vl_live_0, sh_live_0 = OL2.extract_squad_gt_perception(ctx_live, 31, s_live_0)
+                        vl_live_1, sh_live_1 = OL2.extract_squad_gt_perception(ctx_live, 47, s_live_1)
+
+                    aux_post_loss = 0.5 * (post_prev_0["aux_loss"].float() + post_0_1["aux_loss"].float())
+                    chunk_dec_loss = dec_out["loss"].float()
+                    del b_live, ctx_live, s_prev, dec_out
+
+                    # Splice live states [tau_rel, tau_rel + 1] & transitions [tau_rel - 1, tau_rel] on GPU!
+                    # Detach spatial/gate keys into L2 so L2 never pulls Perceiver slots toward spatial collapse!
+                    state_keys = (
+                        "q_squad", "z_squad", "gate", "active", "q_macro", "z_macro",
+                        "q_opp_obs", "z_opp_obs", "gate_opp_obs", "z_omni_scene",
                     )
-                    s_live_1 = pooler_fn(
-                        b_live, ctx_live, f_start=0, f_end=8, prev_state=s_live_0, batch_frame_end=9
+                    detach_spatial_keys = {"q_squad", "gate", "active", "q_macro", "q_opp_obs", "gate_opp_obs"}
+                    row_bufs = {k: list(seq_b[k].unbind(0)) for k in state_keys}
+                    vl_rows = list(seq_b["gt_vis_live"].unbind(0))
+                    sh_rows = list(seq_b["gt_shimmer"].unbind(0))
+                    tmp_rows = list(seq_b["tempo_feat"].unbind(0))
+                    u_rows = list(seq_b["u_flat"].unbind(0))
+                    xi_rows = list(seq_b["xi_world"].unbind(0))
+                    cl_rows = list(seq_b["combat_loss"].unbind(0))
+
+                    for li, (b_idx, gid, t0, tau_rel, swap) in enumerate(live_metas):
+                        def _sp2(row_t, v0, v1, off):
+                            pair = torch.stack([v0, v1], dim=0).to(row_t.dtype)
+                            return torch.cat([row_t[:off], pair, row_t[off + 2 :]], dim=0)
+
+                        for sk in state_keys:
+                            v0 = s_live_0[sk][li].detach() if sk in detach_spatial_keys else s_live_0[sk][li]
+                            v1 = s_live_1[sk][li].detach() if sk in detach_spatial_keys else s_live_1[sk][li]
+                            row_bufs[sk][b_idx] = _sp2(row_bufs[sk][b_idx], v0, v1, tau_rel)
+                        vl_rows[b_idx] = _sp2(vl_rows[b_idx], vl_live_0[li].detach(), vl_live_1[li].detach(), tau_rel)
+                        sh_rows[b_idx] = _sp2(sh_rows[b_idx], sh_live_0[li].detach(), sh_live_1[li].detach(), tau_rel)
+                        tmp_rows[b_idx] = _sp2(
+                            tmp_rows[b_idx], post_prev_0["tempo_feat"][li], post_0_1["tempo_feat"][li], tau_rel
+                        )
+                        if tau_rel + 1 <= u_rows[b_idx].shape[0]:
+                            u_rows[b_idx] = _sp2(u_rows[b_idx], post_prev_0["u_flat"][li], post_0_1["u_flat"][li], tau_rel - 1)
+                            xi_rows[b_idx] = _sp2(xi_rows[b_idx], post_prev_0["xi_world"][li], post_0_1["xi_world"][li], tau_rel - 1)
+                            cl_rows[b_idx] = _sp2(cl_rows[b_idx], post_prev_0["combat_loss"][li], post_0_1["combat_loss"][li], tau_rel - 1)
+
+                    for sk in state_keys:
+                        seq_b[sk] = torch.stack(row_bufs[sk], dim=0)
+                    seq_b["gt_vis_live"] = torch.stack(vl_rows, dim=0)
+                    seq_b["gt_shimmer"] = torch.stack(sh_rows, dim=0)
+                    seq_b["tempo_feat"] = torch.stack(tmp_rows, dim=0)
+                    seq_b["u_flat"] = torch.stack(u_rows, dim=0)
+                    seq_b["xi_world"] = torch.stack(xi_rows, dim=0)
+                    seq_b["combat_loss"] = torch.stack(cl_rows, dim=0)
+
+                    pending_wb = (
+                        live_metas,
+                        torch.stack([s_live_0["q_squad"].detach(), s_live_1["q_squad"].detach()], dim=1).float(),
+                        torch.stack([s_live_0["z_squad"].detach(), s_live_1["z_squad"].detach()], dim=1).to(torch.bfloat16),
+                        torch.stack([s_live_0["gate"].detach(), s_live_1["gate"].detach()], dim=1).to(torch.float16),
+                        torch.stack([s_live_0["active"].detach(), s_live_1["active"].detach()], dim=1).bool(),
+                        torch.stack([s_live_0["q_macro"].detach(), s_live_1["q_macro"].detach()], dim=1).float(),
+                        torch.stack([s_live_0["z_macro"].detach(), s_live_1["z_macro"].detach()], dim=1).to(torch.bfloat16),
+                        torch.stack([s_live_0["q_opp_obs"].detach(), s_live_1["q_opp_obs"].detach()], dim=1).to(torch.float16),
+                        torch.stack([s_live_0["z_opp_obs"].detach(), s_live_1["z_opp_obs"].detach()], dim=1).to(torch.bfloat16),
+                        torch.stack([s_live_0["gate_opp_obs"].detach(), s_live_1["gate_opp_obs"].detach()], dim=1).to(torch.float16),
+                        torch.stack([s_live_0["z_omni_scene"].detach(), s_live_1["z_omni_scene"].detach()], dim=1).to(torch.bfloat16),
+                        torch.stack([vl_live_0.detach(), vl_live_1.detach()], dim=1).to(torch.float16),
+                        torch.stack([sh_live_0.detach(), sh_live_1.detach()], dim=1).to(torch.float16),
+                        torch.stack([post_prev_0["u_flat"].detach(), post_0_1["u_flat"].detach()], dim=1).float(),
+                        torch.stack([post_prev_0["xi_world"].detach(), post_0_1["xi_world"].detach()], dim=1).float(),
+                        torch.stack([post_prev_0["tempo_feat"].detach(), post_0_1["tempo_feat"].detach()], dim=1).float(),
                     )
-                    s_live_2 = pooler_fn(
-                        b_live, ctx_live, f_start=8, f_end=16, prev_state=s_live_1, batch_frame_end=17
-                    )
-                    post_0 = posterior_fn(
-                        s_live_0, s_live_1, b_live, ctx_live, f_indices=list(range(2, 10)), ctx_indices=list(range(0, 8))
-                    )
-                    post_1 = posterior_fn(
-                        s_live_1, s_live_2, b_live, ctx_live, f_indices=list(range(10, 18)), ctx_indices=list(range(8, 16))
-                    )
-                aux_post_loss = post_0["aux_loss"].float() + post_1["aux_loss"].float()
+                    del s_live_0, s_live_1, vl_live_0, vl_live_1, sh_live_0, sh_live_1, post_prev_0, post_0_1, row_bufs, vl_rows, sh_rows, tmp_rows, u_rows, xi_rows, cl_rows
 
-                # Splice live states & intents out-of-place on GPU (ZERO mid-forward .cpu() stalls!)
-                q_sq_rows = list(seq_b["q_squad"].unbind(0))
-                z_sq_rows = list(seq_b["z_squad"].unbind(0))
-                act_rows = list(seq_b["active"].unbind(0))
-                q_mac_rows = list(seq_b["q_macro"].unbind(0))
-                z_mac_rows = list(seq_b["z_macro"].unbind(0))
-                u_rows = list(seq_b["u_flat"].unbind(0))
-                tmp_rows = list(seq_b["tempo_feat"].unbind(0))
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    l2_loss, logs = obs_l2.forward_sequence(seq_b, static_map=st_b)
+                loss = l2_loss.float() + 0.20 * aux_post_loss + 1.00 * chunk_dec_loss
+                if not torch.isfinite(loss):
+                    print(f"[step {step}] WARNING: non-finite loss={loss.item()}, skipping step", flush=True)
+                    opt.zero_grad(set_to_none=True)
+                    continue
 
-                for li, (b_idx, gid, t0, tau_rel, swap) in enumerate(live_metas):
-                    def _sp2(row_t, v0, v1):
-                        pair = torch.stack([v0, v1], dim=0).to(row_t.dtype)
-                        return torch.cat([row_t[:tau_rel], pair, row_t[tau_rel + 2 :]], dim=0)
-
-                    q_sq_rows[b_idx] = _sp2(q_sq_rows[b_idx], s_live_0["q_squad"][li], s_live_1["q_squad"][li])
-                    z_sq_rows[b_idx] = _sp2(z_sq_rows[b_idx], s_live_0["z_squad"][li], s_live_1["z_squad"][li])
-                    act_rows[b_idx] = _sp2(act_rows[b_idx], s_live_0["active"][li], s_live_1["active"][li])
-                    q_mac_rows[b_idx] = _sp2(q_mac_rows[b_idx], s_live_0["q_macro"][li], s_live_1["q_macro"][li])
-                    z_mac_rows[b_idx] = _sp2(z_mac_rows[b_idx], s_live_0["z_macro"][li], s_live_1["z_macro"][li])
-                    tmp_rows[b_idx] = _sp2(tmp_rows[b_idx], post_0["tempo_feat"][li], post_1["tempo_feat"][li])
-                    if tau_rel + 2 <= u_rows[b_idx].shape[0]:
-                        u_rows[b_idx] = _sp2(u_rows[b_idx], post_0["u_flat"][li], post_1["u_flat"][li])
-
-                seq_b["q_squad"] = torch.stack(q_sq_rows, dim=0)
-                seq_b["z_squad"] = torch.stack(z_sq_rows, dim=0)
-                seq_b["active"] = torch.stack(act_rows, dim=0)
-                seq_b["q_macro"] = torch.stack(q_mac_rows, dim=0)
-                seq_b["z_macro"] = torch.stack(z_mac_rows, dim=0)
-                seq_b["u_flat"] = torch.stack(u_rows, dim=0)
-                seq_b["tempo_feat"] = torch.stack(tmp_rows, dim=0)
-
-                pending_wb = (
-                    live_metas,
-                    torch.stack([s_live_0["q_squad"].detach(), s_live_1["q_squad"].detach()], dim=1).float(),
-                    torch.stack([s_live_0["z_squad"].detach(), s_live_1["z_squad"].detach()], dim=1).to(torch.bfloat16),
-                    torch.stack([s_live_0["active"].detach(), s_live_1["active"].detach()], dim=1).bool(),
-                    torch.stack([s_live_0["q_macro"].detach(), s_live_1["q_macro"].detach()], dim=1).float(),
-                    torch.stack([s_live_0["z_macro"].detach(), s_live_1["z_macro"].detach()], dim=1).to(torch.bfloat16),
-                    torch.stack([post_0["u_flat"].detach(), post_1["u_flat"].detach()], dim=1).float(),
-                    torch.stack([post_0["tempo_feat"].detach(), post_1["tempo_feat"].detach()], dim=1).float(),
-                )
-
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                l2_loss, logs = obs_l2.forward_sequence(seq_b, static_map=st_b)
-            loss = l2_loss.float() + 0.15 * aux_post_loss
-            if not torch.isfinite(loss):
-                print(f"[step {step}] WARNING: non-finite loss={loss.item()}, skipping step", flush=True)
                 opt.zero_grad(set_to_none=True)
+                loss.backward()
+            except torch.OutOfMemoryError as oom_exc:
+                print(f"[step {step}] WARNING: caught transient CUDA OOM ({oom_exc}), clearing cache & continuing", flush=True)
+                opt.zero_grad(set_to_none=True)
+                for _vn in (
+                    "b_live", "ctx_live", "s_prev", "s_live_0", "s_live_1",
+                    "post_prev_0", "post_0_1", "dec_out", "seq_b", "st_b",
+                    "loss", "l2_loss", "aux_post_loss", "chunk_dec_loss", "logs", "pending_wb",
+                ):
+                    locals().pop(_vn, None)
+                gc.collect()
+                torch.cuda.empty_cache()
                 continue
-
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
             gn_l1 = float(torch.nn.utils.clip_grad_norm_(l1_backbone_params, 1.0))
-            gn_pp = float(torch.nn.utils.clip_grad_norm_(pooler_post_params, 1.5))
+            gn_pp = float(torch.nn.utils.clip_grad_norm_(pooler_post_dec_params, 1.5))
             gn_l2 = float(torch.nn.utils.clip_grad_norm_(l2_params, 1.5))
             grad_norm = (gn_l1 * gn_l1 + gn_pp * gn_pp + gn_l2 * gn_l2) ** 0.5
             if not math.isfinite(grad_norm):
@@ -948,24 +1153,36 @@ def main():
                 pg["lr"] = pg["base_lr"] * lr_scale
             opt.step()
 
-            # Single batched post-step CPU write-back (after backward + fused AdamW!)
+            # Asynchronous post-step CPU cache write-back (with exact swap handling!)
             if pending_wb is not None:
-                wb_metas, wb_qsq, wb_zsq, wb_act, wb_qmac, wb_zmac, wb_u, wb_tmp = (
-                    pending_wb[0],
-                    *(t.cpu() for t in pending_wb[1:]),
-                )
+                (
+                    wb_metas,
+                    wb_qsq, wb_zsq, wb_gate, wb_act, wb_qmac, wb_zmac,
+                    wb_qopp, wb_zopp, wb_gopp, wb_zomni,
+                    wb_vl, wb_sh,
+                    wb_u, wb_xi, wb_tmp,
+                ) = (pending_wb[0], *(t.cpu() for t in pending_wb[1:]))
                 for li, (_, gid, t0, tau_rel, swap) in enumerate(wb_metas):
                     g_entry = train_cache[gid]
                     abs_t = t0 + tau_rel
-                    if abs_t + 2 <= g_entry["u_flat"].shape[0]:
+                    if abs_t + 2 <= g_entry["q_squad"].shape[0] and abs_t + 1 <= g_entry["u_flat"].shape[0]:
                         fl = (lambda x: x.flip(dims=[1])) if swap else (lambda x: x)
+                        fl_h = (lambda x: x.view(2, 2, -1).flip(dims=[1]).reshape(2, -1)) if swap else (lambda x: x)
                         g_entry["q_squad"][abs_t : abs_t + 2] = fl(wb_qsq[li])
                         g_entry["z_squad"][abs_t : abs_t + 2] = fl(wb_zsq[li])
+                        g_entry["gate"][abs_t : abs_t + 2] = fl(wb_gate[li])
                         g_entry["active"][abs_t : abs_t + 2] = fl(wb_act[li])
                         g_entry["q_macro"][abs_t : abs_t + 2] = fl(wb_qmac[li])
                         g_entry["z_macro"][abs_t : abs_t + 2] = fl(wb_zmac[li])
-                        g_entry["u_flat"][abs_t : abs_t + 2] = fl(wb_u[li])
+                        g_entry["q_opp_obs"][abs_t : abs_t + 2] = fl(wb_qopp[li])
+                        g_entry["z_opp_obs"][abs_t : abs_t + 2] = fl(wb_zopp[li])
+                        g_entry["gate_opp_obs"][abs_t : abs_t + 2] = fl(wb_gopp[li])
+                        g_entry["z_omni_scene"][abs_t : abs_t + 2] = wb_zomni[li]
+                        g_entry["gt_vis_live"][abs_t : abs_t + 2] = fl(wb_vl[li])
+                        g_entry["gt_shimmer"][abs_t : abs_t + 2] = fl(wb_sh[li])
                         g_entry["tempo_feat"][abs_t : abs_t + 2] = fl(wb_tmp[li])
+                        g_entry["u_flat"][abs_t - 1 : abs_t + 1] = fl(wb_u[li])
+                        g_entry["xi_world"][abs_t - 1 : abs_t + 1] = fl_h(wb_xi[li])
 
             if step % 25 == 0 or step == 1:
                 el = time.perf_counter() - t_loop_start
@@ -975,6 +1192,7 @@ def main():
                     "sec_per_step": round(el / max(1, steps_done), 3),
                     "lr": round(args.lr * lr_scale, 6),
                     "grad_norm": round(grad_norm, 3),
+                    "chunk_dec": round(float(chunk_dec_loss.detach()), 4),
                     "aux_post": round(float(aux_post_loss.detach()), 4),
                     **{k: round(float(v), 4) for k, v in logs.items()},
                 }
@@ -982,9 +1200,8 @@ def main():
                 with open(log_path, "a") as f:
                     f.write(json.dumps(rec) + "\n")
 
-            del seq_b, st_b, loss, l2_loss
+            del seq_b, st_b, loss, l2_loss, aux_post_loss, chunk_dec_loss, logs, pending_wb
 
-            # Rolling full-game cache refresh so long prefixes track evolved L1 + SquadPooler
             if args.refresh_every > 0 and step % args.refresh_every == 0 and step < args.steps:
                 torch.cuda.empty_cache()
                 t_ref = time.perf_counter()
@@ -1000,23 +1217,50 @@ def main():
                 refresh_cache_subset(
                     sorted(val_cache.keys()), val_bases, val_cache, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
                 )
-                refresh_cache_subset(
-                    sorted(map_val_cache.keys()), map_val_bases, map_val_cache, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
-                )
+                if sorted_map_val_gids:
+                    n_mref = min(36, len(sorted_map_val_gids))
+                    map_batch_gids = [
+                        sorted_map_val_gids[(map_refresh_cursor + k) % len(sorted_map_val_gids)]
+                        for k in range(n_mref)
+                    ]
+                    map_refresh_cursor = (map_refresh_cursor + n_mref) % len(sorted_map_val_gids)
+                    refresh_cache_subset(
+                        map_batch_gids, map_val_bases, map_val_cache, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
+                    )
                 print(
-                    f"[step {step}] Refreshed {n_ref} train + all held-out games in {time.perf_counter() - t_ref:.1f}s",
+                    f"[step {step}] Refreshed {n_ref} train + held-out games in {time.perf_counter() - t_ref:.1f}s",
                     flush=True,
                 )
 
             if step % args.val_every == 0 or step == args.steps:
                 torch.cuda.empty_cache()
+                ckpt_payload = dict(
+                    schema_version=CACHE_SCHEMA_VERSION,
+                    step=step,
+                    enc=_clean_sd(enc.state_dict()),
+                    pooler=_clean_sd(pooler.state_dict()),
+                    posterior=_clean_sd(posterior.state_dict()),
+                    decoder=_clean_sd(decoder.state_dict()),
+                    obs_l2=_clean_sd(obs_l2.state_dict()),
+                    opt=opt.state_dict(),
+                    args=vars(args),
+                )
+                latest_pt = os.path.join(args.run, "model_latest.pt")
+                torch.save(ckpt_payload, latest_pt + ".tmp")
+                os.replace(latest_pt + ".tmp", latest_pt)
+                if step % 1000 == 0 or step == args.steps:
+                    step_pt = os.path.join(args.run, f"model_step{step:05d}.pt")
+                    torch.save(ckpt_payload, step_pt + ".tmp")
+                    os.replace(step_pt + ".tmp", step_pt)
+
                 if step == args.steps and args.refresh_every > 0:
                     refresh_cache_subset(
                         sorted(val_cache.keys()), val_bases, val_cache, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
                     )
-                    refresh_cache_subset(
-                        sorted(map_val_cache.keys()), map_val_bases, map_val_cache, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
-                    )
+                    if sorted_map_val_gids:
+                        refresh_cache_subset(
+                            sorted_map_val_gids[:48], map_val_bases, map_val_cache, args.vocab, enc, pooler, posterior, dev, workers=args.cache_workers
+                        )
                 ev_games = evaluate_observer(obs_l2, val_cache, args.window, dev)
                 ev_maps = evaluate_observer(obs_l2, map_val_cache, args.window, dev)
                 print(json.dumps({"step": step, "split": "held_out_games", **ev_games}), flush=True)
@@ -1027,28 +1271,12 @@ def main():
                         + "\n"
                     )
 
-                ckpt_payload = dict(
-                    step=step,
-                    enc=enc.state_dict(),
-                    pooler=pooler.state_dict(),
-                    posterior=posterior.state_dict(),
-                    obs_l2=obs_l2.state_dict(),
-                    opt=opt.state_dict(),
-                    args=vars(args),
-                )
-                latest_pt = os.path.join(args.run, "model_latest.pt")
-                torch.save(ckpt_payload, latest_pt + ".tmp")
-                os.replace(latest_pt + ".tmp", latest_pt)
-
                 if ev_games.get("loss", float("inf")) <= best_val_loss:
                     best_val_loss = ev_games["loss"]
                     best_pt = os.path.join(args.run, "model_best.pt")
                     torch.save(ckpt_payload, best_pt + ".tmp")
                     os.replace(best_pt + ".tmp", best_pt)
-
-                if step == args.steps:
-                    final_pt = os.path.join(args.run, f"model_step{step:05d}.pt")
-                    torch.save(ckpt_payload, final_pt)
+                del ckpt_payload
     finally:
         it.close()
 

@@ -141,10 +141,15 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
             gid = parts[2]
             loop_t = int(parts[4])
             n_branches = int(qs.get("branches", ["32"])[0])
-            horizon = int(qs.get("horizon", ["8"])[0])
+            horizon = int(qs.get("horizon", ["24"])[0])
+            mode = qs.get("mode", ["forecast"])[0]
             self._send_json(
                 INSPECTOR.inspect_observer_rollout(
-                    gid, loop_t=loop_t, n_branches=n_branches, horizon_steps=horizon
+                    gid,
+                    loop_t=loop_t,
+                    n_branches=n_branches,
+                    horizon_steps=horizon,
+                    mode=mode,
                 )
             )
             return
@@ -249,7 +254,7 @@ def main():
     )
     ap.add_argument(
         "--observer_ckpt",
-        default="data/worldmodel/runs/observer_v1/model_best.pt",
+        default="data/worldmodel/runs/observer_v2/model_best.pt",
     )
     args = ap.parse_args()
 
