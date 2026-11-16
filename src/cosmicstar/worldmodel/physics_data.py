@@ -77,15 +77,34 @@ C_LIVE, C_STATIC = (
 )
 MAX_ROWS = 4096
 SNAPSHOT = 2  # u_display
+_RULESET_IDS: dict[str, int] | None = None
 
 
-def base_paths(root, split_ids):
+def ruleset_id_of(ruleset_name: str, rulesets_path: str = "data/worldmodel/rulesets.json") -> int:
+    """Canonical integer index of `ruleset_name` inside sorted `rulesets.json` (`-1` if absent)."""
+    global _RULESET_IDS
+    if _RULESET_IDS is None:
+        if os.path.exists(rulesets_path):
+            rs = json.load(open(rulesets_path))["rulesets"]
+            _RULESET_IDS = {k: i for i, k in enumerate(sorted(rs.keys()))}
+        else:
+            _RULESET_IDS = {}
+    if ruleset_name in _RULESET_IDS:
+        return _RULESET_IDS[ruleset_name]
+    prefix = str(ruleset_name).split("_")[0]
+    for k, idx in _RULESET_IDS.items():
+        if k.split("_")[0] == prefix:
+            return idx
+    return -1
+
+
+def base_paths(root, split_ids=None):
     """Game id -> its base path (no view suffix), for ids with both views."""
     out = {}
     for u in glob.glob(os.path.join(root, "1v1", "*", "*", "*.p1.units.arrow")):
         base = u[: -len(".p1.units.arrow")]
         gid = os.path.basename(base)
-        if gid in split_ids and all(
+        if (split_ids is None or gid in split_ids) and all(
             os.path.exists(f"{base}.p{s}.units.arrow") for s in VIEWS
         ):
             out[gid] = base
@@ -353,25 +372,34 @@ class Game:
             out_l.append((keep, l))
         return out_u, out_l
 
-    def window(self, t0, L, swap=False, step=1):
+    def window(self, t0, L, swap=False, step=1, need_map=True, compact=False):
         """L frames from frame t0 spaced by `step` game loops, as one dict of numpy
         arrays: see the module docstring. One window at a time per game: a window keeps
         its row map and batches on the game, and two threads reading the same game would
         map one window's targets with the other's rows.
         """
         with self._window_lock:
-            return self._window(t0, L, swap, step=step)
+            return self._window(
+                t0, L, swap, step=step, need_map=need_map, compact=compact
+            )
 
-    def _window(self, t0, L, swap, step=1):
+    def _window(self, t0, L, swap, step=1, need_map=True, compact=False):
         step = max(1, int(step))
         t_end = t0 + (L - 1) * step
         rows, row_of = [], {}
         self._batches = {}  # own rows and neutrals share a view's batches
+        self._uid_row = {
+            s: np.full(len(self.rest[s]["unit_tag"]), -1, np.int64) for s in VIEWS
+        }
         for s in SOURCES:
             ix = self.index[s]
             live = (ix["first"] <= t_end) & (ix["last"] >= t0)
             for k in np.nonzero(live)[0].tolist():
-                row_of[(s, int(ix["id"][k]))] = len(rows)
+                r_idx = len(rows)
+                uid = int(ix["id"][k])
+                row_of[(s, uid)] = r_idx
+                if s in self._uid_row and 0 <= uid < len(self._uid_row[s]):
+                    self._uid_row[s][uid] = r_idx
                 rows.append((s, k))
         R = len(rows)
         assert R <= MAX_ROWS, f"{R} rows"
@@ -385,12 +413,15 @@ class Game:
             self._fill(out, s, t0, L, row_of, step=step)
         self._dead_rows(out, rows, t0, L, step=step)
         self._batches = {}
+        self._uid_row = None
         sw = (lambda o: 1 - o if o < 2 else o) if swap else (lambda o: o)
         out["owner"] = np.array(
             [sw({1: 0, 2: 1, 0: NEUTRAL}[s]) for s, _ in rows], np.int64
         ).reshape(-1)
         births, parents = [], []
         for r_, (s, k) in enumerate(rows):
+            if s == 0:
+                continue
             ix = self.index[s]
             raw_first = int(ix["first"][k])
             if t0 < raw_first <= t_end:
@@ -409,7 +440,9 @@ class Game:
         out["death_frame"] = np.array(
             [self._death(s, k, t0, L, step=step) for s, k in rows], np.int64
         )
-        out["map"], out["grid"] = self._map_frames(t0, L, swap, step=step)
+        out["map"], out["grid"] = self._map_frames(
+            t0, L, swap, step=step, need_map=need_map, compact=compact
+        )
         out["static_grid"], out["origin"], out["map_id"] = (
             self.static_grid,
             np.array(self.playable[:2], np.float32),
@@ -428,6 +461,7 @@ class Game:
         out["actions"] = self._actions(t0, L, row_of, swap, step=step)
         out["effects"] = self._effects(t0, L, swap, step=step)
         out["autocast"] = self._autocast(t0, L, step=step)
+        out["ruleset_id"] = np.int64(ruleset_id_of(self.meta.get("ruleset", "")))
         return out
 
     def _autocast(self, t0, L, step=1):
@@ -459,7 +493,7 @@ class Game:
 
     def _effects(self, t0, L, swap, step=1):
         """Both player views' effects, side by side with no merging, since each view has
-        only some: (frame, type, owner index, x, y, radius, age in loops)."""
+        only some: (frame, type, owner index, x, y, radius, age in loops, view index)."""
         rows = []
         for s in (1, 2):
             d = self.rest[s]
@@ -491,6 +525,7 @@ class Game:
                 1 if swap else 0,
                 np.where(own == 2, 0 if swap else 1, NEUTRAL),
             )
+            vw = np.full(len(fr), (2 - s) if swap else (s - 1), dtype=np.int64)
             rows.append(
                 np.stack(
                     [
@@ -501,6 +536,7 @@ class Game:
                         d["e_y"][sel_idx] - self.center[1],
                         d["e_radius"][sel_idx],
                         age,
+                        vw,
                     ],
                     1,
                 )
@@ -508,7 +544,7 @@ class Game:
         return (
             np.concatenate(rows).astype(np.float32)
             if rows
-            else np.zeros((0, 7), np.float32)
+            else np.zeros((0, 8), np.float32)
         )
 
     def _players(self, t0, L, swap, step=1):
@@ -726,9 +762,16 @@ class Game:
         if step > 1:
             inw = inw & (((frame - t0) % step) == 0)
         fo = (frame[inw] - t0) // step
-        ro = np.array(
-            [row_of.get((s, int(i)), -1) for i in ids[inw].tolist()], np.int64
-        )
+        u_map = self._uid_row.get(s) if self._uid_row is not None else None
+        if u_map is not None:
+            raw_ids = ids[inw]
+            ok_id = (raw_ids >= 0) & (raw_ids < len(u_map))
+            ro = np.full(len(raw_ids), -1, np.int64)
+            ro[ok_id] = u_map[raw_ids[ok_id]]
+        else:
+            ro = np.array(
+                [row_of.get((s, int(i)), -1) for i in ids[inw].tolist()], np.int64
+            )
         ok = ro >= 0
         fo, ro = fo[ok], ro[ok]
         src = np.nonzero(inw)[0][ok]
@@ -754,12 +797,20 @@ class Game:
             if s == 0:
                 nid_row[k] = r_
         seen = np.zeros(out["mask"].shape, bool)
+        neut_cache = {}
+        for s in VIEWS:
+            U, Ls = self._read(s, t0, t_end + 1, neutral=True)
+            if U:
+                neut_cache[s] = (
+                    U,
+                    Ls,
+                    {k: np.concatenate([x[k] for x in U]) for k in U[0]},
+                )
         for visible in (False, True):
             for s in VIEWS:
-                U, Ls = self._read(s, t0, t_end + 1, neutral=True)
-                if not U:
+                if s not in neut_cache:
                     continue
-                u = {k: np.concatenate([x[k] for x in U]) for k in U[0]}
+                U, Ls, u = neut_cache[s]
                 n = self.nid[s][u["u_id"]]
                 on_stride = (((u["frame"] - t0) % step) == 0) if step > 1 else True
                 fo = np.clip((u["frame"] - t0) // step, 0, L - 1)
@@ -816,17 +867,30 @@ class Game:
             return
         start, gid = g
         P = len(self.rest[s]["grp_player"])
+        u_map = self._uid_row.get(s) if self._uid_row is not None else None
         for f in range(L):
             rf = t0 + f * step
             base = (rf * P) * C_GROUPS
             if base + C_GROUPS >= len(start):
                 break
+            if start[base] == start[base + C_GROUPS]:
+                continue
             for k in range(C_GROUPS):
-                members = gid[start[base + k] : start[base + k + 1]]
-                for m in members.tolist():
-                    r_ = row_of.get((s, m), -1)
-                    if r_ >= 0:
-                        out["groups"][f, r_, k] = 1
+                a, b = start[base + k], start[base + k + 1]
+                if a == b:
+                    continue
+                members = gid[a:b]
+                if u_map is not None:
+                    valid = (members >= 0) & (members < len(u_map))
+                    ro = u_map[members[valid]]
+                    ro = ro[ro >= 0]
+                    if len(ro):
+                        out["groups"][f, ro, k] = 1
+                else:
+                    for m in members.tolist():
+                        r_ = row_of.get((s, m), -1)
+                        if r_ >= 0:
+                            out["groups"][f, r_, k] = 1
 
     def _bags(self, out, bags, src, fo, ro, s):
         """Orders, production, buffs and rally points of the window's rows, as flat
@@ -988,50 +1052,119 @@ class Game:
             out["mask"][d0:, r_] = True
             out["alive"][d0:, r_] = False
 
-    def _map_frames(self, t0, L, swap, step=1):
-        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8: each player's visible, seen
-        and creep, the next-frame targets; and [L, h, w, C_LIVE], the playable area at
-        its own size with each player's pathable and buildable too, the input."""
-        out = np.zeros((L, TOP, TOP, C_DYNAMIC * PATCH * PATCH), np.uint8)
+    @staticmethod
+    def _fb_rows(batch, name, j_sel, H):
+        """Zero-copy slice (or strided gather) of a FixedSizeBinaryArray -> [n, H, rb]."""
+        c = batch.column(name)
+        bw = c.type.byte_width
+        rb = bw // H
+        if isinstance(j_sel, slice):
+            j0, j1 = j_sel.start, j_sel.stop
+            n = j1 - j0
+            return np.frombuffer(
+                c.buffers()[1], np.uint8, count=n * bw, offset=(c.offset + j0) * bw
+            ).reshape(n, H, rb)
+        all_rows = np.frombuffer(
+            c.buffers()[1], np.uint8, count=len(c) * bw, offset=c.offset * bw
+        ).reshape(len(c), H, rb)
+        return all_rows[j_sel]
+
+    def _map_frames(self, t0, L, swap, step=1, need_map=True, compact=False):
+        """[L, TOP, TOP, C_DYNAMIC * PATCH * PATCH] uint8 (or bit-packed center [L, TOP, TOP]
+        uint8 when compact=True): each player's visible, seen and creep, the next-frame
+        targets; and [L, h, w, C_LIVE] uint8 (or bit-packed [L, h, w] int16 when
+        compact=True), the playable area at its own size with each player's pathable and
+        buildable too, the input."""
         x0, y0, x1, y1 = self.playable
-        grid = np.zeros((L, y1 - y0, x1 - x0, C_LIVE), np.uint8)
-        bits = lambda col, j: np.unpackbits(
-            np.frombuffer(col[j].as_py(), np.uint8).reshape(self.H, -1), axis=1
-        )[:, : self.W]
-        y, x = self.cells
+        gh, gw = y1 - y0, x1 - x0
+        bx0, bx1 = x0 // 8, (x1 + 7) // 8
+        dx0 = x0 - bx0 * 8
+        if compact:
+            out = np.zeros((L, TOP, TOP), np.uint8) if need_map else None
+            grid = np.zeros((L, gh, gw), np.int16)
+            centre = (PATCH * PATCH) // 2
+            yc, xc = self.cells[0][:, :, centre], self.cells[1][:, :, centre]
+            xc_byte, xc_shift = xc >> 3, (7 - (xc & 7)).astype(np.uint8)
+        else:
+            out = (
+                np.zeros((L, TOP, TOP, C_DYNAMIC * PATCH * PATCH), np.uint8)
+                if need_map
+                else None
+            )
+            grid = np.zeros((L, gh, gw, C_LIVE), np.uint8)
+            y, x = self.cells
+        if L <= 0:
+            return out, grid
+        t_end = t0 + (L - 1) * step
+        raw_frames = None if step == 1 else (t0 + np.arange(L, dtype=np.int64) * step)
         for pi, s in enumerate((1, 2)):
-            at = (1 - pi if swap else pi) * 3 * PATCH * PATCH
+            p_out = 1 - pi if swap else pi
+            at = p_out * 3 * PATCH * PATCH
+            g = p_out * 5
             _, fr = self.views[s]
-            for f in range(L):
-                rf = t0 + f * step
-                b = fr.get_batch(rf // BATCH)
-                j = rf % BATCH
-                vis = np.frombuffer(b.column("vis")[j].as_py(), np.uint8).reshape(
-                    self.H, self.W
-                )
-                creep = np.unpackbits(
-                    np.frombuffer(b.column("creep")[j].as_py(), np.uint8).reshape(
-                        self.H, -1
-                    ),
-                    axis=1,
-                )[:, : self.W]
-                out[f, :, :, at : at + PATCH * PATCH] = (vis == 2)[y, x]
-                out[f, :, :, at + PATCH * PATCH : at + 2 * PATCH * PATCH] = (vis > 0)[
-                    y, x
-                ]
-                out[f, :, :, at + 2 * PATCH * PATCH : at + 3 * PATCH * PATCH] = creep[
-                    y, x
-                ]
-                g = (1 - pi if swap else pi) * 5
-                crop = lambda a: a[y0:y1, x0:x1]
-                grid[f, :, :, g], grid[f, :, :, g + 1], grid[f, :, :, g + 2] = (
-                    crop(vis == 2),
-                    crop(vis > 0),
-                    crop(creep),
-                )
-                grid[f, :, :, g + 3], grid[f, :, :, g + 4] = crop(
-                    bits(b.column("pathable"), j)
-                ), crop(bits(b.column("buildable"), j))
+            for bi in range(t0 // BATCH, t_end // BATCH + 1):
+                b = fr.get_batch(bi)
+                base = bi * BATCH
+                if step == 1:
+                    lo, hi = max(t0, base), min(t0 + L, base + b.num_rows)
+                    if lo >= hi:
+                        continue
+                    f_sl = slice(lo - t0, hi - t0)
+                    j_sel = slice(lo - base, hi - base)
+                else:
+                    in_b = (raw_frames >= base) & (raw_frames < base + b.num_rows)
+                    if not in_b.any():
+                        continue
+                    f_sl = np.nonzero(in_b)[0]
+                    j_sel = raw_frames[f_sl] - base
+                vis = self._fb_rows(b, "vis", j_sel, self.H)
+                creep_raw = self._fb_rows(b, "creep", j_sel, self.H)
+                path_raw = self._fb_rows(b, "pathable", j_sel, self.H)
+                build_raw = self._fb_rows(b, "buildable", j_sel, self.H)
+                vis_crop = vis[:, y0:y1, x0:x1]
+                creep_crop = np.unpackbits(
+                    creep_raw[:, y0:y1, bx0:bx1], axis=2
+                )[:, :, dx0 : dx0 + gw]
+                path_crop = np.unpackbits(
+                    path_raw[:, y0:y1, bx0:bx1], axis=2
+                )[:, :, dx0 : dx0 + gw]
+                build_crop = np.unpackbits(
+                    build_raw[:, y0:y1, bx0:bx1], axis=2
+                )[:, :, dx0 : dx0 + gw]
+                if compact:
+                    bits_g = (
+                        (vis_crop == 2).astype(np.int16)
+                        | ((vis_crop > 0).astype(np.int16) << 1)
+                        | (creep_crop.astype(np.int16) << 2)
+                        | (path_crop.astype(np.int16) << 3)
+                        | (build_crop.astype(np.int16) << 4)
+                    )
+                    grid[f_sl] |= bits_g << g
+                    if need_map:
+                        vc = vis[:, yc, xc]
+                        cc = (creep_raw[:, yc, xc_byte] >> xc_shift) & 1
+                        bits_m = (
+                            (vc == 2).astype(np.uint8)
+                            | ((vc > 0).astype(np.uint8) << 1)
+                            | (cc << 2)
+                        )
+                        out[f_sl] |= bits_m << (p_out * 3)
+                else:
+                    grid[f_sl, :, :, g] = vis_crop == 2
+                    grid[f_sl, :, :, g + 1] = vis_crop > 0
+                    grid[f_sl, :, :, g + 2] = creep_crop
+                    grid[f_sl, :, :, g + 3] = path_crop
+                    grid[f_sl, :, :, g + 4] = build_crop
+                    if need_map:
+                        creep_full = np.unpackbits(creep_raw, axis=2)[:, :, : self.W]
+                        vs = vis[:, y, x]
+                        out[f_sl, :, :, at : at + PATCH * PATCH] = vs == 2
+                        out[
+                            f_sl, :, :, at + PATCH * PATCH : at + 2 * PATCH * PATCH
+                        ] = vs > 0
+                        out[
+                            f_sl, :, :, at + 2 * PATCH * PATCH : at + 3 * PATCH * PATCH
+                        ] = creep_full[:, y, x]
         return out, grid
 
 
@@ -1105,9 +1238,7 @@ def _set(out, u, src, fo, ro, game):
 
 
 QUEUE, PROD = 8, 8  # order and production slots with targets (physics.RowHead)
-# a row's identity code: random per window, so it means nothing but which row, and
-# pointers can be read by matching it
-CODE = 64
+N_CARGO = 16  # 1..N_CARGO: deterministic passenger slot inside a container, 0: outside
 
 
 def effect_ages(d, near=1.5):
@@ -1159,19 +1290,14 @@ def effect_ages(d, near=1.5):
 FORCED = 16  # map tokens under effects always among each frame's decoded sample
 
 
-def collate(windows, vocab, rng=None):
+def collate(windows, vocab, rng=None, drop_dense_slots=False):
     """Windows of the same length -> one batch of tensors: grids [B, F, R, ...], lists
-    flat by (B * F + f) * R + r. rng: for the rows' identity codes."""
+    flat by (B * F + f) * R + r."""
     import torch
 
     B, F_ = len(windows), windows[0]["mask"].shape[0]
     R = max(w["mask"].shape[1] for w in windows)
     out = {}
-    rng = rng or np.random.default_rng()
-    code = rng.standard_normal((B, R, CODE)).astype(np.float32)
-    out["row_code"] = torch.from_numpy(
-        code / np.linalg.norm(code, axis=-1, keepdims=True)
-    )  # unit length: matching codes score 1, others about 1/8
     for k in (
         "mask",
         "alive",
@@ -1190,14 +1316,37 @@ def collate(windows, vocab, rng=None):
         for b, w in enumerate(windows):
             buf[b, :, : w[k].shape[1]] = w[k]
         out[k] = torch.from_numpy(buf)
+    par = out["parent_row"].numpy()
+    msk = out["mask"].numpy()
+    cslot = np.zeros((B, F_, R), np.int64)
+    pb, pf, pr = np.nonzero(msk & (par >= 0))
+    if len(pb):
+        keys = (pb * F_ + pf) * R + par[pb, pf, pr]
+        order = np.argsort(keys, kind="stable")
+        sk = keys[order]
+        run_start = np.maximum.accumulate(
+            np.where(np.r_[True, sk[1:] != sk[:-1]], np.arange(len(sk)), 0)
+        )
+        cslot[pb[order], pf[order], pr[order]] = np.minimum(
+            np.arange(len(sk)) - run_start + 1, N_CARGO
+        )
+    out["cargo_slot"] = torch.from_numpy(cslot)
     out["rtype"] = out["type"].long()
     out["type"] = torch.from_numpy(
         vocab.unit_index(out["rtype"].numpy()).astype(np.int64)
     )
     own = np.full((B, R), NEUTRAL, np.int64)
+    dframe = np.full((B, R), -1, np.int64)
     for b, w in enumerate(windows):
         own[b, : len(w["owner"])] = w["owner"]
+        if "death_frame" in w:
+            dframe[b, : len(w["death_frame"])] = w["death_frame"]
     out["owner"] = torch.from_numpy(own)
+    out["death_frame"] = torch.from_numpy(dframe)
+    if "ruleset_id" in windows[0]:
+        out["ruleset_id"] = torch.from_numpy(
+            np.stack([np.int64(w["ruleset_id"]) for w in windows])
+        )
     for k in (
         "center",
         "half",
@@ -1208,15 +1357,20 @@ def collate(windows, vocab, rng=None):
         "origin",
         "map_id",
     ):
-        out[k] = torch.from_numpy(np.stack([w[k] for w in windows]))
+        if k in windows[0] and windows[0][k] is not None:
+            out[k] = torch.from_numpy(np.stack([w[k] for w in windows]))
     # the map at its own size, zero past its edge: the known layer tells. Sizes are
     # multiples of 8, the tower's reduction
     gh, gw = (
         int(np.ceil(max(w["grid"].shape[i] for w in windows) / 8)) * 8 for i in (1, 2)
     )
-    grid, sgrid = np.zeros((B, F_, gh, gw, C_LIVE), np.uint8), np.zeros(
-        (B, gh, gw, C_STATIC), np.uint8
+    packed_grid = windows[0]["grid"].ndim == 3
+    grid = (
+        np.zeros((B, F_, gh, gw), np.int16)
+        if packed_grid
+        else np.zeros((B, F_, gh, gw, C_LIVE), np.uint8)
     )
+    sgrid = np.zeros((B, gh, gw, C_STATIC), np.uint8)
     for b, w in enumerate(windows):
         h_, w_ = w["grid"].shape[1:3]
         grid[b, :, :h_, :w_], sgrid[b, :h_, :w_] = w["grid"], w["static_grid"]
@@ -1229,8 +1383,12 @@ def collate(windows, vocab, rng=None):
     bags = {k: ([], []) for k in ("ord", "prod", "buff", "rally", "ab")}
     ord_row = np.full((B, F_, R, QUEUE), -1, np.int32)
     rally = np.zeros((B, F_, R, 4), np.float32)
-    slot_abil = np.zeros((B, F_, R, QUEUE + PROD), np.int64)
-    slot_reg = np.zeros((B, F_, R, QUEUE + PROD, 4), np.float32)
+    slot_abil = np.zeros(
+        (B, F_, R, QUEUE + PROD), np.int32 if drop_dense_slots else np.int64
+    )
+    slot_reg = (
+        None if drop_dense_slots else np.zeros((B, F_, R, QUEUE + PROD, 4), np.float32)
+    )
     for b, w in enumerate(windows):
         for k in bags:
             if w[f"{k}_where"]:
@@ -1270,17 +1428,18 @@ def collate(windows, vocab, rng=None):
         )  # has a target: as a row of this window
         q = wh[:, 2] < QUEUE
         slot_abil[bb[q], wh[q, 0], wh[q, 1], wh[q, 2]] = ab[q]
-        slot_reg[bb[q], wh[q, 0], wh[q, 1], wh[q, 2]] = np.stack(
-            [feat[q, 0], feat[q, 1], feat[q, 2], feat[q, 3]], 1
-        )
+        if slot_reg is not None:
+            slot_reg[bb[q], wh[q, 0], wh[q, 1], wh[q, 2]] = feat[q]
         ord_row[bb[q], wh[q, 0], wh[q, 1], wh[q, 2]] = v[q, 3]
     else:
         feat = np.zeros((0, 4), np.float32)
+        q = np.zeros(0, bool)
     out["ord_at"], out["ord_abil"], out["ord_feat"] = (
         torch.from_numpy(at.astype(np.int64)),
         torch.from_numpy(ab),
         torch.from_numpy(feat),
     )
+    out["ord_in_q"] = torch.from_numpy(q)
     out["ord_slot"] = torch.from_numpy(
         np.minimum(wh[:, 2], QUEUE - 1).astype(np.int64)
     )  # 0: what the unit is doing now
@@ -1302,12 +1461,16 @@ def collate(windows, vocab, rng=None):
         bb = bh(at)
         q = wh[:, 2] < PROD
         slot_abil[bb[q], wh[q, 0], wh[q, 1], QUEUE + wh[q, 2]] = ab[q]
-        slot_reg[bb[q], wh[q, 0], wh[q, 1], QUEUE + wh[q, 2], 3] = v[q, 1]
+        if slot_reg is not None:
+            slot_reg[bb[q], wh[q, 0], wh[q, 1], QUEUE + wh[q, 2], 3] = v[q, 1]
+    else:
+        q = np.zeros(0, bool)
     out["prod_at"], out["prod_abil"], out["prod_feat"] = (
         torch.from_numpy(at.astype(np.int64)),
         torch.from_numpy(ab),
         torch.from_numpy(feat),
     )
+    out["prod_in_q"] = torch.from_numpy(q)
     out["prod_slot"] = torch.from_numpy(np.minimum(wh[:, 2], PROD - 1).astype(np.int64))
     at, wh, v = cat("buff")
     out["buff_at"], out["buff_id"] = torch.from_numpy(
@@ -1351,12 +1514,24 @@ def collate(windows, vocab, rng=None):
         if len(v)
         else np.zeros(0, np.int64)
     )
-    out["slot_abil"], out["slot_reg"] = torch.from_numpy(slot_abil), torch.from_numpy(
-        slot_reg
-    )
-    changed = np.zeros((B, F_, R), bool)
-    changed[:, :-1] = (slot_abil[:, 1:] != slot_abil[:, :-1]).any(-1)
-    out["queue_changed"] = torch.from_numpy(changed[:, :-1])
+    if not drop_dense_slots:
+        out["slot_abil"], out["slot_reg"] = torch.from_numpy(
+            slot_abil
+        ), torch.from_numpy(slot_reg)
+    q_ch = (slot_abil[:, 1:] != slot_abil[:, :-1]).any(-1)
+    eng_np = out["engaged_row"].numpy()
+    eng_ch = eng_np[:, 1:] != eng_np[:, :-1]
+    ab_hash = np.zeros(B * F_ * R, np.uint64)
+    if len(at):
+        ab_vals = np.clip(v[:, 0], 0, N_RAW_ABILITY_IDS - 1).astype(np.uint64) + 1
+        ab_mix = (ab_vals * np.uint64(0x9E3779B97F4A7C15)) ^ (
+            ab_vals * np.uint64(0xBF58476D1CE4E5B9)
+        )
+        np.add.at(ab_hash, at, ab_mix)
+    ab_hash = ab_hash.reshape(B, F_, R)
+    ab_ch = ab_hash[:, 1:] != ab_hash[:, :-1]
+    out["queue_changed"] = torch.from_numpy(q_ch)
+    out["row_changed"] = torch.from_numpy(q_ch | eng_ch | ab_ch)
     # births: first seen in frame f + 1 means the count of frame f
     bb, ff, rr, pp = [], [], [], []
     count = np.zeros((B, F_ - 1), np.int64)
@@ -1467,16 +1642,17 @@ def collate(windows, vocab, rng=None):
         np.zeros((B, F_, X), np.int64),
         np.full((B, F_, X), NEUTRAL, np.int64),
     )
+    eview = np.zeros((B, F_, X), np.int64)
     exy, erad = np.zeros((B, F_, X, 2), np.float32), np.zeros((B, F_, X), np.float32)
     eage = np.zeros((B, F_, X), np.float32)
-    force = np.full((B, F_ - 1, FORCED), -1, np.int64)
-    cover = []
     for b, w in enumerate(windows):
+        eff_arr = w["effects"]
+        if not len(eff_arr):
+            continue
         seen = np.zeros(F_, np.int64)
-        size = float(w["side"]) / TOP
-        centers = (np.arange(TOP) + 0.5) * size - float(w["side"]) / 2
-        n_forced = np.zeros(F_, np.int64)
-        for f, ty, o, x, y, r, age in w["effects"].tolist():
+        for row in eff_arr.tolist():
+            f, ty, o, x, y, r, age = row[:7]
+            vw = int(row[7]) if len(row) > 7 else 0
             f, ty, o = int(f), int(ty), int(o)
             i = seen[f]
             seen[f] += 1
@@ -1484,33 +1660,18 @@ def collate(windows, vocab, rng=None):
                 emask[b, f, i],
                 etype[b, f, i],
                 eown[b, f, i],
+                eview[b, f, i],
                 exy[b, f, i],
                 erad[b, f, i],
                 eage[b, f, i],
-            ) = (True, ty, o, (x, y), r / 8, age)
-            if f == 0:
-                continue
-            reach = max(r, size / 2)
-            jx = np.nonzero(np.abs(centers - x) <= reach)[0]
-            jy = np.nonzero(np.abs(centers - y) <= reach)[0]
-            for iy in jy.tolist():
-                for ix in jx.tolist():
-                    if (centers[ix] - x) ** 2 + (
-                        centers[iy] - y
-                    ) ** 2 <= reach * reach + size * size / 2:
-                        cell = iy * TOP + ix
-                        cover.append(((b * (F_ - 1) + f - 1), cell, ty))
-                        if n_forced[f] < FORCED:
-                            force[b, f - 1, n_forced[f]] = cell
-                            n_forced[f] += 1
+            ) = (True, ty, o, vw, (x, y), r / 8, age)
     (
         out["eff_mask"],
         out["eff_type"],
         out["eff_owner"],
+        out["eff_view"],
         out["eff_xy"],
         out["eff_radius"],
         out["eff_age"],
-    ) = (torch.from_numpy(x) for x in (emask, etype, eown, exy, erad, eage))
-    out["eff_force"] = torch.from_numpy(force)
-    out["eff_cover"] = torch.tensor(cover, dtype=torch.int64).reshape(-1, 3)
+    ) = (torch.from_numpy(x) for x in (emask, etype, eown, eview, exy, erad, eage))
     return out

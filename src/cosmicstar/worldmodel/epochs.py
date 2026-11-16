@@ -32,9 +32,10 @@ from .physics_data import SOURCES, VIEWS
 THIRDS = 3
 
 
-def game_windows(base, L):
-    """For each start frame t0 in [0, F - L): the window's rows, and whether it has
-    effects in either view."""
+def game_windows(base, L, eff_mult=0):
+    """For each start frame t0 in [0, F - L): the window's token load (rows, plus
+    eff_mult * peak per-frame effects when eff_mult > 0), and whether it has effects in
+    either view."""
     ix = np.load(f"{base}.index.npz")
     F = int(ix["F"])
     t0 = np.arange(max(1, F - L))
@@ -45,12 +46,34 @@ def game_windows(base, L):
             np.searchsorted(first, t0 + L, "left") - np.searchsorted(last, t0, "left")
         ).astype(np.int32)
     eff = np.zeros(len(t0), bool)
+    eff_per_f = np.zeros(F, np.int32) if eff_mult > 0 else None
     for s in VIEWS:
         d = statefile.load(f"{base}.p{s}.cst")
         if "e_frame_start" in d.files:
             st = d["e_frame_start"]
             hi = np.minimum(t0 + L, len(st) - 1)
             eff |= st[hi] > st[np.minimum(t0, len(st) - 1)]
+            if eff_per_f is not None and len(st) > 1:
+                cnt = (st[1:] - st[:-1]).astype(np.int32)
+                n_c = min(F, len(cnt))
+                if eff_mult > 1 and "e_type" in d.files and len(d["e_type"]):
+                    et = d["e_type"]
+                    mov = (et == 2) | (et == 5)
+                    cs = np.r_[0, np.cumsum(mov, dtype=np.int32)]
+                    n_mov = cs[st[1 : n_c + 1]] - cs[st[:n_c]]
+                    eff_per_f[:n_c] += (cnt[:n_c] - n_mov) + eff_mult * n_mov
+                else:
+                    eff_per_f[:n_c] += eff_mult * cnt[:n_c]
+    if eff_per_f is not None and len(t0):
+        if eff_per_f.any():
+            from scipy.ndimage import maximum_filter1d
+
+            win_eff = maximum_filter1d(
+                eff_per_f, size=L, mode="constant", cval=0, origin=-(L // 2)
+            )[: len(t0)]
+            rows = rows + np.maximum(1, win_eff)
+        else:
+            rows = rows + 1
     return F, rows, eff
 
 
@@ -72,6 +95,7 @@ class Plan:
         per_window=259,
         accum=2,
         recent=8,
+        eff_mult=0,
     ):
         self.ids = sorted(bases)
         self.L, self.seed, self.stride, self.accum, self.recent = (
@@ -83,7 +107,9 @@ class Plan:
         )
         self.F, self.rows, self.eff = {}, {}, {}
         for g in self.ids:
-            self.F[g], self.rows[g], self.eff[g] = game_windows(bases[g], L)
+            self.F[g], self.rows[g], self.eff[g] = game_windows(
+                bases[g], L, eff_mult=eff_mult
+            )
         self.map = {g: maps[g] for g in self.ids}
         # buckets: the raw ones with windows from min_games games or more; anything
         # below or above joins the end bucket
