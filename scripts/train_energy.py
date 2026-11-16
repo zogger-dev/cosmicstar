@@ -22,31 +22,26 @@ import json
 import os
 import queue
 import subprocess
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 # the cap below needs segments that grow (train_physics sets the same before torch)
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
-os.environ.setdefault("TRITON_DEFAULT_FP_FUSION", "1")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-import train_physics as tp
 
-from cosmicstar.worldmodel import energy, energy_data, epochs, physics_data
-from cosmicstar.worldmodel.action_tokens import ActionVocab
-from cosmicstar.worldmodel.vocab import Vocab
+from cosmicstar.worldmodel.core import Tables, Vocab, paths, runtime
+from cosmicstar.worldmodel.data import ActionVocab, epochs, game_store as physics_data, splits as tp
+from cosmicstar.worldmodel.l1_tactical import energy, frames as energy_data
+
+runtime.configure_torch_env()
 
 
 def _trim_batch(b):
     """Keeps only the keys and slot slices read by energy_data.Frames, cutting IPC and
     host-to-device transfer size by ~40%."""
-    out = {k: b[k] for k in energy_data.BATCH_KEYS if k in b}
+    out = {k: b[k] for k in physics_data.BATCH_KEYS if k in b}
     if "slot_reg" in out:
         out["slot_reg"] = out["slot_reg"][..., :1, :].contiguous()
     if "slot_abil" in out:
@@ -58,7 +53,7 @@ def _reader_worker(work_q, out_q, bases, vocab_path, map_ids, L, threads, keep):
     """Independent OS process that pulls (idx, wins) specifications from work_q, reads
     and collates windows without GIL contention across workers, and pushes trimmed
     batches to out_q."""
-    vocab = Vocab(json.load(open(vocab_path)))
+    vocab = Vocab.load(vocab_path)
     games = tp.Games(bases, vocab, ActionVocab(), keep=keep, map_ids=map_ids)
     pool = ThreadPoolExecutor(threads)
     n = 0
@@ -258,7 +253,7 @@ def evaluate(model, enc, games, windows, seqs, L, workers, pairs):
                 )
                 b_cpu = _trim_batch(physics_data.collate(ws, games.vocab))
                 del ws
-                b = energy_data.to_device(b_cpu, "cuda")
+                b = physics_data.to_device(b_cpu, "cuda")
                 del b_cpu
                 lg = run_batch(model, enc, b, pairs, backward=False)
                 for k, v in lg.items():
@@ -269,7 +264,7 @@ def evaluate(model, enc, games, windows, seqs, L, workers, pairs):
         return report({k: v / n for k, v in logs.items()})
     with torch.enable_grad():
         for b_cpu in batches:
-            b = energy_data.to_device(b_cpu, "cuda")
+            b = physics_data.to_device(b_cpu, "cuda")
             lg = run_batch(model, enc, b, pairs, backward=False)
             for k, v in lg.items():
                 logs[k] = logs[k] + v if k in logs else v
@@ -282,7 +277,7 @@ def evaluate(model, enc, games, windows, seqs, L, workers, pairs):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", default="data/games_v3")
-    ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
+    ap.add_argument("--vocab", default=paths.VOCAB_PATH)
     ap.add_argument("--patch", default="5.0.14")
     ap.add_argument("--base_build", type=int, default=94137, help="the patch's ruleset")
     ap.add_argument("--split", default="data/games/splits/default.json")
@@ -341,7 +336,7 @@ def main():
     torch.cuda.set_per_process_memory_fraction(
         min(1.0, args.gpu_gb * 2**30 / torch.cuda.get_device_properties(0).total_memory)
     )
-    vocab, avocab = Vocab(json.load(open(args.vocab))), ActionVocab()
+    vocab, avocab = Vocab.load(args.vocab), ActionVocab()
     split = json.load(open(args.split))
     train_ids = set(split["train"]) - set(tp.EXCLUDED)
     bases = tp.of_patch(physics_data.base_paths(args.games, train_ids), args.patch)
@@ -353,7 +348,7 @@ def main():
         f"{len(ids)} training games of patch {args.patch} on {len(map_ids)} maps",
         flush=True,
     )
-    tables = energy_data.Tables(args.base_build, rulesets=args.rules_tables)
+    tables = Tables(args.base_build, rulesets=args.rules_tables)
     print(f"ruleset {tables.ruleset}", flush=True)
     model = energy.EnergyModel(args.d, args.u_dim, args.hidden).cuda()
     enc = energy_data.Frames(
@@ -520,7 +515,7 @@ def main():
         rows = max(b["mask"].shape[2] for b in passes)
         for b, size in zip(passes, sizes):
             w = size / sum(sizes)
-            b = energy_data.to_device(b, "cuda")
+            b = physics_data.to_device(b, "cuda")
             lg = run_batch(model, enc, b, args.pairs, weight=w)
             for k, v in lg.items():
                 logs[k] = logs[k] + v * w if k in logs else v * w

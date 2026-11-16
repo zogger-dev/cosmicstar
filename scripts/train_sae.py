@@ -15,21 +15,17 @@ import glob
 import json
 import os
 import re
-import sys
 import time
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import train_physics as tp
 
-from cosmicstar.worldmodel import energy as E, energy_data as ED, physics_data as PD
-from cosmicstar.worldmodel.action_tokens import ActionVocab
-from cosmicstar.worldmodel.sae import MultiLayerSAEStack
-from cosmicstar.worldmodel.vocab import Vocab
+from cosmicstar.worldmodel.core import Tables, Vocab, paths, runtime
+from cosmicstar.worldmodel.data import ActionVocab, game_store as PD, splits as tp
+from cosmicstar.worldmodel.l1_tactical import MultiLayerSAEStack, energy as E, frames as ED
+
+runtime.configure_torch_env()
 
 
 def _find_latest_l1_ckpt() -> str:
@@ -119,7 +115,7 @@ def collect_layer_activations(
         try:
             w = games.read(gid, t0, n_frames + 2, swap)
             b_cpu = {k: v for k, v in PD.collate([w], vocab).items() if k in ED.BATCH_KEYS}
-            b = ED.to_device(b_cpu, device)
+            b = PD.to_device(b_cpu, device)
         except Exception:
             continue
 
@@ -338,7 +334,7 @@ def main():
     ap.add_argument("--ckpt", default="")
     ap.add_argument("--out", default="data/worldmodel/sae/sae_7layer.pt")
     ap.add_argument("--games", default="data/games_v3")
-    ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
+    ap.add_argument("--vocab", default=paths.VOCAB_PATH)
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--rules", default="data/worldmodel/rulesets.json")
     ap.add_argument("--base_build", type=int, default=94137)
@@ -356,9 +352,9 @@ def main():
     ckpt_path = args.ckpt or _find_latest_l1_ckpt()
     print(f"[SAE] Using encoder checkpoint: {ckpt_path or '(fresh init)'}", flush=True)
 
-    vocab = Vocab(json.load(open(args.vocab)))
+    vocab = Vocab.load(args.vocab)
     avocab = ActionVocab()
-    tables = ED.Tables(args.base_build, rulesets=args.rules)
+    tables = Tables(args.base_build, rulesets=args.rules)
     enc = ED.Frames(vocab, tables, 256, 32, attn_layers=6, dh=64, ff=768).cuda().eval()
 
     if ckpt_path and os.path.exists(ckpt_path):

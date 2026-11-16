@@ -12,19 +12,20 @@ dependencies = [
     "absl-py",
     "mpyq",
     "numpy",
+    "pillow",
     "pyarrow",
     "pysc2",
     "requests",
     "s2protocol",
     "sc2reader",
-    "tensorboard",
+    "scipy",
     "torch",
     "tqdm",
     "zstandard",
 ]
 
 [project.optional-dependencies]
-analysis = ["matplotlib"]
+analysis = ["matplotlib", "tensorboard"]
 dev = ["black"]
 
 [tool.setuptools.packages.find]

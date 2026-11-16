@@ -1156,5 +1156,14 @@ def main(argv=None):
     )
 
 
+def build_key(install, build):
+    """BuildConfig hash of a base build in an install's `.build.info` (`None` if absent)."""
+    _, rows = read_build_info(install)
+    for r in rows:
+        if r.get("Version", "").endswith(f".{build}"):
+            return r["Build Key"]
+    return None
+
+
 if __name__ == "__main__":
     main()

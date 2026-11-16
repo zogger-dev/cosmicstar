@@ -2,7 +2,7 @@
 """Launches the interactive Replay & Neural World Model Inspector server.
 
 Usage:
-    .venv/bin/python scripts/inspect_worldmodel.py --port 8765
+    PYTHONPATH=src .venv/bin/python scripts/inspect_worldmodel.py --port 8765
 """
 
 from __future__ import annotations
@@ -11,48 +11,34 @@ import argparse
 import gzip
 import json
 import os
-import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
-
-from cosmicstar.worldmodel.inspector import WorldModelInspector
+from cosmicstar.worldmodel.core import paths, runtime
+from cosmicstar.worldmodel.inspector import WorldModelInspector, extract_icons
 
 INSPECTOR: WorldModelInspector | None = None
-UI_HTML_PATH = os.path.abspath(
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "src",
-        "cosmicstar",
-        "worldmodel",
-        "inspector_ui",
-        "index.html",
-    )
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+UI_DIR = os.path.join(
+    REPO_ROOT, "src", "cosmicstar", "worldmodel", "inspector", "ui"
 )
 ASSET_DIRS = [
-    os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "data", "worldmodel", "assets")
-    ),
-    os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "src",
-            "cosmicstar",
-            "worldmodel",
-            "inspector_ui",
-            "assets",
-        )
-    ),
+    os.path.join(REPO_ROOT, paths.ASSETS_DIR),
+    os.path.join(UI_DIR, "assets"),
 ]
+
+MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
 
 
 class InspectorHTTPHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args):
-        # Keep console logs clean
         pass
 
     def _send_json(self, data: dict, status: int = 200):
@@ -73,12 +59,17 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
 
-    def _send_html(self, html_bytes: bytes):
+    def _send_file(self, full_path: str, cache: str = "no-cache"):
+        ext = os.path.splitext(full_path)[1].lower()
+        content_type = MIME_TYPES.get(ext, "application/octet-stream")
+        with open(full_path, "rb") as f:
+            data = f.read()
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(html_bytes)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", cache)
         self.end_headers()
-        self.wfile.write(html_bytes)
+        self.wfile.write(data)
 
     def do_GET(self):
         assert INSPECTOR is not None
@@ -87,8 +78,19 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
 
         if path in ("/", "/index.html"):
-            with open(UI_HTML_PATH, "rb") as f:
-                self._send_html(f.read())
+            self._send_file(os.path.join(UI_DIR, "index.html"))
+            return
+
+        if path.startswith("/ui/"):
+            rel_path = path[len("/ui/") :].lstrip("/")
+            if ".." in rel_path:
+                self._send_json({"error": "Forbidden"}, status=403)
+                return
+            full_path = os.path.join(UI_DIR, rel_path)
+            if os.path.isfile(full_path):
+                self._send_file(full_path)
+                return
+            self._send_json({"error": f"UI file not found: {path}"}, status=404)
             return
 
         if path.startswith("/assets/"):
@@ -99,26 +101,7 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
             for base_dir in ASSET_DIRS:
                 full_path = os.path.join(base_dir, rel_path)
                 if os.path.isfile(full_path):
-                    content_type = "application/octet-stream"
-                    if full_path.endswith(".png"):
-                        content_type = "image/png"
-                    elif full_path.endswith(".json"):
-                        content_type = "application/json; charset=utf-8"
-                    elif full_path.endswith(".svg"):
-                        content_type = "image/svg+xml"
-                    elif full_path.endswith(".css"):
-                        content_type = "text/css; charset=utf-8"
-                    elif full_path.endswith(".js"):
-                        content_type = "application/javascript; charset=utf-8"
-
-                    with open(full_path, "rb") as f:
-                        data = f.read()
-                    self.send_response(200)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Cache-Control", "public, max-age=86400")
-                    self.end_headers()
-                    self.wfile.write(data)
+                    self._send_file(full_path, cache="public, max-age=86400")
                     return
             self._send_json({"error": f"Asset not found: {path}"}, status=404)
             return
@@ -129,13 +112,11 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
                     "games": INSPECTOR.catalog,
                     "checkpoints": INSPECTOR.list_checkpoints(),
                     "active_l1_ckpt": INSPECTOR.active_l1_ckpt,
-                    "active_l2_ckpt": INSPECTOR.active_l2_ckpt,
                     "active_observer_ckpt": INSPECTOR.active_observer_ckpt,
                 }
             )
             return
 
-        # /api/game/{gid}/observer/{loop_t}
         if path.startswith("/api/game/") and "/observer/" in path:
             parts = path.strip("/").split("/")
             gid = parts[2]
@@ -154,7 +135,6 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # /api/game/{gid}/timeline
         if path.startswith("/api/game/") and path.endswith("/timeline"):
             parts = path.strip("/").split("/")
             gid = parts[2]
@@ -162,7 +142,6 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(INSPECTOR.get_timeline(gid, mode=mode))
             return
 
-        # /api/game/{gid}/frame/{loop_t}
         if path.startswith("/api/game/") and "/frame/" in path:
             parts = path.strip("/").split("/")
             gid = parts[2]
@@ -173,7 +152,6 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # /api/token/{tok_idx}
         if path.startswith("/api/token/"):
             parts = path.strip("/").split("/")
             tok_idx = int(parts[2])
@@ -184,7 +162,6 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # /api/gram256?owner=...&mat_type=...&i=...&j=...
         if path == "/api/gram256":
             owner = qs.get("owner", ["p1"])[0]
             mat_type = qs.get("mat_type", ["G_cc_256"])[0]
@@ -210,20 +187,16 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/checkpoint":
             if "l1_ckpt" in body and os.path.exists(body["l1_ckpt"]):
                 INSPECTOR.load_l1_checkpoint(body["l1_ckpt"])
-            if "l2_ckpt" in body and os.path.exists(body["l2_ckpt"]):
-                INSPECTOR.load_l2_checkpoint(body["l2_ckpt"])
             if "observer_ckpt" in body and os.path.exists(body["observer_ckpt"]):
                 INSPECTOR.load_observer_checkpoint(body["observer_ckpt"])
             self._send_json(
                 {
                     "active_l1_ckpt": INSPECTOR.active_l1_ckpt,
-                    "active_l2_ckpt": INSPECTOR.active_l2_ckpt,
                     "active_observer_ckpt": INSPECTOR.active_observer_ckpt,
                 }
             )
             return
 
-        # POST /api/game/{gid}/frame/{loop_t} (with counterfactual JSON body)
         if path.startswith("/api/game/") and "/frame/" in path:
             parts = path.strip("/").split("/")
             gid = parts[2]
@@ -241,21 +214,12 @@ class InspectorHTTPHandler(BaseHTTPRequestHandler):
 
 def main():
     global INSPECTOR
+    runtime.configure_torch_env()
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument(
-        "--l1_ckpt",
-        default="data/worldmodel/runs/energy_r16_zerogram/model_step44285.pt",
-    )
-    ap.add_argument(
-        "--l2_ckpt",
-        default="data/worldmodel/runs/energy_l2_535g_cont_5k/model_l2_step5000.pt",
-    )
-    ap.add_argument(
-        "--observer_ckpt",
-        default="data/worldmodel/runs/observer_v2/model_best.pt",
-    )
+    ap.add_argument("--l1_ckpt", default=paths.DEFAULT_L1_CKPT)
+    ap.add_argument("--observer_ckpt", default=paths.DEFAULT_OBSERVER_CKPT)
     args = ap.parse_args()
 
     print("Initializing CosmicStar WorldModelInspector on GPU...", flush=True)
@@ -263,15 +227,13 @@ def main():
     if not os.path.exists(manifest_path):
         try:
             print("Extracting StarCraft II game icons from local CASC storage...", flush=True)
-            from extract_icons import extract_icons
             extract_icons(out_dir=os.path.join(ASSET_DIRS[0], "icons"))
         except Exception as e:
             print(f"Warning: could not auto-extract SC2 game icons ({e}); falling back to SVGs.", flush=True)
 
     INSPECTOR = WorldModelInspector(
-        l1_ckpt=args.l1_ckpt, l2_ckpt=args.l2_ckpt, observer_ckpt=args.observer_ckpt
+        l1_ckpt=args.l1_ckpt, observer_ckpt=args.observer_ckpt
     )
-    # Warm up CUDA autograd kernels on first unseen game so first browser load is <140ms
     if INSPECTOR.catalog:
         gid0 = INSPECTOR.catalog[0]["gid"]
         INSPECTOR.inspect_frame(gid0, loop_t=2000, window_len=8)

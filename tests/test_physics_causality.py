@@ -9,20 +9,23 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from train_physics import EXCLUDED, Games  # noqa: E402
 
-from cosmicstar.worldmodel import physics, physics_data  # noqa: E402
-from cosmicstar.worldmodel.action_tokens import ActionVocab  # noqa: E402
-from cosmicstar.worldmodel.vocab import Vocab  # noqa: E402
+from cosmicstar.worldmodel import l0_physics as physics  # noqa: E402
+from cosmicstar.worldmodel.core import Vocab, paths  # noqa: E402
+from cosmicstar.worldmodel.data import (  # noqa: E402
+    ActionVocab,
+    EXCLUDED,
+    Games,
+    game_store as physics_data,
+)
 
 L = 16
 
 
 def load(tubelet=4):
     vocab, avocab = (
-        Vocab(json.load(open("data/worldmodel/frame_cache_seq/vocab.json"))),
+        Vocab.load(paths.VOCAB_PATH),
         ActionVocab(),
     )
     ids = {

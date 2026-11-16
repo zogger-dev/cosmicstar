@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CosmicStar — Replay &amp; Neural World Model Inspector</title>
+  <link rel="stylesheet" href="/ui/styles.css">
+</head>
+<body>
+<div class="app-shell">
+  <!-- TOP CONTROL BAR -->
+  <div class="topbar">
+    <div class="topbar-group">
+      <div class="brand"><span class="brand-dot"></span>CosmicStar WorldModel Inspector</div>
+      <select id="gameSelect" title="Select Replay (Unseen or Train)"></select>
+      <select id="l1CkptSelect" title="Layer 1 Checkpoint"></select>
+      <select id="l2ModeSelect" title="Layer 2 Summary Mode">
+        <option value="cont">L2: Continuous Prefix (cont_5k)</option>
+        <option value="burst">L2: Isolated 0.13s Burst (5k)</option>
+      </select>
+    </div>
+    <div class="topbar-group">
+      <button id="btnStepBack5s" title="-5 seconds (-112 loops)">-5s</button>
+      <button id="btnStepBack1s" title="-1 second (-22 loops)">-1s</button>
+      <button id="btnStepBack1" title="-1 frame">-1f</button>
+      <button id="btnPlayPause" title="Play / Pause scrub">▶ Play</button>
+      <button id="btnStepFwd1" title="+1 frame">+1f</button>
+      <button id="btnStepFwd1s" title="+1 second (+22 loops)">+1s</button>
+      <button id="btnStepFwd5s" title="+5 seconds (+112 loops)">+5s</button>
+      <span style="color:var(--text-secondary);font-size:11.5px;">Loop:</span>
+      <input type="number" id="loopInput" style="width:70px;" value="2000" step="14" />
+      <span style="color:var(--text-secondary);font-size:11.5px;">Win:</span>
+      <select id="winLenSelect" title="Causal temporal attention window length (frames)">
+        <option value="4">4f</option>
+        <option value="8" selected>8f</option>
+        <option value="16">16f</option>
+      </select>
+      <span id="latencyBadge" class="badge">Ready</span>
+    </div>
+  </div>
+
+  <!-- MAIN 3-COLUMN WORKBENCH (LEFT: SAE & CONTRIBUTING UNITS | CENTER: HERO MAP & TIMELINE | RIGHT: DEEP TABS) -->
+  <div class="main-grid">
+    <!-- ================================================================== -->
+    <!-- LEFT COLUMN: Active Selection Bar + SAE Features + Contributing Units -->
+    <!-- ================================================================== -->
+    <div class="col-left">
+      <!-- Active Selection & Quick Deselect Strip -->
+      <div class="selection-bar">
+        <div style="display:flex; gap:4px; align-items:center; flex-wrap:wrap; min-width:0; flex:1;">
+          <span id="selChipUnit" class="sel-chip" title="Click to deselect active unit">Unit: None</span>
+          <span id="selChipOverlay" class="sel-chip" title="Click to reset field/SAE overlay to All 16D">Field: All 16D</span>
+          <span id="selChipMode" class="sel-chip" style="display:none;" title="Click to clear active Gram cell / SVD mode">Mode: None</span>
+        </div>
+        <button id="btnResetAllSelections" style="padding:2px 6px; font-size:10.5px;" title="Deselect unit, SAE feature, soloed field layer, and Gram mode (Shortcut: Esc)">✕ Clear All (Esc)</button>
+      </div>
+
+      <!-- PANEL A: Active Layer-6 Top-K SAE Features on Current Frame -->
+      <div class="panel" style="height:41%; min-height:190px;">
+        <div class="panel-header">
+          <div style="display:flex; align-items:center; gap:5px; min-width:0;">
+            <span class="panel-title">SAE Features on Map (L6)</span>
+            <span id="saeFrameBadge" class="badge" style="font-size:10px;">—</span>
+          </div>
+          <div style="display:flex; gap:4px; align-items:center;">
+            <select id="saeFeatFilter" style="font-size:10.5px; padding:1px 4px;" title="Filter SAE features list">
+              <option value="players" selected>Players (P1+P2)</option>
+              <option value="all">All Features</option>
+              <option value="resources">Resources Only</option>
+            </select>
+            <button id="btnClearSaeLeft" style="padding:1px 6px; font-size:10.5px; display:none;" class="danger" title="Deselect active SAE feature">✕ Deselect SAE</button>
+          </div>
+        </div>
+        <div style="font-size:10.5px; color:var(--text-secondary); display:flex; justify-content:space-between; align-items:center;">
+          <span>Click any feature to project its field &amp; see contributing units below (click again to deselect)</span>
+        </div>
+        <div class="scroll-box" style="flex:1; max-height:none;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Feat</th>
+                <th>Live Map Units (Current Frame)</th>
+                <th>Units</th>
+                <th>P1+P2 Wt</th>
+              </tr>
+            </thead>
+            <tbody id="saeFeatureTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- PANEL B: Contributing Units Inspector (Synced to Active SAE Feature / Field Layer / Map) -->
+      <div class="panel" style="flex:1; min-height:220px;">
+        <div class="panel-header">
+          <div style="display:flex; align-items:center; gap:5px; min-width:0;">
+            <span id="contribUnitsTitle" class="panel-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Contributing Units</span>
+            <span id="contribCountBadge" class="badge" style="font-size:10px;">0u</span>
+          </div>
+          <div style="display:flex; gap:4px; align-items:center;">
+            <select id="contribOwnerFilter" style="font-size:10.5px; padding:1px 4px;" title="Filter contributing units by owner">
+              <option value="players" selected>Players (P1+P2)</option>
+              <option value="all">All Units</option>
+              <option value="1">P1 Only</option>
+              <option value="2">P2 Only</option>
+              <option value="0">Neutrals / Minerals Only</option>
+            </select>
+            <select id="contribSortMode" style="font-size:10.5px; padding:1px 4px;" title="Sort contributing units">
+              <option value="weight" selected>Sort: Field Wt m·f</option>
+              <option value="act">Sort: Activation f_u</option>
+              <option value="marginal">Sort: |dA_own| (Owner Adv)</option>
+              <option value="marginal_p1">Sort: |dA₁| (P1 Adv)</option>
+              <option value="mass">Sort: Mass m_u</option>
+            </select>
+            <button id="btnDeselectUnitLeft" style="padding:1px 6px; font-size:10.5px; display:none;" title="Deselect currently selected unit">✕ Unit</button>
+          </div>
+        </div>
+        <div id="contribTypeSummary" style="font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); background:rgba(15,23,42,0.55); border:1px solid rgba(51,65,85,0.5); border-radius:4px; padding:3px 6px; line-height:1.35;">
+          Select an SAE feature above or a field layer z0..z15 on the map to inspect the units driving that activation.
+        </div>
+        <div class="scroll-box" style="flex:1; max-height:none;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Unit</th>
+                <th>Own</th>
+                <th id="contribColAct">Act f_u</th>
+                <th id="contribColWt">Field m·f</th>
+                <th id="contribColAdv" title="Marginal Advantage: how much unit existence increases its owner's advantage (dA_own/dw_i). Positive = helps owner; Negative = deficit/liability.">d(Adv)</th>
+                <th>Order</th>
+              </tr>
+            </thead>
+            <tbody id="contribUnitsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <!-- CENTER COLUMN: KPI Strip + Hero 2D Battlefield Map + Timeline      -->
+    <!-- ================================================================== -->
+    <div class="col-center">
+      <!-- KPI Strip -->
+      <div class="kpi-strip">
+        <div class="kpi-card">
+          <div class="kpi-label">P1 Energy (H₁)</div>
+          <div id="kpiH1" class="kpi-val" style="color:var(--p1);">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">P2 Energy (H₂)</div>
+          <div id="kpiH2" class="kpi-val" style="color:var(--p2);">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Advantage (A₁)</div>
+          <div id="kpiA1" class="kpi-val">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Territorial Tug (2·V_tug)</div>
+          <div id="kpiTug" class="kpi-val" style="color:#c084fc;">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Dissipation (D₁ / D₂)</div>
+          <div id="kpiDiss" class="kpi-val" style="color:var(--diss);">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Goal Cosine (P1 / P2)</div>
+          <div id="kpiGoalCos" class="kpi-val" style="color:var(--ctrl);">—</div>
+        </div>
+      </div>
+
+      <!-- PANEL 1: Hero 2D Map & Battlefield Canvas -->
+      <div class="panel" style="flex:1; min-height:0;">
+        <div class="panel-header">
+          <span class="panel-title">1. 2D Battlefield Map &amp; Potential Field Overlay</span>
+          <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+            <button id="btnDeselectUnitMap" style="padding:2px 6px; font-size:10.5px; display:none;" title="Deselect active unit (or click empty space on map)">✕ Deselect Unit</button>
+            <button id="btnClearOverlayMap" style="padding:2px 6px; font-size:10.5px; display:none;" title="Reset soloed SAE / Field Layer back to All 16D">✕ Reset Layer/SAE</button>
+            <select id="unitColorMode" title="Unit Color &amp; Halo Attribution">
+              <option value="owner">Units: Owner + Marginal Halo</option>
+              <option value="field_dim">Units: Active Field Layer z_k / SAE Feature</option>
+              <option value="marginal">Units: Marginal d(-A₁)/dw_i</option>
+              <option value="mass">Units: Learned Mass m_u = ||z_u||₂</option>
+              <option value="gram_mode">Units: Active Field / SVD Mode</option>
+              <option value="pca_rgb">Units: Layer l 3D PCA → RGB</option>
+              <option value="cos_sim">Units: Cosine Sim to Selected</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Potential Field Overlay & Layer (Dimension / SAE) Inspector Bar -->
+        <div class="field-layer-bar">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:5px; flex-wrap:wrap;">
+            <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+              <span style="font-size:10.5px; font-weight:700; color:#a5b4fc; text-transform:uppercase;">Field:</span>
+              <select id="mapBgMode" title="Select which 2D Spatial Field to overlay on top of the terrain" style="font-size:11px; padding:2px 5px;">
+                <option value="diff" selected>P1 − P2 Field: F₁(x,y) − F₂(x,y)</option>
+                <option value="p1">Player 1 Field: F₁(x,y)</option>
+                <option value="p2">Player 2 Field: F₂(x,y)</option>
+                <option value="contest">Contest Overlap: F₁(x,y) · F₂(x,y)</option>
+                <option value="env">Neutral / Resource Field: F_env(x,y)</option>
+                <option value="kinetic">Kinetic Momentum Field: Π(x,y)</option>
+                <option value="terrain_v">Terrain CNN Field: V_loc(x,y)</option>
+                <option value="threat_net">Intrinsic Leverage: P1 vs P2 ||∇_z A||</option>
+                <option value="threat_p1_risk">P1 Squad Leverage: ||∇_z A|| · g_m</option>
+                <option value="threat_p2_risk">P2 Squad Leverage: ||∇_z A|| · g_m</option>
+                <option value="terrain">Off (Terrain + Fog + Creep Only)</option>
+              </select>
+              <select id="fieldCombineMode" title="How to combine multiple selected dimensions" style="font-size:11px; padding:2px 5px;">
+                <option value="l2" selected>Multi: L2 ||F||</option>
+                <option value="signed">Multi: Sum ΣF</option>
+              </select>
+              <select id="saeMapSelect" title="Overlay a monosemantic Top-K Sparse Autoencoder (SAE) feature onto the 2D map instead of raw z0..z15 channels" style="font-size:11px; padding:2px 5px; max-width:215px; border-color:#818cf8; color:#e0e7ff;">
+                <option value="-1">SAE Overlay: Off (Use z0..z15)</option>
+              </select>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center; font-size:11px; color:var(--text-secondary);">
+              <label title="Blend opacity of the Potential Field overlay over the map terrain" style="display:flex;align-items:center;gap:3px;">
+                <span>Alpha</span>
+                <input type="range" id="fieldAlphaSlider" min="15" max="95" value="72" style="width:50px; accent-color:#6366f1; cursor:pointer;" />
+              </label>
+              <label title="Draw iso-potential contour lines on the 2D field overlay" style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                <input type="checkbox" id="chkFieldContours" checked />Contours
+              </label>
+              <label title="Draw 2D momentum flux vector arrows (quivers) showing direction of momentum flow" style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                <input type="checkbox" id="chkMomentumQuivers" checked />Quivers
+              </label>
+            </div>
+          </div>
+
+          <div class="field-dim-pills" id="dimPillsWrap">
+            <span style="font-size:10.5px; color:var(--text-secondary); margin-right:1px;">Layers:</span>
+            <button class="dim-pill" id="dimPillOff" data-dim="off" title="Turn Potential Field Overlay Off (Terrain only)">✕ Off</button>
+            <button class="dim-pill active" id="dimPillAll" data-dim="all" title="Inspect all non-negative field dimensions combined">
+              <span id="dimPillAllLabel">All 16D</span>
+              <div class="dim-pill-bar"><div class="dim-pill-fill" style="width:100%;"></div></div>
+            </button>
+            <button class="dim-pill" data-dim="0" title="Click to isolate field layer z0 (click again to deselect)">z0<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill0"></div></div></button>
+            <button class="dim-pill" data-dim="1" title="Click to isolate field layer z1 (click again to deselect)">z1<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill1"></div></div></button>
+            <button class="dim-pill" data-dim="2" title="Click to isolate field layer z2 (click again to deselect)">z2<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill2"></div></div></button>
+            <button class="dim-pill" data-dim="3" title="Click to isolate field layer z3 (click again to deselect)">z3<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill3"></div></div></button>
+            <button class="dim-pill" data-dim="4" title="Click to isolate field layer z4 (click again to deselect)">z4<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill4"></div></div></button>
+            <button class="dim-pill" data-dim="5" title="Click to isolate field layer z5 (click again to deselect)">z5<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill5"></div></div></button>
+            <button class="dim-pill" data-dim="6" title="Click to isolate field layer z6 (click again to deselect)">z6<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill6"></div></div></button>
+            <button class="dim-pill" data-dim="7" title="Click to isolate field layer z7 (click again to deselect)">z7<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill7"></div></div></button>
+            <button class="dim-pill" data-dim="8" title="Click to isolate field layer z8 (click again to deselect)">z8<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill8"></div></div></button>
+            <button class="dim-pill" data-dim="9" title="Click to isolate field layer z9 (click again to deselect)">z9<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill9"></div></div></button>
+            <button class="dim-pill" data-dim="10" title="Click to isolate field layer z10 (click again to deselect)">z10<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill10"></div></div></button>
+            <button class="dim-pill" data-dim="11" title="Click to isolate field layer z11 (click again to deselect)">z11<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill11"></div></div></button>
+            <button class="dim-pill" data-dim="12" title="Click to isolate field layer z12 (click again to deselect)">z12<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill12"></div></div></button>
+            <button class="dim-pill" data-dim="13" title="Click to isolate field layer z13 (click again to deselect)">z13<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill13"></div></div></button>
+            <button class="dim-pill" data-dim="14" title="Click to isolate field layer z14 (click again to deselect)">z14<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill14"></div></div></button>
+            <button class="dim-pill" data-dim="15" title="Click to isolate field layer z15 (click again to deselect)">z15<div class="dim-pill-bar"><div class="dim-pill-fill" id="dimFill15"></div></div></button>
+            <label title="When checked, clicking z0..z15 toggles multiple dimensions on/off instead of soloing a single dimension" style="display:flex;align-items:center;gap:3px;font-size:10.5px;color:#c084fc;margin-left:auto;cursor:pointer;user-select:none;">
+              <input type="checkbox" id="chkMultiDim" />+Multi
+            </label>
+          </div>
+
+          <div id="fieldLayerSummary" style="font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; border-top:1px solid rgba(51,65,85,0.45); padding-top:4px;">
+            <span>Click any layer <b>z0..z15</b> or select an <b>SAE Feature</b> on the left to inspect its 2D potential field &amp; unit loadings</span>
+          </div>
+        </div>
+
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="chkAttnRays" checked />2D-RoPE Attn Rays</label>
+          <label><input type="checkbox" id="chkForceAdv" checked />Force -∇A₁</label>
+          <label><input type="checkbox" id="chkForceKin" />Force ∇T</label>
+          <label title="Show or hide neutral mineral fields and geysers"><input type="checkbox" id="chkShowNeutrals" checked />Minerals</label>
+          <label title="Subtly dim neutral minerals so player army &amp; bases pop out"><input type="checkbox" id="chkDimNeutrals" checked />Dim Minerals</label>
+          <label><input type="checkbox" id="chkS2MA" checked />.s2ma AirBlockers/Shrines</label>
+          <label title="Overlay Perceiver M=64 Squad Token centroids, spread ellipses, visibility, and intrinsic learned leverage ||∇_z A||" style="color:#a5b4fc;font-weight:600;"><input type="checkbox" id="chkSquadTokens" />Squads (M=64)</label>
+          <label style="display:none;"><input type="checkbox" id="chkAnchors" />Anchors</label>
+          <label style="color:#c084fc;font-weight:600;"><input type="checkbox" id="chkDragMove" />Drag Unit (What-If)</label>
+          <button id="btnResetView" style="padding:1px 6px;font-size:11px;margin-left:auto;">Reset Zoom</button>
+        </div>
+
+        <div class="map-wrap">
+          <canvas id="mapCanvas"></canvas>
+          <div id="mapOverlayTop" class="map-overlay-pill">Loading...</div>
+          <div id="mapOverlayBottom" class="map-legend-pill">
+            <span id="mapCursorInfo">Click unit to select • Click empty space or selected unit to deselect</span>
+            <span id="mapModeLegend" style="font-family:var(--font-mono);color:var(--text-secondary);">P1: Red | P2: Blue | Neutral: Amber</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- PANEL 2: Multi-Scale Timeline Scrubber -->
+      <div class="panel" style="height:185px;">
+        <div class="panel-header">
+          <span class="panel-title">2. Multi-Scale Hamiltonian Timeline (L1 0.6s + L2 5.0s)</span>
+          <div style="display:flex; gap:10px; font-size:11px; color:var(--text-secondary);">
+            <span><b style="color:var(--p1);">━</b> A₁(P1 Lead)</span>
+            <span><b style="color:var(--p2);">━</b> A₁(P2 Lead)</span>
+            <span><b style="color:#a78bfa;">━</b> A₁(L2)</span>
+            <span><b style="color:#10b981;">━</b> A₁(Total)</span>
+            <span>Click chart to seek</span>
+          </div>
+        </div>
+        <canvas id="timelineAdvCanvas" height="76" style="width:100%;display:block;cursor:pointer;"></canvas>
+        <canvas id="timelineHpCanvas" height="54" style="width:100%;display:block;cursor:pointer;"></canvas>
+      </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <!-- RIGHT COLUMN: Observer Match HUD, Production, Forces & SAE Group   -->
+    <!-- ================================================================== -->
+    <div class="col-right" style="overflow-y:auto; max-height:calc(100vh - 54px);">
+      <!-- 1. ESL MATCH LEADERBOARD HUD (Image 2 style) -->
+      <div class="esl-hud">
+        <!-- Player 1 Row (Red) -->
+        <div class="esl-player-row p1" id="eslRowP1">
+          <div class="esl-name-box">
+            <span class="esl-race-crest" id="hudP1Race">T</span>
+            <span class="esl-name" id="hudP1Name">Player 1</span>
+          </div>
+          <div class="esl-col-stat" title="Supply: Food Used / Cap">
+            <span class="esl-val-lg" id="hudP1Supply" style="color:#ffffff;">0/0</span>
+          </div>
+          <div class="esl-col-stat" title="Worker Count (SCVs/Drones/Probes)">
+            <span class="esl-val-lg" id="hudP1Workers" style="color:#fde047;">0</span>
+          </div>
+          <div class="esl-col-stat" title="Army Supply">
+            <span class="esl-val-lg" id="hudP1Army" style="color:#fdba74;">0</span>
+          </div>
+          <div class="esl-col-stat" title="Minerals Bank and Collection Rate (+min/min)">
+            <span class="esl-val-lg" id="hudP1Minerals" style="color:#38bdf8;">0</span>
+            <span class="esl-val-rate" id="hudP1MinRate" style="color:#7dd3fc;">+0</span>
+          </div>
+          <div class="esl-col-stat" title="Vespene Gas Bank and Collection Rate (+gas/min)">
+            <span class="esl-val-lg" id="hudP1Vespene" style="color:#4ade80;">0</span>
+            <span class="esl-val-rate" id="hudP1VespRate" style="color:#86efac;">+0</span>
+          </div>
+          <div class="esl-col-stat" title="Total Resources Lost (Minerals + Gas)">
+            <span class="esl-val-lg" id="hudP1Lost" style="color:#f87171;">0</span>
+          </div>
+        </div>
+
+        <!-- Center Divider with Category Icons (Image 2 style) -->
+        <div class="esl-divider-row">
+          <div class="esl-name-box" style="font-weight:700; color:#94a3b8; font-size:9.5px; padding-left:2px;">
+            <span>PLAYER</span>
+          </div>
+          <div class="esl-col-stat" style="color:#cbd5e1;" title="Supply (Used / Cap)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </div>
+          <div class="esl-col-stat" style="color:#fde047;" title="Workers">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          </div>
+          <div class="esl-col-stat" style="color:#fdba74;" title="Army">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="14.5 17.5 3 6 3 3 6 3 17.5 14.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>
+          </div>
+          <div class="esl-col-stat" style="color:#38bdf8;" title="Minerals">
+            <img class="hud-divider-icon" src="/assets/icons/icon-mineral-nobg.png" alt="Minerals" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="6 3 18 3 22 9 12 22 2 9"/></svg>
+          </div>
+          <div class="esl-col-stat" style="color:#4ade80;" title="Vespene Gas">
+            <img class="hud-divider-icon" src="/assets/icons/icon-gas-terran-nobg.png" alt="Vespene Gas" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+            <svg style="display:none;" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+          </div>
+          <div class="esl-col-stat" style="color:#f87171;" title="Resources Lost">
+            <span style="font-weight:700; font-size:9.5px; letter-spacing:0.02em;">LOST</span>
+          </div>
+        </div>
+
+        <!-- Player 2 Row (Blue) -->
+        <div class="esl-player-row p2" id="eslRowP2">
+          <div class="esl-name-box">
+            <span class="esl-race-crest" id="hudP2Race">Z</span>
+            <span class="esl-name" id="hudP2Name">Player 2</span>
+          </div>
+          <div class="esl-col-stat" title="Supply: Food Used / Cap">
+            <span class="esl-val-lg" id="hudP2Supply" style="color:#ffffff;">0/0</span>
+          </div>
+          <div class="esl-col-stat" title="Worker Count">
+            <span class="esl-val-lg" id="hudP2Workers" style="color:#fde047;">0</span>
+          </div>
+          <div class="esl-col-stat" title="Army Supply">
+            <span class="esl-val-lg" id="hudP2Army" style="color:#fdba74;">0</span>
+          </div>
+          <div class="esl-col-stat" title="Minerals Bank and Collection Rate (+min/min)">
+            <span class="esl-val-lg" id="hudP2Minerals" style="color:#38bdf8;">0</span>
+            <span class="esl-val-rate" id="hudP2MinRate" style="color:#7dd3fc;">+0</span>
+          </div>
+          <div class="esl-col-stat" title="Vespene Gas Bank and Collection Rate (+gas/min)">
+            <span class="esl-val-lg" id="hudP2Vespene" style="color:#4ade80;">0</span>
+            <span class="esl-val-rate" id="hudP2VespRate" style="color:#86efac;">+0</span>
+          </div>
+          <div class="esl-col-stat" title="Total Resources Lost (Minerals + Gas)">
+            <span class="esl-val-lg" id="hudP2Lost" style="color:#f87171;">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 1b. MULTI-SCALE STOCHASTIC OBSERVER v2 (+120s Theory-of-Mind + L1 Chunk Flow) -->
+      <div class="obs-panel" id="observerPanel">
+        <div class="row-group-title">
+          <div style="display:flex; align-items:center; gap:5px;">
+            <span style="color:#a5b4fc;">STOCHASTIC OBSERVER v2 (+120s)</span>
+            <span id="obsStatusBadge" class="badge" style="font-size:9.5px; padding:0 4px;">32 branches</span>
+          </div>
+          <button id="btnToggleThreatMap" style="padding:1px 6px; font-size:10px; border-color:#6366f1; color:#e0e7ff;" title="Overlay intrinsic learned leverage ||∇_z A|| &amp; Perceiver M=64 Squad Tokens on the 2D battlefield map">
+            Leverage Map
+          </button>
+        </div>
+
+        <!-- Dual-Mode Counterplay Segmented Control -->
+        <div class="obs-mode-seg" id="obsModeSeg">
+          <button class="obs-mode-btn active" data-obs-mode="forecast" title="Roll out natural player policies π(u_p | h^(p), c_p) under fog-of-war">Forecast Play</button>
+          <button class="obs-mode-btn" data-obs-mode="counterplay_p1" title="Optimal P1 Counterplay: CFG ΔA>0 + manifold +∇_u A_1 polish">P1 Counterplay</button>
+          <button class="obs-mode-btn" data-obs-mode="counterplay_p2" title="Optimal P2 Counterplay: CFG ΔA<0 + manifold -∇_u A_1 polish">P2 Counterplay</button>
+        </div>
+
+        <!-- Omniscient Positional Evaluation & +120s Stronger Hand Bar -->
+        <div class="obs-stronger-wrap" title="Omniscient Positional Lead σ(A₀/1500) now and fraction of +120s futures where each player holds A(τ₀+120s) > 0">
+          <div class="obs-stronger-labels">
+            <span id="obsStrongP1" style="color:#f87171;">P1: 50%</span>
+            <span id="obsLeadCenterLbl" style="font-size:9px; color:var(--text-muted); font-weight:600;">Omni Lead Now • +120s</span>
+            <span id="obsStrongP2" style="color:#60a5fa;">50% :P2</span>
+          </div>
+          <div class="obs-stronger-track">
+            <div id="obsStrongBarP1" class="obs-stronger-p1" style="width:50%;"></div>
+            <div class="obs-stronger-p2"></div>
+            <div class="obs-stronger-mid"></div>
+          </div>
+        </div>
+
+        <!-- 4 KPI Cells: Purely Learned Omni A0, Drift E[dA], Initiative P(dA>0), Plan Misalignment -->
+        <div class="obs-kpi-grid">
+          <div class="obs-kpi-cell" title="Purely learned Omniscient Hamiltonian Advantage A(τ₀) = H₁ − H₂ (zero hardcoded cost formula)">
+            <span class="obs-kpi-lbl">Omni A(τ₀)</span>
+            <span id="obsKpiA0" class="obs-kpi-val">—</span>
+          </div>
+          <div class="obs-kpi-cell" title="Expected +120s Advantage Drift E[A(τ₀+120s) − A(τ₀)] across 32 Common-Random-Number futures">
+            <span class="obs-kpi-lbl">Drift E[ΔA]</span>
+            <span id="obsKpiDrift" class="obs-kpi-val">—</span>
+          </div>
+          <div class="obs-kpi-cell" title="Initiative: Probability that P1 / P2 improves net positional advantage over +120s">
+            <span class="obs-kpi-lbl">Initiative</span>
+            <span id="obsKpiInit" class="obs-kpi-val">—</span>
+          </div>
+          <div class="obs-kpi-cell" id="obsKpiVolCell" title="3-Stream Theory-of-Mind Plan Misalignment: policy velocity shift ||v(h_omni) - v(h_fog)|| when fog is lifted">
+            <span class="obs-kpi-lbl">Misalign P1|P2</span>
+            <span id="obsKpiVol" class="obs-kpi-val" style="color:#fbbf24; font-size:10.5px;">—</span>
+          </div>
+        </div>
+
+        <!-- Multi-Horizon Advantage Fan Chart (Now .. +120s) -->
+        <canvas id="observerFanCanvas" height="86" style="width:100%; display:block; border-radius:4px; background:rgba(9,13,22,0.7);"></canvas>
+
+        <!-- Theory-of-Mind Unscouted Threat Attribution -->
+        <div class="obs-tom-box" id="obsUnscoutedBox">
+          <div style="display:flex; justify-content:space-between; align-items:center; color:#cbd5e1; font-weight:700; font-size:9.5px;">
+            <span>THEORY-OF-MIND UNSCOUTED THREATS</span>
+            <span id="obsVolSummary" style="font-family:var(--font-mono); color:var(--text-secondary); font-weight:500;">σ=—</span>
+          </div>
+          <div id="obsUnscoutedList" style="display:flex; flex-direction:column; gap:2.5px;">
+            <span style="color:var(--text-muted); font-style:italic;">Awaiting observer evaluation…</span>
+          </div>
+        </div>
+
+        <!-- L1ChunkFlowDecoder +5.0s (16 x 0.3125s) Tactical Micro Scrubber -->
+        <div class="obs-micro-bar" title="Scrub or animate the 16-frame (0.3125s/step, +5.0s) L1ChunkFlowDecoder unit trajectories, orders, casualties, and spawns/warp-ins on the 2D map">
+          <button id="btnMicroPlay" style="padding:1px 6px; font-size:9.8px; font-weight:700; border-color:#818cf8; color:#e0e7ff; white-space:nowrap;">▶ +5s Micro</button>
+          <input type="range" id="microStepSlider" min="0" max="16" value="0" style="flex:1; accent-color:#818cf8; cursor:pointer;" />
+          <span id="microStepLabel" style="font-family:var(--font-mono); font-size:9.8px; color:#c7d2fe; min-width:74px; text-align:right;">Live τ₀</span>
+        </div>
+      </div>
+
+      <!-- 2. PRODUCTION QUEUE (Image 1 style) -->
+      <div class="row-group-panel">
+        <div class="row-group-title">
+          <span>PRODUCTION</span>
+          <span style="font-size:10px; font-weight:400; color:var(--text-secondary);">Actively Building (Slot 0) • Max Progress</span>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p1" title="Player 1 Active Production"></div>
+          <div class="cards-scroll-wrap" id="prodP1Cards">
+            <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No active production</span>
+          </div>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p2" title="Player 2 Active Production"></div>
+          <div class="cards-scroll-wrap" id="prodP2Cards">
+            <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No active production</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. UNITS & FORCES (Row Groups) -->
+      <div class="row-group-panel">
+        <div class="row-group-title">
+          <span>UNITS &amp; FORCES</span>
+          <span style="font-size:10px; font-weight:400; color:var(--text-secondary);">Click card to isolate units &amp; reverse-attribute SAE</span>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p1" title="Player 1 Forces (Workers &amp; Army)"></div>
+          <div class="cards-scroll-wrap" id="forcesP1Cards"></div>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p2" title="Player 2 Forces (Workers &amp; Army)"></div>
+          <div class="cards-scroll-wrap" id="forcesP2Cards"></div>
+        </div>
+      </div>
+
+      <!-- 4. STRUCTURES (Row Groups) -->
+      <div class="row-group-panel">
+        <div class="row-group-title">
+          <span>STRUCTURES</span>
+          <span style="font-size:10px; font-weight:400; color:var(--text-secondary);">Bases &amp; Production Tech</span>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p1" title="Player 1 Structures"></div>
+          <div class="cards-scroll-wrap" id="structsP1Cards"></div>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p2" title="Player 2 Structures"></div>
+          <div class="cards-scroll-wrap" id="structsP2Cards"></div>
+        </div>
+      </div>
+
+      <!-- 4. UPGRADES (Row Groups) -->
+      <div class="row-group-panel">
+        <div class="row-group-title">
+          <span>UPGRADES</span>
+          <span style="font-size:10px; font-weight:400; color:var(--text-secondary);">Researched Tech &amp; Weapon/Armor Levels</span>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p1" title="Player 1 Completed Upgrades"></div>
+          <div class="cards-scroll-wrap" id="upgradesP1Cards">
+            <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No upgrades completed</span>
+          </div>
+        </div>
+        <div class="unit-row-item">
+          <div class="unit-row-bar p2" title="Player 2 Completed Upgrades"></div>
+          <div class="cards-scroll-wrap" id="upgradesP2Cards">
+            <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No upgrades completed</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. UNITS LOST (Row Groups with Minerals / Vespene breakdown) -->
+      <div class="row-group-panel">
+        <div class="row-group-title">
+          <span>UNITS LOST</span>
+          <span style="font-size:10px; font-weight:400; color:var(--text-secondary);">Casualties &amp; Resource Loss</span>
+        </div>
+        <div class="unit-row-item" style="align-items:flex-start;">
+          <div class="unit-row-bar p1" title="Player 1 Losses" style="height:48px;"></div>
+          <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:0;">
+            <div style="font-size:10px; font-weight:600; color:#fca5a5; display:flex; align-items:center; gap:8px;" id="p1LostHeader">
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-mineral-nobg.png" style="width:11px; height:11px;" alt="Minerals"/> 0</span>
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-gas-terran-nobg.png" style="width:11px; height:11px;" alt="Gas"/> 0</span>
+              <span style="color:var(--text-muted); font-weight:400;">(Total: 0)</span>
+            </div>
+            <div class="cards-scroll-wrap" id="lostP1Cards">
+              <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No losses</span>
+            </div>
+          </div>
+        </div>
+        <div class="unit-row-item" style="align-items:flex-start;">
+          <div class="unit-row-bar p2" title="Player 2 Losses" style="height:48px;"></div>
+          <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:0;">
+            <div style="font-size:10px; font-weight:600; color:#93c5fd; display:flex; align-items:center; gap:8px;" id="p2LostHeader">
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-mineral-nobg.png" style="width:11px; height:11px;" alt="Minerals"/> 0</span>
+              <span style="display:inline-flex; align-items:center; gap:3px;"><img src="/assets/icons/icon-gas-terran-nobg.png" style="width:11px; height:11px;" alt="Gas"/> 0</span>
+              <span style="color:var(--text-muted); font-weight:400;">(Total: 0)</span>
+            </div>
+            <div class="cards-scroll-wrap" id="lostP2Cards">
+              <span style="font-size:11px; color:var(--text-muted); font-style:italic;">No losses</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. REVERSE SAE FEATURE ATTRIBUTION PANEL -->
+      <div class="sae-attr-box" id="reverseSaePanel">
+        <div class="sae-attr-header">
+          <span id="reverseSaeTitle" style="font-weight:700; font-size:11.5px; color:#e0e7ff;">Reverse SAE Feature Attribution</span>
+          <button id="btnDeselectGroup" style="padding:1px 6px; font-size:10px; display:none;" class="danger">✕ Deselect Group</button>
+        </div>
+        <div id="reverseSaeBody" style="font-size:11px; color:var(--text-secondary); line-height:1.4;">
+          Click any unit or structure card above (e.g. <b>56 SCVs</b> or <b>6 Marauders</b>) to highlight them across the battlefield and inspect which Sparse Autoencoder features activate the strongest.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+  <script defer src="/ui/js/state.js"></script>
+  <script defer src="/ui/js/api.js"></script>
+  <script defer src="/ui/js/selection.js"></script>
+  <script defer src="/ui/js/render.js"></script>
+  <script defer src="/ui/js/hud.js"></script>
+  <script defer src="/ui/js/map_canvas.js"></script>
+  <script defer src="/ui/js/timeline.js"></script>
+  <script defer src="/ui/js/events.js"></script>
+</body>
+</html>

@@ -13,18 +13,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from cosmicstar.worldmodel import physics_data
-from cosmicstar.worldmodel.vocab import Vocab
+from cosmicstar.worldmodel.core import Vocab, paths
+from cosmicstar.worldmodel.data import EXCLUDED, game_store as physics_data
 
-MOVING_NEUTRALS = (321, 322, 335, 336, 337, 612, 659, 660, 661)
+MOVING_NEUTRALS = physics_data.MOVING_NEUTRALS
 LARVA = 151
-EXCLUDED = (
-    "982fc2368b80adb3",
-    "1ff02cd0dd2751fa",
-    "c50626c6c77288c6",
-    "5bf221dbd7045ab1",
-    "d2de5d4aef655894",
-)
 I = {n: i for i, n in enumerate(physics_data.RAW_NUMS)}
 
 
@@ -119,13 +112,13 @@ def measure(w, speed=None, acc=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", default="data/games_arrow")
-    ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
+    ap.add_argument("--vocab", default=paths.VOCAB_PATH)
     ap.add_argument("--split", default="data/games/splits/default.json")
     ap.add_argument("--windows", type=int, default=300)
     ap.add_argument("--frames", type=int, default=56)
     ap.add_argument("--workers", type=int, default=8)
     args = ap.parse_args()
-    vocab = Vocab(json.load(open(args.vocab)))
+    vocab = Vocab.load(args.vocab)
     split = json.load(open(args.split))
     rng = np.random.default_rng(0)
     sets = {

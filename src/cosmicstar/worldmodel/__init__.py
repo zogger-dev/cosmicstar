@@ -1,4 +1,13 @@
-"""SC2 world model: replay state and action tokenizers, the direct state-space simulator
-(direct.py, scripts/train_direct.py) and its latent (latent.py). Data comes from
-scripts/extract_states.py and scripts/extract_actions.py (one .npz per replay and view).
-"""
+"""CosmicStar hierarchical StarCraft II world model (`core`, `nn`, `data`, `l0_physics`, `l1_tactical`, `l2_observer`, `inspector`)."""
+
+from . import core, data, inspector, l0_physics, l1_tactical, l2_observer, nn
+
+__all__ = [
+    "core",
+    "data",
+    "inspector",
+    "l0_physics",
+    "l1_tactical",
+    "l2_observer",
+    "nn",
+]

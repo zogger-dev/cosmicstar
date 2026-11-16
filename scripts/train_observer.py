@@ -27,39 +27,28 @@ import json
 import math
 import os
 import queue
-import sys
 import threading
 import time
-
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
-os.environ.setdefault("TRITON_DEFAULT_FP_FUSION", "1")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 import numpy as np
 import pyarrow as pa
 import torch
 import torch.multiprocessing as mp
-import train_physics as tp
 
-from cosmicstar.worldmodel import energy_data as ED
-from cosmicstar.worldmodel import l1_chunk_decoder as LCD
-from cosmicstar.worldmodel import observer_l2 as OL2
-from cosmicstar.worldmodel import physics_data as PD
-from cosmicstar.worldmodel import squad_pooler as SP
-from cosmicstar.worldmodel.action_tokens import ActionVocab
-from cosmicstar.worldmodel.vocab import Vocab
+from cosmicstar.worldmodel.core import Tables, Vocab, paths, runtime
+from cosmicstar.worldmodel.data import ActionVocab, game_store as PD, splits as tp
+from cosmicstar.worldmodel.l1_tactical import chunk_decoder as LCD, frames as ED, squad_pooler as SP
+from cosmicstar.worldmodel.l2_observer import model as _ol2_mod
+from cosmicstar.worldmodel import l2_observer as OL2
+
+runtime.configure_torch_env()
 
 CACHE_SCHEMA_VERSION = 3
 
 
 def _trim_batch(b: dict) -> dict:
     """Trims collated batch dict to keys required by `Frames`, `Perceiver`, `Posterior`, and `L1ChunkFlowDecoder`."""
-    out = {k: b[k] for k in ED.BATCH_KEYS if k in b}
+    out = {k: b[k] for k in PD.BATCH_KEYS if k in b}
     if "slot_reg" in out:
         out["slot_reg"] = out["slot_reg"][..., :1, :].contiguous()
     if "slot_abil" in out:
@@ -175,7 +164,7 @@ def _extract_one_game_np(gid: str, base: str, vocab: Vocab, avocab: ActionVocab,
 
 def _bounded_extract_worker(in_q, out_q, vocab_path: str):
     torch.set_num_threads(1)
-    vocab = Vocab(json.load(open(vocab_path)))
+    vocab = Vocab.load(vocab_path)
     avocab = ActionVocab()
     while True:
         item = in_q.get()
@@ -224,7 +213,7 @@ def gpu_encode_game_batches(
 
     while cpu_payload["batches"]:
         chunk = cpu_payload["batches"].pop(0)
-        b = ED.to_device(chunk["batch"], device)
+        b = PD.to_device(chunk["batch"], device)
         win_meta = chunk["win_meta"]
         del chunk
         B_c = b["mask"].shape[0]
@@ -477,7 +466,7 @@ def _ensure_static_map_chw(sm: dict[str, torch.Tensor]) -> None:
 def _live_worker_loop(req_q, out_q, bases: dict[str, str], vocab_path: str):
     """Extracts `49`-frame (`step = 7` loops) live windows for joint `L1 + Perceiver + L1ChunkFlowDecoder + L2` co-training."""
     torch.set_num_threads(1)
-    vocab = Vocab(json.load(open(vocab_path)))
+    vocab = Vocab.load(vocab_path)
     avocab = ActionVocab()
     game_lru: dict[str, PD.Game] = {}
     lru_order: list[str] = []
@@ -790,15 +779,15 @@ def refresh_cache_subset(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--games", default="data/games_v3")
-    ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
-    ap.add_argument("--split", default="data/games/splits/default.json")
-    ap.add_argument("--rules_tables", default="data/worldmodel/rulesets.json")
+    ap.add_argument("--games", default=paths.GAMES_DIR)
+    ap.add_argument("--vocab", default=paths.VOCAB_PATH)
+    ap.add_argument("--split", default=paths.SPLITS_PATH)
+    ap.add_argument("--rules_tables", default=paths.RULESETS_PATH)
     ap.add_argument("--base_build", type=int, default=94137)
     ap.add_argument("--patch", default="", help="Empty = all 932 games across all 5 builds!")
     ap.add_argument(
         "--l1_ckpt",
-        default="data/worldmodel/runs/energy_r16_zerogram/model_step44285.pt",
+        default=paths.DEFAULT_L1_CKPT,
     )
     ap.add_argument("--cache_dir", default="data/worldmodel/observer_cache_v2")
     ap.add_argument("--run", default="data/worldmodel/runs/observer_v2")
@@ -831,8 +820,8 @@ def main():
     os.makedirs(args.run, exist_ok=True)
     dev = torch.device("cuda")
 
-    vocab = Vocab(json.load(open(args.vocab)))
-    tables = ED.Tables(args.base_build, rulesets=args.rules_tables)
+    vocab = Vocab.load(args.vocab)
+    tables = Tables(args.base_build, rulesets=args.rules_tables)
     split = json.load(open(args.split))
 
     train_ids = set(split["train"]) - set(tp.EXCLUDED)
@@ -994,7 +983,7 @@ def main():
                 pending_wb = None
 
                 if b_live_cpu is not None and len(live_metas) > 0:
-                    b_live = ED.to_device(b_live_cpu, dev)
+                    b_live = PD.to_device(b_live_cpu, dev)
                     live_b_idx = [m[0] for m in live_metas]
                     st_live_map = dict(
                         static_grid_chw=st_b["static_grid_chw"][live_b_idx],

@@ -1,123 +1,53 @@
-"""Trains the physics model (worldmodel/physics.py, DESIGN_physics.md) on the Arrow
-store.
+"""Trains the L0 causal tubelet physics simulator (`cosmicstar.worldmodel.l0_physics`).
 
-    python scripts/train_physics.py --seqs 6 --frames 56 --accum 4 --steps 40000
-    python scripts/train_physics.py --measure      # peak memory at the largest windows, a few steps, nothing saved
-    python scripts/train_physics.py --resume RUN/model_step2000.pt --run RUN              # carries on from a checkpoint
-    python scripts/train_physics.py --resume RUN/model_step2000.pt --run RUN --eval_only  # the full evaluation of a checkpoint, then exits
-
-Quick validation every --val_every updates goes to the log. The full evaluation pauses
-training after each checkpoint, and goes to the log and RUN/eval.jsonl.
+    PYTHONPATH=src .venv/bin/python scripts/train_physics.py --seqs 6 --frames 224 --accum 4 --steps 10000
+    PYTHONPATH=src .venv/bin/python scripts/train_physics.py --measure --typical
+    PYTHONPATH=src .venv/bin/python scripts/train_physics.py --resume RUN/model_step2000.pt --run RUN
+    PYTHONPATH=src .venv/bin/python scripts/train_physics.py --resume RUN/model_step2000.pt --run RUN --eval_only
 """
 
-import _thread
+from __future__ import annotations
+
 import argparse
 import collections
 import gc
-import glob
 import json
 import math
 import os
 import queue
 import signal
 import subprocess
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-
-# the cap below needs segments that grow; PyTorch 2.15's pool of compile workers crashes
-# on this machine, and one thread avoids it
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 
 import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-from cosmicstar.worldmodel import (
-    entity_encoder,
-    epochs,
-    physics,
-    physics_data,
-    statefile,
-)
-from cosmicstar.worldmodel.action_tokens import ActionVocab
-from cosmicstar.worldmodel.vocab import Vocab
-
-TOKENS_PER_WINDOW = 259  # beyond its rows: 3 globals and 256 cells
-EXCLUDED = (
-    "982fc2368b80adb3",
-    "1ff02cd0dd2751fa",
-    "c50626c6c77288c6",
-    "5bf221dbd7045ab1",
-    "d2de5d4aef655894",
+from cosmicstar.worldmodel import l0_physics as physics
+from cosmicstar.worldmodel.core import paths, runtime
+from cosmicstar.worldmodel.core.vocab import Vocab
+from cosmicstar.worldmodel.data import epochs, game_store as physics_data
+from cosmicstar.worldmodel.data.action_tokens import ActionVocab
+from cosmicstar.worldmodel.data.splits import (
+    EXCLUDED,
+    TOKENS_PER_WINDOW,
+    Games,
+    fixed_windows,
+    largest_windows,
+    map_of,
+    of_patch,
 )
 
-
-def map_of(base):
-    """A game's map: its folder in the games tree, the map's hash."""
-    return os.path.basename(os.path.dirname(base))
+runtime.configure_torch_env()
 
 
-def patch_of(base):
-    """A game's patch, e.g. 5.0.14, from its replay's metadata."""
-    return json.loads(str(statefile.load(f"{base}.p1.cst")["meta"])).get("game_version")
-
-
-def of_patch(bases, patch):
-    """The games of one patch (patch empty: all). Rules change between patches and the
-    model has no rules input yet, so training mixing two patches would learn a blend of
-    both: Ghost life, Spire cost and the like."""
-    return {g: b for g, b in bases.items() if not patch or patch_of(b) == patch}
-
-
-class Games:
-    """Open games, least recently used closed. Reads windows on worker threads."""
-
-    def __init__(self, bases, vocab, avocab, keep=48, map_ids=None, compact=True):
-        self.bases, self.vocab, self.avocab, self.keep, self.map_ids, self.compact = (
-            bases,
-            vocab,
-            avocab,
-            keep,
-            map_ids or {},
-            compact,
-        )
-        self.open, self.lock = collections.OrderedDict(), threading.Lock()
-
-    def get(self, gid):
-        with self.lock:
-            g = self.open.get(gid)
-            if g is not None:
-                self.open.move_to_end(gid)
-                return g
-        g = physics_data.Game(self.bases[gid], self.vocab)
-        g._load_actions(self.avocab)
-        g.map_id = self.map_ids.get(map_of(self.bases[gid]), 0)
-        with self.lock:
-            self.open[gid] = g
-            while len(self.open) > self.keep:
-                self.open.popitem(last=False)
-        return g
-
-    def read(self, gid, t0, L, swap):
-        g = self.get(gid)
-        t0 = min(t0, g.F - L - 1) if t0 >= 0 else np.random.randint(0, max(1, g.F - L))
-        return g.window(t0, L, swap=swap, compact=self.compact)
-
-
-def save_checkpoint(run, model, opt, step_num):
-    """Atomically write a model + optimizer checkpoint via temporary file + rename."""
-    os.makedirs(run, exist_ok=True)
-    dst = f"{run}/model_step{step_num}.pt"
-    tmp = f"{run}/.model_step{step_num}.pt.tmp"
-    torch.save(
+def save_checkpoint(run: str, model, opt, step_num: int) -> str:
+    return runtime.atomic_save_checkpoint(
+        f"{run}/model_step{step_num}.pt",
         dict(model=model.state_dict(), opt=opt.state_dict(), step=step_num),
-        tmp,
     )
-    os.replace(tmp, dst)
-    return dst
 
 
 def warm_compile(model, games, ids, L):
@@ -143,53 +73,6 @@ def warm_compile(model, games, ids, L):
     gc.freeze()
 
 
-def host_mem_info():
-    """Return (host_used_gb, swap_free_mb) from /proc/meminfo (includes /dev/shm)."""
-    vals = {}
-    with open("/proc/meminfo") as f:
-        for line in f:
-            parts = line.split()
-            if len(parts) >= 2:
-                vals[parts[0].rstrip(":")] = int(parts[1])
-                if "MemAvailable" in vals and "SwapFree" in vals:
-                    break
-    used_gb = (vals["MemTotal"] - vals["MemAvailable"]) / (1024.0 * 1024.0)
-    swap_free_mb = vals["SwapFree"] / 1024.0
-    return used_gb, swap_free_mb
-
-
-def start_mem_watchdog(max_ram_gb, procs_ref, stop_event):
-    """Poll /proc/meminfo every 0.5 s; kill workers and abort cleanly well before OOM."""
-
-    def watch():
-        while not stop_event.is_set():
-            used_gb, swap_mb = host_mem_info()
-            if used_gb >= max_ram_gb or (
-                used_gb >= max(44.0, max_ram_gb - 2.0) and swap_mb < 32.0
-            ):
-                stop_event.set()
-                for p in list(procs_ref):
-                    if p.is_alive():
-                        p.kill()
-                print(
-                    json.dumps(
-                        dict(
-                            abort="memory_watchdog",
-                            ram_used_gb=round(used_gb, 2),
-                            max_ram_gb=max_ram_gb,
-                            swap_free_mb=round(swap_mb, 1),
-                        )
-                    ),
-                    file=sys.stderr,
-                    flush=True,
-                )
-                _thread.interrupt_main()
-                time.sleep(2.0)
-                os._exit(2)
-            time.sleep(0.5)
-
-    threading.Thread(target=watch, daemon=True).start()
-
 
 def _worker_loop(in_q, out_q, bases, vocab_path, map_ids, L):
     """Worker process: reads and collates assigned passes with a small game cache and
@@ -197,7 +80,7 @@ def _worker_loop(in_q, out_q, bases, vocab_path, map_ids, L):
     SIGINT/SIGTERM so the main process can finish its current step and checkpoint."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    vocab = Vocab(json.load(open(vocab_path)))
+    vocab = Vocab.load(vocab_path)
     games = Games(bases, vocab, ActionVocab(), keep=4, map_ids=map_ids, compact=True)
     pool = ThreadPoolExecutor(2)
     while True:
@@ -262,7 +145,7 @@ def batches(
         while not stop.is_set():
             with in_flight_lock:
                 cur = in_flight[0]
-            used_gb = host_mem_info()[0]
+            used_gb = runtime.host_mem_info()[0]
             limit = (
                 cap
                 if used_gb < ram_soft_gb
@@ -372,41 +255,12 @@ def batches(
                 p.kill()
 
 
-def largest_windows(bases, L, n):
-    """(game, frame) of the windows with the most rows alive across all games: the
-    memory worst case."""
-    best = []
-    for gid, base in bases.items():
-        ix = np.load(base + ".index.npz")
-        F_ = int(ix["F"])
-        d = np.zeros(F_ + 2, np.int64)
-        for s in physics_data.SOURCES:
-            np.add.at(d, ix[f"first{s}"], 1)
-            np.add.at(d, ix[f"last{s}"] + 1, -1)
-        c = np.cumsum(d)[:F_]
-        t = int(np.argmax(c))
-        best.append((int(c[t]), gid, max(0, min(t - L // 2, F_ - L - 1))))
-    best.sort(reverse=True)
-    return [(g, t) for _, g, t in best[:n]], best[:n]
-
-
-def fixed_windows(bases, n, L, seed=0):
-    """n (game, frame, swap), the same every call, so numbers compare across updates.
-    Games taken in turn from a shuffled list."""
-    rng = np.random.default_rng(seed)
-    ids = [sorted(bases)[i] for i in rng.permutation(len(bases))]
-    out = []
-    for i in range(n):
-        gid = ids[i % len(ids)]
-        F_ = int(np.load(bases[gid] + ".index.npz")["F"])
-        out.append((gid, int(rng.integers(0, max(1, F_ - L - 1))), bool(i % 2)))
-    return out
 
 
 def load_init_weights(model, path):
     """Warm-start compatible weights from `path` (handling _orig_mod, map_dec channel
     shrinkage, and REG pruning), returning newly initialized parameter names."""
-    raw_sd = entity_encoder.upgrade_state(torch.load(path, map_location="cpu")["model"])
+    raw_sd = torch.load(path, map_location="cpu")["model"]
     clean_raw = {
         k.replace("._orig_mod.", ".").removeprefix("_orig_mod."): v
         for k, v in raw_sd.items()
@@ -569,14 +423,14 @@ def position_stats(parts):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--games", default="data/games_v3")
-    ap.add_argument("--vocab", default="data/worldmodel/frame_cache_seq/vocab.json")
+    ap.add_argument("--games", default=paths.GAMES_DIR)
+    ap.add_argument("--vocab", default=paths.VOCAB_PATH)
     ap.add_argument(
         "--patch",
         default="5.0.14",
         help="train and validate on one patch's games (empty: every patch)",
     )
-    ap.add_argument("--split", default="data/games/splits/default.json")
+    ap.add_argument("--split", default=paths.SPLITS_PATH)
     ap.add_argument("--seqs", type=int, default=16, help="most windows in a pass")
     ap.add_argument(
         "--tokens",
@@ -725,7 +579,7 @@ def main():
     args = ap.parse_args()
     t_start = time.time()  # --hours counts from here
     watchdog_procs, watchdog_stop = [], threading.Event()
-    start_mem_watchdog(args.ram_gb, watchdog_procs, watchdog_stop)
+    runtime.start_mem_watchdog(args.ram_gb, watchdog_procs, watchdog_stop)
 
     if torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(
@@ -734,7 +588,7 @@ def main():
                 args.gpu_gb * 2**30 / torch.cuda.get_device_properties(0).total_memory,
             )
         )
-    vocab, avocab = Vocab(json.load(open(args.vocab))), ActionVocab()
+    vocab, avocab = Vocab.load(args.vocab), ActionVocab()
     split = json.load(open(args.split))
     usable = {
         g: b
@@ -842,22 +696,7 @@ def main():
     new_param_names = set()
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
-        old_sd = ck["model"]
-        ck["model"] = entity_encoder.upgrade_state(old_sd)
-        if ck["model"].keys() != old_sd.keys():  # saved before the entity encoders
-            buffers = {n for n, _ in model.named_buffers()}
-            ck["opt"] = entity_encoder.upgrade_optimizer(
-                ck["opt"],
-                [
-                    k
-                    for k in old_sd
-                    if not k.startswith("teacher.")
-                    and entity_encoder.upgrade_state({k: 0}).keys() - buffers
-                ],
-                model,
-            )
-        del old_sd
-        model.load_state_dict(ck["model"])
+        model.load_state_dict(runtime.clean_state_dict(ck["model"]))
         start = ck["step"]
     elif args.init_from:
         new_param_names = load_init_weights(model, args.init_from)
@@ -1004,7 +843,7 @@ def main():
             opt.zero_grad(set_to_none=True)
             completed_step = step + 1
             if args.measure or step % 20 == 0 or stop_sig[0] is not None:
-                used_ram_gb, _ = host_mem_info()
+                used_ram_gb, _ = runtime.host_mem_info()
                 rec = dict(
                     step=step,
                     s=round(time.time() - t0, 1),

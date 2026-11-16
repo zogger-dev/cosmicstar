@@ -572,3 +572,50 @@ def keep_engine_windows_minimized(interval=5.0):
     t.handler = handler  # keeps the callback alive
     t.start()
     return t
+
+
+def run_config_for(info: dict):
+    """Return `(run_config, is_current_build)` for replay metadata `info`."""
+    from pysc2 import run_configs
+    from pysc2.run_configs import lib as rcl
+
+    current = info["base_build"] == max(installed_builds())
+    if current:
+        return run_configs.get(), True
+    return (
+        run_configs.get(
+            version=rcl.Version(
+                info["game_version"],
+                info["base_build"],
+                info["data_version"],
+                "SC2_x64.exe",
+            )
+        ),
+        False,
+    )
+
+
+def resolve_map_path(
+    map_hash: str,
+    handles=None,
+    cache_dirs: list[str] | None = None,
+    fetch_missing: bool = True,
+) -> str | None:
+    """Locate cached `.s2ma` map archive, optionally fetching missing handles from depot."""
+    from . import depot
+
+    cdirs = cache_dirs or battlenet_cache_dirs(
+        sc2_install_dir() or r"C:\Program Files (x86)\StarCraft II"
+    )
+    p = depot.find_cached(cdirs, map_hash, "s2ma")
+    if (
+        handles
+        and fetch_missing
+        and (
+            p is None
+            or any(depot.find_cached(cdirs, h, ext) is None for ext, h in handles)
+        )
+    ):
+        depot.ensure_cached(handles, cdirs, log=lambda m: print(m, flush=True))
+        p = depot.find_cached(cdirs, map_hash, "s2ma")
+    return p
